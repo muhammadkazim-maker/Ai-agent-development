@@ -1,0 +1,356 @@
+<!-- Mirror of public/index.html bundled for Android WebView asset loading -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>JARVIS Autonomous OS Controller</title>
+  <style>
+    :root {
+      --bg: #030712;
+      --card-bg: #080f1e;
+      --border: #132238;
+      --cyan: #00e5ff;
+      --emerald: #10b981;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+    .stage-container { display: none; width: 100vw; height: 100vh; }
+    .stage-container.active { display: flex; flex-direction: column; }
+    #stage-1 { padding: 24px; overflow-y: auto; max-width: 680px; margin: 0 auto; }
+    .header-tag { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 800; color: var(--cyan); letter-spacing: 2px; }
+    .header-title { font-size: 26px; font-weight: 900; margin: 8px 0 4px; }
+    .header-subtitle { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
+    .perm-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 12px; }
+    .perm-card.ready { border-color: rgba(16, 185, 129, 0.4); }
+    .perm-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .perm-info h4 { font-size: 14px; font-weight: 700; }
+    .perm-info p { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+    .btn-action { background: rgba(0, 229, 255, 0.12); color: var(--cyan); border: 1px solid var(--cyan); padding: 8px 14px; border-radius: 8px; font-size: 11px; font-weight: 700; cursor: pointer; }
+    .btn-action.done { background: rgba(16, 185, 129, 0.15); color: var(--emerald); border-color: var(--emerald); }
+    .btn-primary-gate { background: var(--cyan); color: #000; border: none; padding: 14px; border-radius: 12px; font-size: 14px; font-weight: 800; letter-spacing: 1px; cursor: pointer; margin-top: 16px; }
+    #stage-2 { justify-content: space-between; align-items: center; padding: 32px 24px; }
+    .stage-topbar { width: 100%; display: flex; justify-content: space-between; align-items: center; }
+    .reactor-box { display: flex; flex-direction: column; align-items: center; cursor: pointer; }
+    .reactor-canvas-wrap { position: relative; width: 220px; height: 220px; display: flex; align-items: center; justify-content: center; }
+    .reactor-core-label { position: absolute; text-align: center; color: #040a18; font-weight: 900; letter-spacing: 2px; font-size: 18px; }
+    .voice-pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 12px; }
+    .voice-pill { padding: 6px 14px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 20px; font-size: 12px; color: var(--text); cursor: pointer; }
+    .voice-pill.selected { background: var(--cyan); color: #000; font-weight: 700; border-color: var(--cyan); }
+    #stage-3 { position: relative; }
+    .main-window-viewer { flex: 1; display: flex; flex-direction: column; padding: 16px; height: 100%; }
+    .active-app-bar { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+    .viewport-canvas-box { flex: 1; background: #01040a; border: 1px solid var(--border); border-radius: 16px; margin: 10px 0; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    .floating-subtitles { position: absolute; bottom: 84px; left: 16px; right: 120px; background: rgba(8, 15, 30, 0.92); border: 1px solid rgba(0, 229, 255, 0.3); border-radius: 12px; padding: 10px 14px; font-size: 12px; backdrop-filter: blur(8px); }
+    .corner-orb {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 92px;
+      height: 92px;
+      border-radius: 50%;
+      z-index: 99999;
+      cursor: grab;
+      touch-action: none;
+      box-shadow: 0 0 30px rgba(0, 229, 255, 0.5), inset 0 0 15px rgba(0, 229, 255, 0.6);
+    }
+  </style>
+</head>
+<body>
+  <div id="stage-1" class="stage-container active">
+    <div>
+      <div class="header-tag">● TONY STARK JARVIS OS</div>
+      <h1 class="header-title">System Gatekeeper</h1>
+      <p class="header-subtitle">Zero-Touch Rootless God-Mode & Biometric Vault Verification</p>
+    </div>
+    <div class="perm-card" id="card-bridge">
+      <div class="perm-header">
+        <div class="perm-info">
+          <h4>1. Shizuku / Local ADB Shell Bridge</h4>
+          <p>Rootless God-Mode on <code>http://127.0.0.1:8765</code> for raw OS commands</p>
+        </div>
+        <button class="btn-action" onclick="pingAdbBridge()">Check Bridge</button>
+      </div>
+      <div style="margin-top: 10px;">
+        <button class="btn-action" style="width: 100%;" onclick="copyPythonOneLiner()">
+          📋 Copy 1-Click Python Shizuku/ADB Bridge Command
+        </button>
+      </div>
+    </div>
+    <div class="perm-card" id="card-mic">
+      <div class="perm-header">
+        <div class="perm-info">
+          <h4>2. Microphone & Audio Stream</h4>
+          <p>Real-time 16kHz duplex audio for continuous Live session</p>
+        </div>
+        <button class="btn-action" onclick="grantMicPermission()">Grant Mic</button>
+      </div>
+    </div>
+    <div class="perm-card" id="card-screen">
+      <div class="perm-header">
+        <div class="perm-info">
+          <h4>3. Continuous Screen Vision</h4>
+          <p>Streams foreground apps into Gemini Multimodal session</p>
+        </div>
+        <button class="btn-action" onclick="grantScreenVision()">Start Screen Stream</button>
+      </div>
+    </div>
+    <div class="perm-card" id="card-contacts">
+      <div class="perm-header">
+        <div class="perm-info">
+          <h4>4. Full Contacts Synchronization</h4>
+          <p>Syncs WhatsApp, phone & social contacts into permanent storage</p>
+        </div>
+        <button class="btn-action" onclick="syncContacts()">Sync Contacts</button>
+      </div>
+    </div>
+    <div class="perm-card" id="card-vault">
+      <div class="perm-info" style="margin-bottom: 10px;">
+        <h4>5. Biometric Fingerprint & Master PIN Vault</h4>
+        <p>Enables hands-free phone unlock without touching screen</p>
+      </div>
+      <input type="password" id="input-master-pin" placeholder="Device Master PIN" value="1234" style="width: 100%; padding: 10px; background: #040812; border: 1px solid var(--border); color: #fff; border-radius: 8px; margin-bottom: 8px;">
+      <input type="text" id="input-voice-unlock" placeholder="Secret Voice Unlock Phrase" value="Jarvis unlock" style="width: 100%; padding: 10px; background: #040812; border: 1px solid var(--border); color: #fff; border-radius: 8px; margin-bottom: 10px;">
+      <button class="btn-action" style="width: 100%;" onclick="enrollBiometrics()">Verify Fingerprint (WebAuthn)</button>
+    </div>
+    <button class="btn-primary-gate" onclick="completePermissionsAndProceed()">GRANT ALL & PROCEED TO START</button>
+  </div>
+
+  <div id="stage-2" class="stage-container">
+    <div class="stage-topbar">
+      <div class="header-tag">● JARVIS OS ONLINE</div>
+      <button class="btn-action" onclick="showStage(1)">⚙ Settings / Bridge</button>
+    </div>
+    <div class="reactor-box" onclick="startJarvisAlwaysOnline()">
+      <div class="reactor-canvas-wrap">
+        <canvas id="stage2-reactor-canvas" width="220" height="220"></canvas>
+        <div class="reactor-core-label">
+          <div style="font-size: 24px;">▶</div>
+          <div>START</div>
+        </div>
+      </div>
+      <h2 style="font-size: 22px; font-weight: 900; margin-top: 20px; letter-spacing: 2px;">START JARVIS</h2>
+      <p style="font-size: 11px; color: var(--cyan); letter-spacing: 1px; margin-top: 4px;">ALWAYS-ONLINE CONTINUOUS LIVE ENGINE</p>
+    </div>
+    <div style="width: 100%; max-width: 420px; text-align: center;">
+      <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px; font-weight: 700;">VOICE PROFILE</p>
+      <div class="voice-pills">
+        <div class="voice-pill selected" onclick="selectVoice('Aoede', this)">Aoede</div>
+        <div class="voice-pill" onclick="selectVoice('Puck', this)">Puck</div>
+        <div class="voice-pill" onclick="selectVoice('Charon', this)">Charon</div>
+        <div class="voice-pill" onclick="selectVoice('Kore', this)">Kore</div>
+        <div class="voice-pill" onclick="selectVoice('Fenrir', this)">Fenrir</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="stage-3" class="stage-container">
+    <div class="main-window-viewer">
+      <div class="active-app-bar">
+        <div><span style="color: var(--emerald);">●</span> <strong id="hud-status">LISTENING: Always-Online Continuous Mode</strong></div>
+        <div id="hud-coordinates" style="color: var(--cyan); font-family: monospace;">HUD: (540, 1200)</div>
+      </div>
+      <div class="viewport-canvas-box" id="viewport-box">
+        <div style="color: var(--text-muted); font-size: 12px; text-align: center;">
+          <p style="color: var(--cyan); font-weight: 800; margin-bottom: 4px;">LIVE MULTI-APP OBSERVATION ACTIVE</p>
+          <p>Touch screen to inspect coordinate HUD or speak hands-free commands</p>
+        </div>
+      </div>
+      <div class="floating-subtitles" id="subtitles-box">
+        <div style="color: var(--text-muted);" id="user-sub">Say anything or ask to send a WhatsApp / run shell...</div>
+        <div style="color: var(--cyan); font-weight: 700; margin-top: 4px;" id="ai-sub">JARVIS: Ready for hands-free autonomous control.</div>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn-action" onclick="showStage(2)">⏹ Stop Session</button>
+      </div>
+    </div>
+    <canvas id="corner-orb-canvas" class="corner-orb" width="92" height="92"></canvas>
+  </div>
+
+  <script>
+    const PYTHON_ONE_LINER = `python3 -c "import http.server, subprocess, json; class H(http.server.BaseHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Access-Control-Allow-Private-Network', 'true')
+        super().end_headers()
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.end_headers()
+    def do_GET(self):
+        if self.path == '/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{\\"status\\":\\"OK\\",\\"service\\":\\"JARVIS_ADB_BRIDGE\\",\\"port\\":8765}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        data = self.rfile.read(length)
+        cmd = json.loads(data).get('cmd', '') if data else ''
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({'ok': res.returncode==0, 'output': res.stdout + res.stderr, 'exitCode': res.returncode}).encode())
+http.server.HTTPServer(('127.0.0.1', 8765), H).serve_forever()"`;
+
+    function copyPythonOneLiner() {
+      navigator.clipboard.writeText(PYTHON_ONE_LINER);
+      alert("Copied 1-Click Shizuku / Termux Bridge Command for Port 8765!");
+    }
+
+    async function pingAdbBridge() {
+      try {
+        const res = await fetch("http://127.0.0.1:8765/status");
+        if (res.ok) alert("Connected to Shizuku/ADB Bridge on port 8765!");
+      } catch (e) {
+        alert("Bridge not detected on http://127.0.0.1:8765. Run command in Termux first.");
+      }
+    }
+
+    function showStage(n) {
+      document.querySelectorAll(".stage-container").forEach(el => el.classList.remove("active"));
+      document.getElementById("stage-" + n).classList.add("active");
+    }
+
+    function completePermissionsAndProceed() {
+      localStorage.setItem("jarvis_permissions_complete", "true");
+      showStage(2);
+    }
+
+    function selectVoice(name, el) {
+      document.querySelectorAll(".voice-pill").forEach(p => p.classList.remove("selected"));
+      el.classList.add("selected");
+    }
+
+    let visionSamplerIntervalId = null;
+
+    /**
+     * Samples the screen vision stream at 1 FPS and downscales to 512x512 resolution
+     * before sending to the Gemini Live session, minimizing bandwidth and processing lag.
+     */
+    function sampleScreenVisionStream(videoElement, fps = 1, targetSize = 512) {
+      if (visionSamplerIntervalId) clearInterval(visionSamplerIntervalId);
+
+      const offscreenCanvas = document.createElement("canvas");
+      offscreenCanvas.width = targetSize;
+      offscreenCanvas.height = targetSize;
+      const ctx = offscreenCanvas.getContext("2d", { alpha: false });
+
+      const intervalMs = Math.round(1000 / fps);
+      console.log(`[VisionSampler] Started 1 FPS screen sampling downscaled to ${targetSize}x${targetSize}`);
+
+      visionSamplerIntervalId = setInterval(() => {
+        if (!videoElement || videoElement.paused || videoElement.ended) return;
+
+        ctx.drawImage(videoElement, 0, 0, targetSize, targetSize);
+        const dataUrl = offscreenCanvas.toDataURL("image/jpeg", 0.65);
+        const base64Jpeg = dataUrl.split(",")[1];
+
+        if (window.AndroidBridge && window.AndroidBridge.injectScreenFrame) {
+          window.AndroidBridge.injectScreenFrame(base64Jpeg);
+        }
+      }, intervalMs);
+      return visionSamplerIntervalId;
+    }
+
+    async function grantScreenVision() {
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: 1, max: 1 } }
+        });
+        const video = document.createElement("video");
+        video.srcObject = stream;
+        video.muted = true;
+        await video.play();
+        sampleScreenVisionStream(video, 1, 512);
+        alert("Screen Vision streaming active at 1 FPS (512x512 downscaled)!");
+      } catch (e) {
+        console.warn("Screen share prompt cancelled: ", e);
+      }
+    }
+
+    function startJarvisAlwaysOnline() {
+      showStage(3);
+    }
+
+    // Draggable Orb State with `sensitivity` velocity parameter & magnetic snap-to-edge
+    const webOrb = document.getElementById("corner-orb-canvas");
+    const draggableOrbState = {
+      sensitivity: parseFloat(localStorage.getItem("jarvis_orb_sensitivity") || "0.5"),
+      isDragging: false,
+      x: window.innerWidth - 112,
+      y: window.innerHeight - 112,
+      prevClientX: 0,
+      prevClientY: 0,
+      edgeMargin: 16,
+      snapThreshold: 88,
+      get velocityMultiplier() {
+        return 0.85 + Math.max(0.1, Math.min(1.0, this.sensitivity)) * 0.30;
+      }
+    };
+
+    if (webOrb) {
+      webOrb.addEventListener("pointerdown", (e) => {
+        draggableOrbState.isDragging = true;
+        draggableOrbState.prevClientX = e.clientX;
+        draggableOrbState.prevClientY = e.clientY;
+        webOrb.style.transition = "none";
+        webOrb.setPointerCapture(e.pointerId);
+      });
+      webOrb.addEventListener("pointermove", (e) => {
+        if (!draggableOrbState.isDragging) return;
+        const dx = (e.clientX - draggableOrbState.prevClientX) * draggableOrbState.velocityMultiplier;
+        const dy = (e.clientY - draggableOrbState.prevClientY) * draggableOrbState.velocityMultiplier;
+        draggableOrbState.prevClientX = e.clientX;
+        draggableOrbState.prevClientY = e.clientY;
+
+        const maxX = Math.max(0, window.innerWidth - 92);
+        const maxY = Math.max(0, window.innerHeight - 92);
+        draggableOrbState.x = Math.max(0, Math.min(maxX, draggableOrbState.x + dx));
+        draggableOrbState.y = Math.max(0, Math.min(maxY, draggableOrbState.y + dy));
+
+        webOrb.style.left = `${draggableOrbState.x}px`;
+        webOrb.style.top = `${draggableOrbState.y}px`;
+        webOrb.style.right = "auto";
+        webOrb.style.bottom = "auto";
+      });
+      webOrb.addEventListener("pointerup", () => {
+        if (!draggableOrbState.isDragging) return;
+        draggableOrbState.isDragging = false;
+        const maxX = Math.max(0, window.innerWidth - 92);
+        const maxY = Math.max(0, window.innerHeight - 92);
+        const leftTarget = draggableOrbState.edgeMargin;
+        const rightTarget = Math.max(0, maxX - draggableOrbState.edgeMargin);
+        const topTarget = draggableOrbState.edgeMargin;
+        const bottomTarget = Math.max(0, maxY - draggableOrbState.edgeMargin);
+
+        if (Math.abs(draggableOrbState.x - leftTarget) <= Math.abs(rightTarget - draggableOrbState.x)) {
+          draggableOrbState.x = leftTarget;
+        } else {
+          draggableOrbState.x = rightTarget;
+        }
+        if (Math.abs(draggableOrbState.y - topTarget) <= draggableOrbState.snapThreshold) {
+          draggableOrbState.y = topTarget;
+        } else if (Math.abs(bottomTarget - draggableOrbState.y) <= draggableOrbState.snapThreshold) {
+          draggableOrbState.y = bottomTarget;
+        }
+
+        webOrb.style.transition = "left 0.28s cubic-bezier(0.22, 1, 0.36, 1), top 0.28s cubic-bezier(0.22, 1, 0.36, 1)";
+        webOrb.style.left = `${draggableOrbState.x}px`;
+        webOrb.style.top = `${draggableOrbState.y}px`;
+      });
+    }
+
+    if (localStorage.getItem("jarvis_permissions_complete") === "true") {
+      showStage(2);
+    }
+  </script>
+</body>
+</html>

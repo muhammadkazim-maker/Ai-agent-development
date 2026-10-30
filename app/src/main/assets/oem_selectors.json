@@ -1,0 +1,60 @@
+{
+  "version": "2026.10.1",
+  "description": "Updatable OEM Accessibility Selector Packs for non-root UI automation across Samsung, Xiaomi, Oppo, Realme, Vivo, Infinix/Tecno, Pixel, and Motorola.",
+  "oemPacks": {
+    "samsung": {
+      "manufacturer": "Samsung (OneUI)",
+      "wifiToggleIds": ["com.android.settings:id/switch_widget", "android:id/switch_widget"],
+      "wifiPasswordInputIds": ["com.android.settings:id/password", "com.samsung.android.settings.wifi:id/password_edit_text"],
+      "wifiConnectButtonLabels": ["Connect", "کنیکٹ", "Jorein", "Save"],
+      "whatsappSendIds": ["com.whatsapp:id/send", "com.whatsapp.w4b:id/send"],
+      "permissionAllowIds": ["com.android.permissioncontroller:id/permission_allow_button", "com.android.permissioncontroller:id/permission_allow_foreground_only_button"],
+      "autostartSettingsIntent": "com.samsung.android.lool"
+    },
+    "xiaomi": {
+      "manufacturer": "Xiaomi / Redmi / Poco (HyperOS / MIUI)",
+      "wifiToggleIds": ["android:id/checkbox", "com.android.settings:id/switch_widget"],
+      "wifiPasswordInputIds": ["com.android.settings:id/password", "miui:id/password"],
+      "wifiConnectButtonLabels": ["Connect", "OK", "Connect to network", "کنیکٹ"],
+      "whatsappSendIds": ["com.whatsapp:id/send", "com.whatsapp.w4b:id/send"],
+      "permissionAllowIds": ["com.lbe.security.miui:id/permission_allow_button_1", "com.android.permissioncontroller:id/permission_allow_button"],
+      "autostartSettingsIntent": "com.miui.securitycenter"
+    },
+    "oppo_realme": {
+      "manufacturer": "Oppo / Realme / OnePlus (ColorOS / RealmeUI)",
+      "wifiToggleIds": ["com.android.settings:id/switch_widget", "android:id/switch_widget"],
+      "wifiPasswordInputIds": ["com.android.settings:id/password", "com.oplus.wirelesssettings:id/password"],
+      "wifiConnectButtonLabels": ["Connect", "Join", "Save", "کنیکٹ"],
+      "whatsappSendIds": ["com.whatsapp:id/send", "com.whatsapp.w4b:id/send"],
+      "permissionAllowIds": ["com.android.permissioncontroller:id/permission_allow_button"],
+      "autostartSettingsIntent": "com.coloros.safecenter"
+    },
+    "vivo": {
+      "manufacturer": "Vivo / iQOO (FuntouchOS)",
+      "wifiToggleIds": ["android:id/switch_widget", "com.android.settings:id/switch_widget"],
+      "wifiPasswordInputIds": ["com.android.settings:id/password"],
+      "wifiConnectButtonLabels": ["Connect", "OK", "کنیکٹ"],
+      "whatsappSendIds": ["com.whatsapp:id/send", "com.whatsapp.w4b:id/send"],
+      "permissionAllowIds": ["com.android.permissioncontroller:id/permission_allow_button"],
+      "autostartSettingsIntent": "com.iqoo.secure"
+    },
+    "transsion": {
+      "manufacturer": "Infinix / Tecno / Itel (HiOS / XOS)",
+      "wifiToggleIds": ["android:id/switch_widget", "com.android.settings:id/switch_widget"],
+      "wifiPasswordInputIds": ["com.android.settings:id/password"],
+      "wifiConnectButtonLabels": ["Connect", "Connect network", "کنیکٹ"],
+      "whatsappSendIds": ["com.whatsapp:id/send", "com.whatsapp.w4b:id/send"],
+      "permissionAllowIds": ["com.android.permissioncontroller:id/permission_allow_button"],
+      "autostartSettingsIntent": "com.transsion.phonemaster"
+    },
+    "google_motorola": {
+      "manufacturer": "Google Pixel / Motorola (AOSP)",
+      "wifiToggleIds": ["android:id/switch_widget", "com.android.settings:id/switch_widget"],
+      "wifiPasswordInputIds": ["com.android.settings:id/password"],
+      "wifiConnectButtonLabels": ["Connect", "Save", "کنیکٹ"],
+      "whatsappSendIds": ["com.whatsapp:id/send", "com.whatsapp.w4b:id/send"],
+      "permissionAllowIds": ["com.android.permissioncontroller:id/permission_allow_button"],
+      "autostartSettingsIntent": "com.android.settings"
+    }
+  }
+}

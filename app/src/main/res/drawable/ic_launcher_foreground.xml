@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer glowing sound rings -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeAlpha="0.4"
+        android:pathData="M 32,54 A 22,22 0 0,1 76,54" />
+
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#818CF8"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeAlpha="0.7"
+        android:pathData="M 37,54 A 17,17 0 0,1 71,54" />
+
+    <!-- Mic audio soundwave vertical bars -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M 27,47 h 3 v 14 h -3 z" />
+    <path
+        android:fillColor="#818CF8"
+        android:pathData="M 33,42 h 3 v 24 h -3 z" />
+    <path
+        android:fillColor="#818CF8"
+        android:pathData="M 72,42 h 3 v 24 h -3 z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M 78,47 h 3 v 14 h -3 z" />
+
+    <!-- Mic capsule body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 47,38 C 47,34.1 50.1,31 54,31 C 57.9,31 61,34.1 61,38 L 61,54 C 61,57.9 57.9,61 54,61 C 50.1,61 47,57.9 47,54 Z" />
+
+    <!-- Mic cradle arc -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M 43,49 C 43,58 48,67 54,67 C 60,67 65,58 65,49" />
+
+    <!-- Mic stand and base -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M 52.5,67 h 3 v 7 h -3 z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M 45,74 h 18 v 3.5 h -18 z" />
+
+    <!-- Security shield star dot -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M 54,43 a 2.5,2.5 0 1,0 0.001,0 Z" />
+</vector>

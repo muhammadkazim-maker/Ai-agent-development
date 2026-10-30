@@ -1,0 +1,114 @@
+{
+  "version": "2.0",
+  "language": "Urdu / Roman Urdu / English / Code-Mixed",
+  "categories": [
+    {
+      "category": "calls",
+      "entries": [
+        { "urdu": "کال کرو", "roman": ["call karo", "call kro", "call krna", "rabta karo", "phone milao", "number milao"], "english": "make call", "intent": "call" },
+        { "urdu": "کال کاٹو", "roman": ["call kaato", "call band karo", "cut call", "end call", "phone rakho"], "english": "end call", "intent": "end_call" },
+        { "urdu": "کال اٹھاؤ", "roman": ["call uthao", "phone uthao", "answer call", "pick up", "receive karo"], "english": "answer call", "intent": "answer_call" },
+        { "urdu": "سپیکر آن کرو", "roman": ["speaker on karo", "speaker chalao", "loudspeaker on karo", "awaz bahar nikalo"], "english": "speaker on", "intent": "toggle_speaker" },
+        { "urdu": "سپیکر بند کرو", "roman": ["speaker band karo", "speaker off karo"], "english": "speaker off", "intent": "toggle_speaker" },
+        { "urdu": "مسڈ کالز", "roman": ["missed calls", "chhooti hui call", "kis ki call aayi thi"], "english": "missed calls", "intent": "read_notifications" }
+      ]
+    },
+    {
+      "category": "messages",
+      "entries": [
+        { "urdu": "میسج بھیجو", "roman": ["message bhejo", "msg karo", "text bhejo", "sms karo", "message send karo", "sms bhej do"], "english": "send message", "intent": "send_sms" },
+        { "urdu": "واٹس ایپ کرو", "roman": ["whatsapp karo", "whatsapp par bhejo", "watsap kro", "whatsapp message send karo"], "english": "send whatsapp", "intent": "send_whatsapp" },
+        { "urdu": "ٹیلی گرام بھیجو", "roman": ["telegram karo", "telegram bhejo"], "english": "send telegram", "intent": "send_telegram" },
+        { "urdu": "ای میل بھیجو", "roman": ["email bhejo", "mail karo", "email send karo"], "english": "send email", "intent": "send_email" },
+        { "urdu": "میسج پڑھو", "roman": ["message parho", "msg sunao", "read message", "notifications parho", "kya message aaya hai"], "english": "read notifications", "intent": "read_notifications" },
+        { "urdu": "جواب دو", "roman": ["jawab do", "reply karo", "reply bhej do", "wapis message karo"], "english": "reply", "intent": "send_sms" }
+      ]
+    },
+    {
+      "category": "time_and_clock",
+      "entries": [
+        { "urdu": "الارم لگاؤ", "roman": ["alarm lagao", "alarm set karo", "alarm lga do", "alarm lagana", "juga dena", "utha dena"], "english": "set alarm", "intent": "set_alarm" },
+        { "urdu": "ٹائمر لگاؤ", "roman": ["timer lagao", "timer set karo", "countdown shuru karo", "timer chala do"], "english": "set timer", "intent": "set_timer" },
+        { "urdu": "یاد دہانی لگاؤ", "roman": ["reminder lagao", "yaad dilana", "calendar event add karo", "meeting save karo"], "english": "add calendar event", "intent": "add_calendar_event" },
+        { "urdu": "کتنے بجے ہیں", "roman": ["kitne baje hain", "kya waqt hua hai", "time batao", "what is time", "abhi time kya hai"], "english": "what time is it", "intent": "general_chat" },
+        { "urdu": "آج کیا تاریخ ہے", "roman": ["aaj kya tareekh hai", "date batao", "aaj konsa din hai"], "english": "what date is it", "intent": "general_chat" },
+        { "urdu": "صبح", "roman": ["subah", "fajar", "sawere", "morning"], "english": "morning (AM)", "intent": "time_modifier" },
+        { "urdu": "دوپہر", "roman": ["dopahar", "afternoon", "zohar"], "english": "afternoon", "intent": "time_modifier" },
+        { "urdu": "شام", "roman": ["shaam", "sham", "evening", "maghrib", "asr"], "english": "evening (PM)", "intent": "time_modifier" },
+        { "urdu": "رات", "roman": ["raat", "raat ko", "night", "isha"], "english": "night (PM)", "intent": "time_modifier" },
+        { "urdu": "کل", "roman": ["kal", "tomorrow", "yesterday"], "english": "tomorrow/yesterday", "intent": "temporal" },
+        { "urdu": "پرسوں", "roman": ["parson", "day after tomorrow"], "english": "day after tomorrow", "intent": "temporal" }
+      ]
+    },
+    {
+      "category": "settings_and_hardware",
+      "entries": [
+        { "urdu": "فلیش لائٹ آن کرو", "roman": ["flashlight on karo", "torch jalao", "roshni on karo", "batti jalao", "light on karo"], "english": "turn on flashlight", "intent": "toggle_flashlight" },
+        { "urdu": "فلیش لائٹ بند کرو", "roman": ["flashlight band karo", "torch bujhao", "roshni band karo", "batti bujhao", "light off karo"], "english": "turn off flashlight", "intent": "toggle_flashlight" },
+        { "urdu": "وائی فائی آن کرو", "roman": ["wifi on karo", "net on karo", "internet chalao", "wifi kholo"], "english": "turn on wifi", "intent": "toggle_wifi" },
+        { "urdu": "وائی فائی بند کرو", "roman": ["wifi band karo", "net band karo", "wifi off karo"], "english": "turn off wifi", "intent": "toggle_wifi" },
+        { "urdu": "بلوٹوتھ آن کرو", "roman": ["bluetooth on karo", "blutooth chalao", "bluetooth kholo"], "english": "turn on bluetooth", "intent": "toggle_bluetooth" },
+        { "urdu": "بلوٹوتھ بند کرو", "roman": ["bluetooth band karo", "bluetooth off karo"], "english": "turn off bluetooth", "intent": "toggle_bluetooth" },
+        { "urdu": "بیٹری سیور آن کرو", "roman": ["battery saver on karo", "power saving on karo", "battery bachaao"], "english": "turn on battery saver", "intent": "toggle_battery_saver" },
+        { "urdu": "آواز بڑھاؤ", "roman": ["awaaz barhao", "volume up karo", "sound barhao", "unchee awaz", "awaz tez karo"], "english": "volume up", "intent": "adjust_volume" },
+        { "urdu": "آواز کم کرو", "roman": ["awaaz kam karo", "volume down karo", "dheemi karo", "awaz halki karo"], "english": "volume down", "intent": "adjust_volume" },
+        { "urdu": "فون سائلنٹ کرو", "roman": ["silent karo", "phone mute karo", "khamosh karo", "mera phone silent karo", "awaz band karo"], "english": "mute phone", "intent": "adjust_volume" },
+        { "urdu": "روشنی بڑھاؤ", "roman": ["brightness barhao", "screen tez karo", "brightness full karo"], "english": "increase brightness", "intent": "set_brightness" },
+        { "urdu": "روشنی کم کرو", "roman": ["brightness kam karo", "screen dim karo"], "english": "decrease brightness", "intent": "set_brightness" },
+        { "urdu": "فون لاک کرو", "roman": ["phone lock karo", "screen band karo", "lock down", "mobile lock kardo"], "english": "lock screen", "intent": "lock_device" },
+        { "urdu": "فون ان لاک کرو", "roman": ["phone unlock karo", "lock kholo", "screen kholo"], "english": "unlock device", "intent": "unlock_device" },
+        { "urdu": "میرا فون کہاں ہے", "roman": ["mera phone kahan hai", "phone dhoondo", "where are you", "find my phone"], "english": "find phone", "intent": "find_phone" }
+      ]
+    },
+    {
+      "category": "family_and_nicknames",
+      "entries": [
+        { "urdu": "امی", "roman": ["ammi", "ami", "ammi jaan", "valida", "mom", "mama"], "english": "Mom", "intent": "contact_alias" },
+        { "urdu": "ابو", "roman": ["abbu", "abu", "abbu jaan", "walid", "baba", "dad", "papa"], "english": "Dad", "intent": "contact_alias" },
+        { "urdu": "بھائی", "roman": ["bhai", "bhaiya", "bhai jaan", "brother"], "english": "Brother", "intent": "contact_alias" },
+        { "urdu": "باجی", "roman": ["baji", "aapi", "apa", "sister", "behan"], "english": "Sister", "intent": "contact_alias" },
+        { "urdu": "چاچو", "roman": ["chachu", "chacha", "uncle"], "english": "Uncle Tariq", "intent": "contact_alias" },
+        { "urdu": "ماموں", "roman": ["mamoo", "mamu", "maternal uncle"], "english": "Mamoo", "intent": "contact_alias" },
+        { "urdu": "خالہ", "roman": ["khala", "aunt"], "english": "Khala", "intent": "contact_alias" }
+      ]
+    },
+    {
+      "category": "apps_media_and_screen",
+      "entries": [
+        { "urdu": "کھولو", "roman": ["kholo", "khol do", "open karo", "chalao", "start karo"], "english": "open app", "intent": "open_app" },
+        { "urdu": "یوٹیوب", "roman": ["youtube", "youtube kholo", "video chalao"], "english": "YouTube", "intent": "open_app" },
+        { "urdu": "واٹس ایپ", "roman": ["whatsapp", "whatsapp kholo", "watsap"], "english": "WhatsApp", "intent": "open_app" },
+        { "urdu": "کیمرہ", "roman": ["camera", "camera kholo", "tasweer khicho", "photo banao", "selfie lo"], "english": "take photo", "intent": "take_photo" },
+        { "urdu": "سکرین شاٹ لو", "roman": ["screenshot lo", "screen capture karo", "screenshot banao"], "english": "take screenshot", "intent": "take_screenshot" },
+        { "urdu": "سکرین پر کیا ہے", "roman": ["screen par kya hai", "meri screen parho", "what is on my screen", "read this screen"], "english": "read screen", "intent": "read_screen" },
+        { "urdu": "راستہ دکھاؤ", "roman": ["rasta dikhao", "raaste ka navigation shuru karo", "map chalao", "navigate karo"], "english": "navigate", "intent": "navigate" },
+        { "urdu": "گانا چلاؤ", "roman": ["gana sunao", "music chalao", "song play karo", "gana lagao"], "english": "play music", "intent": "media_control" },
+        { "urdu": "گانا روکو", "roman": ["gana roko", "music band karo", "pause karo"], "english": "pause music", "intent": "media_control" },
+        { "urdu": "اگلا گانا", "roman": ["agla gana", "next song", "skip karo"], "english": "next track", "intent": "media_control" }
+      ]
+    },
+    {
+      "category": "numbers_and_quantities",
+      "entries": [
+        { "urdu": "ایک", "roman": ["ek", "aik"], "english": "1", "intent": "number" },
+        { "urdu": "دو", "roman": ["do", "doh"], "english": "2", "intent": "number" },
+        { "urdu": "تین", "roman": ["teen", "tin"], "english": "3", "intent": "number" },
+        { "urdu": "چار", "roman": ["char", "chaar"], "english": "4", "intent": "number" },
+        { "urdu": "پانچ", "roman": ["paanch", "panch"], "english": "5", "intent": "number" },
+        { "urdu": "چھ", "roman": ["chey", "che", "chay"], "english": "6", "intent": "number" },
+        { "urdu": "سات", "roman": ["saat", "sat"], "english": "7", "intent": "number" },
+        { "urdu": "آٹھ", "roman": ["aath", "ath"], "english": "8", "intent": "number" },
+        { "urdu": "نو", "roman": ["nau", "no"], "english": "9", "intent": "number" },
+        { "urdu": "دس", "roman": ["das", "dus"], "english": "10", "intent": "number" },
+        { "urdu": "پندرہ", "roman": ["pandrah", "pandra"], "english": "15", "intent": "number" },
+        { "urdu": "بیس", "roman": ["bees", "bis"], "english": "20", "intent": "number" },
+        { "urdu": "تیس", "roman": ["tees", "tis"], "english": "30", "intent": "number" },
+        { "urdu": "پینتالیس", "roman": ["paintalis", "pentalis"], "english": "45", "intent": "number" },
+        { "urdu": "ساٹھ", "roman": ["saath", "sath"], "english": "60", "intent": "number" },
+        { "urdu": "ساڑھے", "roman": ["sarhe", "saarhe"], "english": ":30", "intent": "half_hour" },
+        { "urdu": "سوا", "roman": ["sawa"], "english": ":15", "intent": "quarter_past" },
+        { "urdu": "پونے", "roman": ["paune", "pone"], "english": "-0:15", "intent": "quarter_to" }
+      ]
+    }
+  ]
+}

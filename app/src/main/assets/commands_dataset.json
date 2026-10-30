@@ -1,0 +1,143 @@
+{
+  "version": "2.0",
+  "examples": [
+    {
+      "command": "Ali ko call karo",
+      "language": "ROMAN_URDU",
+      "tool_call": { "name": "make_call", "args": { "contact_name": "Ali" } },
+      "confirmation_required": true,
+      "expected_reply": "Kya aap Ali ko call karna chahte hain?"
+    },
+    {
+      "command": "علی کو کال کرو",
+      "language": "URDU_NASTALIQ",
+      "tool_call": { "name": "make_call", "args": { "contact_name": "Ali" } },
+      "confirmation_required": true,
+      "expected_reply": "کیا آپ علی کو کال کرنا چاہتے ہیں؟"
+    },
+    {
+      "command": "Call Ali right now",
+      "language": "ENGLISH",
+      "tool_call": { "name": "make_call", "args": { "contact_name": "Ali" } },
+      "confirmation_required": true,
+      "expected_reply": "Do you want me to call Ali?"
+    },
+    {
+      "command": "Ammi ko message send karo ke main raste mein hoon",
+      "language": "MIXED",
+      "tool_call": { "name": "send_sms", "args": { "recipient": "Mom", "message_text": "main raste mein hoon" } },
+      "confirmation_required": true,
+      "expected_reply": "Kya main Ammi (Mom) ko message bhej doon: 'main raste mein hoon'?"
+    },
+    {
+      "command": "امی کو میسج بھیجو کہ میں دیر سے آؤں گا",
+      "language": "URDU_NASTALIQ",
+      "tool_call": { "name": "send_sms", "args": { "recipient": "Mom", "message_text": "میں دیر سے آؤں گا" } },
+      "confirmation_required": true,
+      "expected_reply": "کیا میں امی کو میسج بھیج دوں کہ میں دیر سے آؤں گا؟"
+    },
+    {
+      "command": "WhatsApp khol kar Ahmed ko message send karo ke I'll be late",
+      "language": "MIXED",
+      "tool_call": { "name": "send_whatsapp", "args": { "recipient": "Ahmed", "message_text": "I'll be late" } },
+      "confirmation_required": true,
+      "expected_reply": "Kya main Ahmed ko WhatsApp message send karoon: 'I'll be late'?"
+    },
+    {
+      "command": "واٹس ایپ پر احمد کو میسج کرو کہ میٹنگ کل ہے",
+      "language": "URDU_NASTALIQ",
+      "tool_call": { "name": "send_whatsapp", "args": { "recipient": "Ahmed", "message_text": "میٹنگ کل ہے" } },
+      "confirmation_required": true,
+      "expected_reply": "کیا احمد کو واٹس ایپ میسج بھیج دوں؟"
+    },
+    {
+      "command": "Kal subah 6 baje alarm laga do",
+      "language": "ROMAN_URDU",
+      "tool_call": { "name": "set_alarm", "args": { "hour": 6, "minute": 0, "label": "Subah Alarm" } },
+      "confirmation_required": false,
+      "expected_reply": "Subah 06:00 baje ka alarm laga diya gaya hai."
+    },
+    {
+      "command": "کل صبح سات بجے الارم لگا دو",
+      "language": "URDU_NASTALIQ",
+      "tool_call": { "name": "set_alarm", "args": { "hour": 7, "minute": 0, "label": "Morning" } },
+      "confirmation_required": false,
+      "expected_reply": "صبح 07:00 بجے کا الارم سیٹ کر دیا گیا ہے۔"
+    },
+    {
+      "command": "Flashlight on karo",
+      "language": "ROMAN_URDU",
+      "tool_call": { "name": "toggle_setting", "args": { "setting_name": "flashlight", "state": "on" } },
+      "confirmation_required": false,
+      "expected_reply": "Flashlight on kar di gayi hai."
+    },
+    {
+      "command": "فلیش لائٹ بند کرو",
+      "language": "URDU_NASTALIQ",
+      "tool_call": { "name": "toggle_setting", "args": { "setting_name": "flashlight", "state": "off" } },
+      "confirmation_required": false,
+      "expected_reply": "فلیش لائٹ بند کر دی گئی ہے۔"
+    },
+    {
+      "command": "Subah 7 baje alarm lagao, phir Ammi ko message karo ke main late hoon, aur raaste ka navigation shuru karo",
+      "language": "MIXED",
+      "tool_call": {
+        "name": "execute_multi_step_plan",
+        "args": { "steps": "set_alarm:07:00|send_sms:Mom:main late hoon|navigate:Home" }
+      },
+      "confirmation_required": false,
+      "expected_reply": "Subah 7 baje ka alarm lag gaya, Ammi ko message tayar hai, aur navigation shuru kar di gayi hai."
+    },
+    {
+      "command": "Mera phone silent karo, battery saver on karo, aur 30 minute ka timer lagao",
+      "language": "ROMAN_URDU",
+      "tool_call": {
+        "name": "execute_multi_step_plan",
+        "args": { "steps": "adjust_volume:mute|toggle_battery_saver:on|set_timer:1800" }
+      },
+      "confirmation_required": false,
+      "expected_reply": "Phone silent kar diya, battery saver on ho gaya, aur 30 minute ka timer shuru کر diya."
+    },
+    {
+      "command": "If Ali calls, reject it and send him 'I'll call you later'",
+      "language": "ENGLISH",
+      "tool_call": {
+        "name": "save_conditional_rule",
+        "args": { "trigger": "incoming_call:Ali", "actions": "end_call|send_sms:Ali:I'll call you later" }
+      },
+      "confirmation_required": false,
+      "expected_reply": "Conditional rule saved: If Ali calls, I will reject the call and text him 'I'll call you later'."
+    },
+    {
+      "command": "Agar Ali call kare to kaat do aur message bhejo ke main baad mein call karunga",
+      "language": "ROMAN_URDU",
+      "tool_call": {
+        "name": "save_conditional_rule",
+        "args": { "trigger": "incoming_call:Ali", "actions": "end_call|send_sms:Ali:main baad mein call karunga" }
+      },
+      "confirmation_required": false,
+      "expected_reply": "Rule save ho gaya: Agar Ali ki call aayegi to main call reject kar ke message bhej doonga."
+    },
+    {
+      "command": "Meri screen par kya likha hai parh kar sunao",
+      "language": "ROMAN_URDU",
+      "tool_call": { "name": "read_screen", "args": { "mode": "summary" } },
+      "confirmation_required": false,
+      "expected_reply": "Aapki screen par maujood content parha ja raha hai."
+    },
+    {
+      "command": "What is on my screen right now?",
+      "language": "ENGLISH",
+      "tool_call": { "name": "read_screen", "args": { "mode": "summary" } },
+      "confirmation_required": false,
+      "expected_reply": "Analyzing the current screen via Accessibility tree."
+    },
+    {
+      "command": "Yeh word yaad kar lo: batti jalao ka matlab flashlight on karo",
+      "language": "ROMAN_URDU",
+      "tool_call": { "name": "teach_word", "args": { "phrase": "batti jalao", "meaning": "turn on flashlight" } },
+      "confirmation_required": false,
+      "expected_reply": "Shukriya! Maine yaad kar liya ke 'batti jalao' ka matlab 'turn on flashlight' hai."
+    }
+  ]
+}
