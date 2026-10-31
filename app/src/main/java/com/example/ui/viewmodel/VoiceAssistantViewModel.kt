@@ -57,6 +57,8 @@ import com.example.engine.RoutineManager
 import com.example.engine.SttEngineType
 import com.example.engine.TaskStepStatus
 import com.example.engine.TextToSpeechManager
+import com.example.engine.SecretCodeVerificationResult
+import com.example.engine.VoiceAppLockAndMoodEngine
 import com.example.engine.VoiceIntentType
 import com.example.engine.VoiceRoutine
 import com.example.engine.gemini.GeminiChatMessage
@@ -104,6 +106,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     val routineManager = RoutineManager(context, repository)
     val unlockManager = LockScreenUnlockManager(context)
     val intruderManager = IntruderCaptureManager(context)
+    val voiceAppLockEngine = VoiceAppLockAndMoodEngine.getInstance(context)
 
     // --- Official Gemini Live Voice Session Flows (`BidiGenerateContent` / `ai.live.connect`) ---
     val liveConnectionState: StateFlow<LiveConnectionState> = omniLiveEngine.connectionState
@@ -519,9 +522,19 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             com.omnivoice.agentfix.AgentSession.onUserUtterance(rawSpeech)
         }
 
+        // If an App Voice Lock challenge is active, verify against the 10 Secret Codes (3-attempt cooldown)
+        if (voiceAppLockEngine.pendingChallenge.value != null) {
+            handleSecretCodeChallengeAttempt(rawSpeech)
+            return
+        }
+
         when (currentState) {
             is VoiceState.AwaitingPassphrase, is VoiceState.VerifyingVoice -> {
-                verifySpokenPassphrase(rawSpeech)
+                if (voiceAppLockEngine.findMatchingSecretCodeIndex(rawSpeech) != null) {
+                    handleSecretCodeChallengeAttempt(rawSpeech)
+                } else {
+                    verifySpokenPassphrase(rawSpeech)
+                }
             }
             is VoiceState.ConfirmingAction -> {
                 handleConfirmationResponse(rawSpeech, currentState.action)
@@ -537,7 +550,38 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         if (commandText.isNotBlank()) {
             com.omnivoice.agentfix.AgentSession.onUserUtterance(commandText)
         }
+        if (voiceAppLockEngine.pendingChallenge.value != null) {
+            handleSecretCodeChallengeAttempt(commandText)
+            return
+        }
         processUserCommand(commandText, null)
+    }
+
+    fun handleSecretCodeChallengeAttempt(spokenOrTypedCode: String): SecretCodeVerificationResult {
+        val result = voiceAppLockEngine.verifySecretCode(spokenOrTypedCode)
+        when (result) {
+            is SecretCodeVerificationResult.Unlocked -> {
+                val pending = result.pendingAction ?: _pendingAction.value
+                speakResponse(result.spokenConfirmationRomanUrdu) {
+                    if (pending != null) {
+                        viewModelScope.launch {
+                            executeAndCompleteAction(pending, isLockedState = false)
+                        }
+                    } else {
+                        _voiceState.value = VoiceState.Idle
+                    }
+                }
+            }
+            is SecretCodeVerificationResult.CodeOnCooldown -> {
+                _voiceState.value = VoiceState.AwaitingPassphrase(result.spokenErrorRomanUrdu)
+                speakResponse(result.spokenErrorRomanUrdu)
+            }
+            is SecretCodeVerificationResult.InvalidCode -> {
+                _voiceState.value = VoiceState.AwaitingPassphrase(result.spokenErrorRomanUrdu)
+                speakResponse(result.spokenErrorRomanUrdu)
+            }
+        }
+        return result
     }
 
     private fun processUserCommand(speech: String, voiceAnalysis: MultimodalVoiceAnalysis? = null) {
@@ -640,24 +684,65 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             }
 
             // If AutonomousTaskEngine classified as CONVERSATION or UNCLEAR, or handled an AI Image / multi-step chain,
-            // speak its reply directly and DO NOT run any hardware action!
+            // speak its reply directly (adapted to the speaker's Mood & Andaz) and DO NOT run any hardware action!
             if (completedFeedEntry.intentType == VoiceIntentType.CONVERSATION ||
                 completedFeedEntry.intentType == VoiceIntentType.UNCLEAR ||
                 action.action == "general_chat" ||
                 completedFeedEntry.generatedImage != null ||
                 completedFeedEntry.steps.size > 1
             ) {
-                speakResponse(completedFeedEntry.aiReply)
+                val moodAdaptedReply = voiceAppLockEngine.decorateConversationalReplyWithMood(
+                    rawUtterance = effectiveSpeech,
+                    baseReply = completedFeedEntry.aiReply,
+                    liveRms = _audioRms.value
+                )
+                speakResponse(moodAdaptedReply)
                 _voiceState.value = VoiceState.Idle
                 recordLog(
                     action = if (completedFeedEntry.intentType != VoiceIntentType.ACTION) {
-                        VoiceAction(action = "conversation", target = effectiveSpeech, spokenResponse = completedFeedEntry.aiReply)
+                        VoiceAction(action = "conversation", target = effectiveSpeech, spokenResponse = moodAdaptedReply)
                     } else action,
                     isLocked = isDeviceLocked(),
                     passed = true,
-                    summary = completedFeedEntry.aiReply
+                    summary = moodAdaptedReply
                 )
                 return@launch
+            }
+
+            // Universal App Voice Lock Gatekeeper:
+            // When opening or controlling mobile apps, verify owner's voice + mood/andaz in backend.
+            // If voice recognition fails or sore throat occurs, ask for 1 of the 10 Secret Codes!
+            val isAppOpenOrControlAction = action.action in setOf(
+                "open_app",
+                "open_and_navigate_app",
+                "send_whatsapp",
+                "send_whatsapp_message",
+                "whatsapp_send_message",
+                "send_telegram",
+                "update_whatsapp_dp"
+            )
+            if (isAppOpenOrControlAction) {
+                val appTargetName = action.parameters["appName"]
+                    ?: action.parameters["app_name"]
+                    ?: action.target.ifBlank { "Mobile App" }
+                val challenge = voiceAppLockEngine.interceptAppOpenCommand(
+                    appName = appTargetName,
+                    packageName = appTargetName,
+                    rawUtterance = effectiveSpeech,
+                    pendingAction = action,
+                    liveRms = _audioRms.value
+                )
+                if (challenge != null) {
+                    _pendingAction.value = action
+                    _voiceState.value = VoiceState.AwaitingPassphrase(challenge.failureReasonRomanUrdu)
+                    speakResponse(challenge.failureReasonRomanUrdu) {
+                        viewModelScope.launch {
+                            delay(400)
+                            audioStateMachine.transitionTo(AudioPipelineOwner.STT_RECORDING)
+                        }
+                    }
+                    return@launch
+                }
             }
 
             // Handle "teach_word" or "save_conditional_rule" persistence in Room

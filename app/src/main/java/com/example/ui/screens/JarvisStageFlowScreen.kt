@@ -9,7 +9,6 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -20,11 +19,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import com.example.engine.DraggableOrbState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -50,14 +44,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -71,12 +63,13 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SettingsAccessibility
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -127,17 +120,17 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.engine.BiometricVaultManager
+import com.example.engine.DraggableOrbState
 import com.example.engine.GeminiLiveVoice
 import com.example.engine.JarvisOrbActionState
 import com.example.engine.LiveConnectionState
 import com.example.engine.OsKernel
+import com.example.engine.VoiceAppLockAndMoodEngine
 import com.example.service.OmniAccessibilityService
 import com.example.service.OmniNotificationListenerService
-import com.example.ui.theme.CyanPrimary
-import com.example.ui.theme.DarkBackground
-import com.example.ui.theme.DarkSurface
+import com.example.ui.components.FirstPageVoiceAppLockSetupCard
+import com.example.ui.components.VoiceAppLockChallengeDialog
 import com.example.ui.theme.DarkSurfaceBorder
-import com.example.ui.theme.DarkSurfaceVariant
 import com.example.ui.theme.EmeraldTertiary
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -154,8 +147,9 @@ enum class JarvisStage {
     STAGE_C_CORNER_ORB
 }
 
-private val StarkDeepBlack = Color(0xFF04060C)
-private val StarkCardBg = Color(0xFF090D18)
+private val StarkDeepBlack = Color(0xFF03050A)
+private val StarkObsidianSurface = Color(0xFF070C16)
+private val StarkCardBg = Color(0xFF0A1120)
 private val StarkCyan = Color(0xFF00E5FF)
 private val StarkBlue = Color(0xFF2563EB)
 private val StarkGold = Color(0xFFF59E0B)
@@ -164,7 +158,8 @@ private val StarkRed = Color(0xFFEF4444)
 @Composable
 fun JarvisStageFlowScreen(
     viewModel: VoiceAssistantViewModel,
-    onEnterPipMode: () -> Boolean = { false }
+    onEnterPipMode: () -> Boolean = { false },
+    onOpenAdvancedSettingsHub: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val vaultManager = remember { BiometricVaultManager.getInstance(context) }
@@ -181,6 +176,10 @@ fun JarvisStageFlowScreen(
     val liveUserTranscript by viewModel.liveUserTranscript.collectAsState()
     val liveAiTranscript by viewModel.liveAiTranscript.collectAsState()
 
+    val voiceLockEngine = remember { VoiceAppLockAndMoodEngine.getInstance(context) }
+    val pendingLockChallenge by voiceLockEngine.pendingChallenge.collectAsState()
+    val showTypeCodeModal by voiceLockEngine.showTypeCodeModal.collectAsState()
+
     var currentStage by remember(isPermsCompleted) {
         mutableStateOf(
             if (!isPermsCompleted) JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER
@@ -190,6 +189,7 @@ fun JarvisStageFlowScreen(
 
     var showQuickSettingsDialog by remember { mutableStateOf(false) }
     var showExpandedHudDrawer by remember { mutableStateOf(false) }
+    var showVoiceLockSetupModal by remember { mutableStateOf(false) }
 
     // If live session starts, transition automatically to Stage C Corner Orb
     LaunchedEffect(isLiveActive) {
@@ -201,29 +201,59 @@ fun JarvisStageFlowScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(StarkDeepBlack)
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        StarkDeepBlack,
+                        StarkObsidianSurface,
+                        StarkDeepBlack
+                    )
+                )
+            )
             .testTag("jarvis_stage_flow_root")
     ) {
         when (currentStage) {
             JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER -> {
                 JarvisStageAPermissionsGatekeeper(
                     vaultManager = vaultManager,
+                    voiceLockEngine = voiceLockEngine,
                     onAllGranted = {
                         vaultManager.markPermissionsCompleted()
                         currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                    },
+                    onOpenSecretCodeVerifier = { appName ->
+                        voiceLockEngine.interceptAppOpenCommand(
+                            appName = appName,
+                            packageName = appName,
+                            rawUtterance = "open $appName",
+                            forceVoiceVerificationFailure = true
+                        )
+                        voiceLockEngine.setShowTypeCodeModal(true)
                     }
                 )
             }
             JarvisStage.STAGE_B_MINIMAL_START -> {
                 JarvisStageBMinimalLaunchScreen(
                     selectedVoice = selectedVoice,
+                    voiceLockEngine = voiceLockEngine,
                     onSelectVoice = { voice -> viewModel.omniLiveEngine.selectVoice(voice) },
                     onStartJarvis = {
                         viewModel.startGeminiLiveSession()
                         onEnterPipMode()
                         currentStage = JarvisStage.STAGE_C_CORNER_ORB
                     },
-                    onOpenSettings = { showQuickSettingsDialog = true }
+                    onOpenSettings = { showQuickSettingsDialog = true },
+                    onOpenAdvancedSettingsHub = onOpenAdvancedSettingsHub,
+                    onOpenVoiceLockSetup = { showVoiceLockSetupModal = true },
+                    onOpenSecretCodeVerifier = {
+                        voiceLockEngine.interceptAppOpenCommand(
+                            appName = "WhatsApp",
+                            packageName = "com.whatsapp",
+                            rawUtterance = "open WhatsApp",
+                            forceVoiceVerificationFailure = true
+                        )
+                        voiceLockEngine.setShowTypeCodeModal(true)
+                    }
                 )
             }
             JarvisStage.STAGE_C_CORNER_ORB -> {
@@ -236,8 +266,18 @@ fun JarvisStageFlowScreen(
                     userTranscript = liveUserTranscript,
                     aiTranscript = liveAiTranscript,
                     vaultManager = vaultManager,
+                    voiceLockEngine = voiceLockEngine,
                     onExpandHud = { showExpandedHudDrawer = true },
                     onOpenSettings = { showQuickSettingsDialog = true },
+                    onOpenSecretCodeVerifier = {
+                        voiceLockEngine.interceptAppOpenCommand(
+                            appName = "WhatsApp",
+                            packageName = "com.whatsapp",
+                            rawUtterance = "open WhatsApp",
+                            forceVoiceVerificationFailure = true
+                        )
+                        voiceLockEngine.setShowTypeCodeModal(true)
+                    },
                     onEnterPip = { onEnterPipMode() },
                     onStop = {
                         viewModel.endGeminiLiveSession()
@@ -251,15 +291,73 @@ fun JarvisStageFlowScreen(
         if (showQuickSettingsDialog) {
             JarvisSettingsAndVaultModal(
                 vaultManager = vaultManager,
+                onOpenAdvancedSettingsHub = {
+                    showQuickSettingsDialog = false
+                    onOpenAdvancedSettingsHub()
+                },
                 onDismiss = { showQuickSettingsDialog = false }
             )
         }
 
-        // Expanded Floating HUD / Terminal Drawer
+        // First-Page Voice Lock & 10 Secret Codes Configuration Modal (accessible anytime from Stage B)
+        if (showVoiceLockSetupModal) {
+            Dialog(
+                onDismissRequest = { showVoiceLockSetupModal = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.95f)
+                        .heightIn(max = 650.dp)
+                ) {
+                    LazyColumn {
+                        item {
+                            FirstPageVoiceAppLockSetupCard(
+                                voiceLockEngine = voiceLockEngine,
+                                onConfigurationSaved = { showVoiceLockSetupModal = false },
+                                onTriggerTestChallenge = { appName ->
+                                    showVoiceLockSetupModal = false
+                                    voiceLockEngine.interceptAppOpenCommand(
+                                        appName = appName,
+                                        packageName = appName,
+                                        rawUtterance = "open $appName",
+                                        forceVoiceVerificationFailure = true
+                                    )
+                                    voiceLockEngine.setShowTypeCodeModal(true)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Active Voice App Lock & 10 Secret Codes (3-Attempt Cooldown + Type Code Fallback) Challenge Modal
+        if (pendingLockChallenge != null || showTypeCodeModal) {
+            VoiceAppLockChallengeDialog(
+                voiceLockEngine = voiceLockEngine,
+                challenge = pendingLockChallenge,
+                onCodeVerifiedAndUnlocked = { unlockedResult ->
+                    viewModel.handleSecretCodeChallengeAttempt(unlockedResult.matchedPhrase)
+                },
+                onRequestMicForSpokenCode = {
+                    viewModel.startListeningForCommand()
+                },
+                onDismiss = {
+                    voiceLockEngine.dismissPendingChallenge()
+                }
+            )
+        }
+
+        // Revamped Neural Status Console (Zero History/Routines/Memory Clutter — Backend Only)
         if (showExpandedHudDrawer) {
             JarvisExpandedHudDrawer(
                 viewModel = viewModel,
-                osKernel = osKernel,
+                voiceLockEngine = voiceLockEngine,
+                onOpenVoiceLockSetup = {
+                    showExpandedHudDrawer = false
+                    showVoiceLockSetupModal = true
+                },
                 onDismiss = { showExpandedHudDrawer = false }
             )
         }
@@ -267,12 +365,14 @@ fun JarvisStageFlowScreen(
 }
 
 // =========================================================================
-// STAGE A: MANDATORY STARTUP PERMISSION GATEKEEPER
+// STAGE A: REVAMPED FIRST-PAGE SYSTEM GATEKEEPER & VOICE LOCK ACTIVATION
 // =========================================================================
 @Composable
 private fun JarvisStageAPermissionsGatekeeper(
     vaultManager: BiometricVaultManager,
-    onAllGranted: () -> Unit
+    voiceLockEngine: VoiceAppLockAndMoodEngine,
+    onAllGranted: () -> Unit,
+    onOpenSecretCodeVerifier: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     var hasAccessibility by remember { mutableStateOf(OmniAccessibilityService.isConnected()) }
@@ -312,7 +412,6 @@ private fun JarvisStageAPermissionsGatekeeper(
         hasPhone = results[Manifest.permission.CALL_PHONE] == true || hasPhone
     }
 
-    // Refresh system service connections on resumed composition
     LaunchedEffect(Unit) {
         hasAccessibility = OmniAccessibilityService.isConnected()
         hasNotificationListener = OmniNotificationListenerService.isServiceRunning()
@@ -321,14 +420,15 @@ private fun JarvisStageAPermissionsGatekeeper(
         }
     }
 
-    val totalSteps = 5
+    val totalSteps = 6
     val completedSteps = (if (hasAccessibility) 1 else 0) +
         1 + // Shizuku / ADB God-Mode is software enabled
         (if (hasNotificationListener) 1 else 0) +
         (if (hasMic && hasContacts) 1 else 0) +
-        (if (masterPinInput.length >= 4) 1 else 0)
+        (if (masterPinInput.length >= 4) 1 else 0) +
+        1 // Universal Voice Lock & 10 Secret Codes ready
 
-    val progress = (completedSteps.toFloat() / totalSteps.toFloat()).coerceIn(0.2f, 1f)
+    val progress = (completedSteps.toFloat() / totalSteps.toFloat()).coerceIn(0.25f, 1f)
 
     Column(
         modifier = Modifier
@@ -340,8 +440,7 @@ private fun JarvisStageAPermissionsGatekeeper(
             .testTag("stage_a_permission_gatekeeper"),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Futuristic Header
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -349,29 +448,29 @@ private fun JarvisStageAPermissionsGatekeeper(
         ) {
             Column {
                 Text(
-                    text = "JARVIS SYSTEM INITIALIZATION",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    text = "JARVIS NEURAL OS • FIRST-PAGE SETUP",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
                     color = StarkCyan,
                     letterSpacing = 2.sp
                 )
                 Text(
-                    text = "Zero-Trust Permission Gatekeeper",
+                    text = "Autonomous OS & Voice Lock Gatekeeper",
                     fontSize = 18.sp,
-                    fontWeight = FontWeight.ExtraBold,
+                    fontWeight = FontWeight.Black,
                     color = TextPrimary
                 )
             }
             Surface(
-                color = StarkCyan.copy(alpha = 0.15f),
+                color = StarkCyan.copy(alpha = 0.16f),
                 shape = CircleShape,
-                border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.4f))
+                border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f))
             ) {
                 Text(
                     text = "$completedSteps / $totalSteps Ready",
                     fontSize = 11.sp,
                     color = StarkCyan,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -382,8 +481,8 @@ private fun JarvisStageAPermissionsGatekeeper(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 12.dp)
-                .height(4.dp)
-                .clip(RoundedCornerShape(2.dp)),
+                .height(5.dp)
+                .clip(RoundedCornerShape(3.dp)),
             color = StarkCyan,
             trackColor = StarkCardBg
         )
@@ -394,11 +493,22 @@ private fun JarvisStageAPermissionsGatekeeper(
                 .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // Priority Item: Universal App Voice Lock, Mood/Andaz Intelligence & 10 Secret Codes Setup right at the top of First Page
+            item {
+                FirstPageVoiceAppLockSetupCard(
+                    voiceLockEngine = voiceLockEngine,
+                    onConfigurationSaved = {},
+                    onTriggerTestChallenge = { appName ->
+                        onOpenSecretCodeVerifier(appName)
+                    }
+                )
+            }
+
             // 1. Accessibility Service
             item {
                 GatekeeperPermissionRow(
                     title = "1. Android Accessibility Service",
-                    subtitle = "Required for screen vision, zero-touch auto-click & gesture injection",
+                    subtitle = "Required for app lock interception, zero-touch auto-click & screen observation",
                     isGranted = hasAccessibility,
                     icon = Icons.Default.SettingsAccessibility,
                     actionLabel = if (hasAccessibility) "Enabled" else "Open Settings",
@@ -418,7 +528,7 @@ private fun JarvisStageAPermissionsGatekeeper(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = StarkCardBg),
                     border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(14.dp)
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(
@@ -443,7 +553,7 @@ private fun JarvisStageAPermissionsGatekeeper(
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = "Rootless God-Mode on http://127.0.0.1:8765 for raw OS commands (input tap, swipe, keyevent, uiautomator dump, screencap)",
+                                    text = "Rootless God-Mode on http://127.0.0.1:8765 for raw OS commands (input tap, swipe, keyevent, screencap)",
                                     fontSize = 11.sp,
                                     color = TextSecondary,
                                     maxLines = 2,
@@ -452,26 +562,21 @@ private fun JarvisStageAPermissionsGatekeeper(
                             }
                         }
                         Spacer(modifier = Modifier.height(10.dp))
-                        Row(
+                        OutlinedButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                val clip = android.content.ClipData.newPlainText("JARVIS_BRIDGE", vaultManager.getPythonBridgeOneLiner())
+                                clipboard.setPrimaryClip(clip)
+                                android.widget.Toast.makeText(context, "Copied 1-Click Shizuku / Termux Bridge Command (Port 8765)!", android.widget.Toast.LENGTH_SHORT).show()
+                            },
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, StarkCyan),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StarkCyan)
                         ) {
-                            OutlinedButton(
-                                onClick = {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                    val clip = android.content.ClipData.newPlainText("JARVIS_BRIDGE", vaultManager.getPythonBridgeOneLiner())
-                                    clipboard.setPrimaryClip(clip)
-                                    android.widget.Toast.makeText(context, "Copied 1-Click Shizuku / Termux Bridge Command (Port 8765)!", android.widget.Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(1.dp, StarkCyan),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = StarkCyan)
-                            ) {
-                                Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Copy 1-Click Bridge Command (Port 8765)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
+                            Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Copy 1-Click Bridge Command (Port 8765)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -481,7 +586,7 @@ private fun JarvisStageAPermissionsGatekeeper(
             item {
                 GatekeeperPermissionRow(
                     title = "3. Notification & Call Screening",
-                    subtitle = "Intercepts incoming notifications & powers AI Call Secretary",
+                    subtitle = "Intercepts incoming notifications & powers AI Call Secretary in backend",
                     isGranted = hasNotificationListener,
                     icon = Icons.Default.Notifications,
                     actionLabel = if (hasNotificationListener) "Connected" else "Grant Access",
@@ -532,21 +637,21 @@ private fun JarvisStageAPermissionsGatekeeper(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = StarkCardBg),
                     border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.3f)),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(14.dp)
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Fingerprint, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "5. Biometric Vault & Secret Unlock",
+                                text = "5. Biometric Vault & Secret Device Unlock",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
                             )
                         }
                         Text(
-                            text = "Enables hands-free phone unlock and app lock bypass without touching screen.",
+                            text = "Enables hands-free phone unlock without manual screen touch.",
                             fontSize = 11.sp,
                             color = TextSecondary,
                             modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
@@ -606,7 +711,6 @@ private fun JarvisStageAPermissionsGatekeeper(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Grant All & Initialize Button
         Button(
             onClick = {
                 vaultManager.enrollVault(
@@ -620,17 +724,17 @@ private fun JarvisStageAPermissionsGatekeeper(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
+                .height(54.dp)
                 .testTag("btn_grant_all_permissions"),
             colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
-            shape = RoundedCornerShape(12.dp)
+            shape = RoundedCornerShape(14.dp)
         ) {
             Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF030712))
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "GRANT ALL & INITIALIZE SYSTEM",
+                text = "ACTIVATE JARVIS & LAUNCH NEURAL CORE",
                 fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.Black,
                 color = Color(0xFF030712),
                 letterSpacing = 1.sp
             )
@@ -652,9 +756,9 @@ private fun GatekeeperPermissionRow(
         colors = CardDefaults.cardColors(containerColor = StarkCardBg),
         border = BorderStroke(
             1.dp,
-            if (isGranted) EmeraldTertiary.copy(alpha = 0.4f) else DarkSurfaceBorder
+            if (isGranted) EmeraldTertiary.copy(alpha = 0.45f) else DarkSurfaceBorder
         ),
-        shape = RoundedCornerShape(12.dp)
+        shape = RoundedCornerShape(14.dp)
     ) {
         Row(
             modifier = Modifier
@@ -663,7 +767,7 @@ private fun GatekeeperPermissionRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                color = if (isGranted) EmeraldTertiary.copy(alpha = 0.15f) else StarkCyan.copy(alpha = 0.1f),
+                color = if (isGranted) EmeraldTertiary.copy(alpha = 0.15f) else StarkCyan.copy(alpha = 0.12f),
                 shape = CircleShape,
                 modifier = Modifier.size(38.dp)
             ) {
@@ -699,7 +803,7 @@ private fun GatekeeperPermissionRow(
 
             OutlinedButton(
                 onClick = onAction,
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(10.dp),
                 border = BorderStroke(
                     1.dp,
                     if (isGranted) EmeraldTertiary else StarkCyan
@@ -719,31 +823,41 @@ private fun GatekeeperPermissionRow(
 }
 
 // =========================================================================
-// STAGE B: ULTRA-MINIMALIST MAIN LAUNCH SCREEN
+// STAGE B: REVAMPED NEURAL COMMAND CENTER (ZERO UI CLUTTER)
 // =========================================================================
 @Composable
 private fun JarvisStageBMinimalLaunchScreen(
     selectedVoice: GeminiLiveVoice,
+    voiceLockEngine: VoiceAppLockAndMoodEngine,
     onSelectVoice: (GeminiLiveVoice) -> Unit,
     onStartJarvis: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenAdvancedSettingsHub: () -> Unit = {},
+    onOpenVoiceLockSetup: () -> Unit = {},
+    onOpenSecretCodeVerifier: () -> Unit = {}
 ) {
+    val moodEvaluation by voiceLockEngine.lastMoodEvaluation.collectAsState()
+    val secretCodes by voiceLockEngine.secretCodes.collectAsState()
+    val ownerName by voiceLockEngine.ownerName.collectAsState()
+    val isGlobalLockOn by voiceLockEngine.isGlobalAppVoiceLockEnabled.collectAsState()
+    val availableCodesCount = secretCodes.count { it.isAvailableNow }
+
     val infiniteTransition = rememberInfiniteTransition(label = "arc_reactor")
     val rotation by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(12000, easing = LinearEasing),
+            animation = tween(11000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "reactor_spin"
     )
 
     val pulseGlow by infiniteTransition.animateFloat(
-        initialValue = 0.65f,
+        initialValue = 0.60f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2200, easing = FastOutSlowInEasing),
+            animation = tween(2000, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse_glow"
@@ -754,12 +868,12 @@ private fun JarvisStageBMinimalLaunchScreen(
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 24.dp, vertical = 16.dp)
+            .padding(horizontal = 22.dp, vertical = 14.dp)
             .testTag("stage_b_minimal_screen"),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // Minimal Top Bar (Gear Icon in Top-Right)
+        // 1. Sleek Top Telemetry Header Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -768,33 +882,78 @@ private fun JarvisStageBMinimalLaunchScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     shape = CircleShape,
-                    color = StarkCyan,
-                    modifier = Modifier.size(8.dp)
+                    color = EmeraldTertiary,
+                    modifier = Modifier.size(9.dp)
                 ) {}
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "JARVIS OS",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = StarkCyan,
-                    letterSpacing = 2.sp
-                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "OMNIVOICE • JARVIS OS",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = StarkCyan,
+                        letterSpacing = 2.sp
+                    )
+                    Text(
+                        text = "Owner: $ownerName • Backend AI Active",
+                        fontSize = 10.sp,
+                        color = TextSecondary
+                    )
+                }
             }
 
-            IconButton(
-                onClick = onOpenSettings,
-                modifier = Modifier.testTag("btn_quick_settings_gear")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Quick Settings & Vault",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(22.dp)
-                )
+                Surface(
+                    color = if (isGlobalLockOn) EmeraldTertiary.copy(alpha = 0.14f) else StarkCardBg,
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (isGlobalLockOn) EmeraldTertiary.copy(alpha = 0.5f) else DarkSurfaceBorder
+                    ),
+                    modifier = Modifier.clickable { onOpenVoiceLockSetup() }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = "App Voice Lock Status",
+                            tint = if (isGlobalLockOn) EmeraldTertiary else StarkCyan,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isGlobalLockOn) "LOCKED" else "UNLOCKED",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (isGlobalLockOn) EmeraldTertiary else StarkCyan
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(StarkCardBg, CircleShape)
+                        .border(1.dp, StarkCyan.copy(alpha = 0.35f), CircleShape)
+                        .testTag("btn_quick_settings_gear")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Quick Settings & Vault",
+                        tint = StarkCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
 
-        // Centerpiece: Giant Glowing Arc-Reactor "START JARVIS" Button
+        // 2. Centerpiece: Revamped Multi-Layer Neural Arc-Reactor Core
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.clickable { onStartJarvis() }
@@ -802,19 +961,19 @@ private fun JarvisStageBMinimalLaunchScreen(
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(220.dp)
+                    .size(236.dp)
                     .testTag("btn_start_jarvis")
             ) {
-                // Outer Arc-Reactor Rings Canvas
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val radius = size.minDimension / 2f
                     val center = Offset(size.width / 2f, size.height / 2f)
 
-                    // Outer glowing energy ring
+                    // Atmospheric Outer Halo
                     drawCircle(
                         brush = Brush.radialGradient(
                             colors = listOf(
-                                StarkCyan.copy(alpha = 0.35f * pulseGlow),
+                                StarkCyan.copy(alpha = 0.38f * pulseGlow),
+                                VioletSecondary.copy(alpha = 0.14f * pulseGlow),
                                 Color.Transparent
                             ),
                             center = center,
@@ -824,110 +983,163 @@ private fun JarvisStageBMinimalLaunchScreen(
                         center = center
                     )
 
-                    // Rotating segmented reactor ring
+                    // Outer Rotating Segmented Telemetry Ring
                     rotate(rotation, pivot = center) {
-                        for (i in 0 until 12) {
-                            val angleRad = (i * 30f) * (PI / 180f)
-                            val startX = center.x + cos(angleRad).toFloat() * (radius * 0.76f)
-                            val startY = center.y + sin(angleRad).toFloat() * (radius * 0.76f)
+                        for (i in 0 until 16) {
+                            val angleRad = (i * 22.5f) * (PI / 180f)
+                            val startX = center.x + cos(angleRad).toFloat() * (radius * 0.78f)
+                            val startY = center.y + sin(angleRad).toFloat() * (radius * 0.78f)
                             val endX = center.x + cos(angleRad).toFloat() * (radius * 0.94f)
                             val endY = center.y + sin(angleRad).toFloat() * (radius * 0.94f)
                             drawLine(
-                                color = StarkCyan.copy(alpha = 0.8f),
+                                color = if (i % 2 == 0) StarkCyan.copy(alpha = 0.85f) else EmeraldTertiary.copy(alpha = 0.65f),
                                 start = Offset(startX, startY),
                                 end = Offset(endX, endY),
-                                strokeWidth = 3f
+                                strokeWidth = 3.2f
                             )
                         }
                         drawCircle(
-                            color = StarkCyan.copy(alpha = 0.6f),
-                            radius = radius * 0.72f,
+                            color = StarkCyan.copy(alpha = 0.55f),
+                            radius = radius * 0.73f,
                             center = center,
                             style = Stroke(width = 2f)
                         )
                     }
 
-                    // Counter-rotating inner ring
-                    rotate(-rotation * 1.5f, pivot = center) {
+                    // Counter-Rotating Neural Ring
+                    rotate(-rotation * 1.4f, pivot = center) {
                         drawCircle(
-                            color = VioletSecondary.copy(alpha = 0.7f),
-                            radius = radius * 0.52f,
+                            color = VioletSecondary.copy(alpha = 0.75f),
+                            radius = radius * 0.55f,
                             center = center,
                             style = Stroke(width = 2.5f)
                         )
                     }
 
-                    // Inner reactor core
+                    // Inner Glowing Reactor Core
                     drawCircle(
                         brush = Brush.radialGradient(
                             colors = listOf(
                                 Color.White,
                                 StarkCyan,
-                                Color(0xFF0369A1)
+                                Color(0xFF0284C7)
                             ),
                             center = center,
-                            radius = radius * 0.40f
+                            radius = radius * 0.41f
                         ),
-                        radius = radius * 0.40f,
+                        radius = radius * 0.41f,
                         center = center
                     )
                 }
 
-                // Center Text Inside Core
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Start",
-                        tint = Color(0xFF040A18),
-                        modifier = Modifier.size(36.dp)
+                        contentDescription = "Start Jarvis",
+                        tint = Color(0xFF030712),
+                        modifier = Modifier.size(38.dp)
                     )
                     Text(
-                        text = "START",
-                        fontSize = 16.sp,
+                        text = "ACTIVATE",
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Black,
-                        color = Color(0xFF040A18),
+                        color = Color(0xFF030712),
                         letterSpacing = 2.sp
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             Text(
-                text = "START JARVIS",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.ExtraBold,
+                text = "TAP TO START NEURAL CORE",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Black,
                 color = TextPrimary,
-                letterSpacing = 2.sp
+                letterSpacing = 1.8.sp
             )
 
             Text(
-                text = "ALWAYS-ONLINE CONTINUOUS LIVE ENGINE",
-                fontSize = 11.sp,
+                text = "ZERO-TOUCH VOICE LOCK • MOOD AI • SILENT BACKEND ENGINE",
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = StarkCyan,
-                letterSpacing = 1.sp,
+                letterSpacing = 0.9.sp,
+                textAlign = TextAlign.Center,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
 
-        // Voice Selector Chips Control
+        // 3. Bottom Control Deck: Silent Backend Status Card + Voice Profile + Voice Lock / Secret Code Actions
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Silent Backend Intelligence Card (Confirms Memory, Routines, Mood & Voice Lock operate silently in backend)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp)
+                    .testTag("silent_backend_intelligence_card"),
+                colors = CardDefaults.cardColors(containerColor = StarkCardBg.copy(alpha = 0.92f)),
+                border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.30f)),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Surface(
+                            color = EmeraldTertiary.copy(alpha = 0.16f),
+                            shape = CircleShape,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Psychology,
+                                    contentDescription = null,
+                                    tint = EmeraldTertiary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Mood & Andaz AI: ${moodEvaluation.detectedMood.romanUrduLabel} • ${moodEvaluation.detectedAndaz.displayName}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmeraldTertiary
+                            )
+                            Text(
+                                text = "Silent Backend Active: Voice Lock, Routines, Memory & Logs auto-processed in background",
+                                fontSize = 10.sp,
+                                color = TextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
             Text(
-                text = "VOICE PROFILE",
-                fontSize = 11.sp,
+                text = "SELECT NEURAL VOICE",
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextSecondary,
                 letterSpacing = 1.5.sp,
-                modifier = Modifier.padding(bottom = 8.dp)
+                modifier = Modifier.padding(bottom = 6.dp)
             )
 
             LazyRow(
@@ -960,12 +1172,58 @@ private fun JarvisStageBMinimalLaunchScreen(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Voice App Lock & 10 Secret Codes Quick Action Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onOpenVoiceLockSetup,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(46.dp)
+                        .testTag("btn_stage_b_voice_lock_setup"),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.65f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = StarkCyan)
+                ) {
+                    Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Voice Lock ($availableCodesCount/10)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Button(
+                    onClick = onOpenSecretCodeVerifier,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(46.dp)
+                        .testTag("btn_stage_b_type_secret_code"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldTertiary)
+                ) {
+                    Icon(Icons.Default.Key, contentDescription = null, tint = Color(0xFF030712), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Type Secret Code",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF030712)
+                    )
+                }
+            }
         }
     }
 }
 
 // =========================================================================
-// STAGE C: CORNER MEDIUM FLOATING CIRCLE (88px x 88px / 88.dp ARC-REACTOR ORB)
+// STAGE C: REVAMPED LIVE FLOATING ORB HUD (CLEAN WORKSPACE)
 // =========================================================================
 @Composable
 private fun JarvisStageCCornerOrbView(
@@ -977,13 +1235,16 @@ private fun JarvisStageCCornerOrbView(
     userTranscript: String,
     aiTranscript: String,
     vaultManager: BiometricVaultManager,
+    voiceLockEngine: VoiceAppLockAndMoodEngine,
     sensitivity: Float = vaultManager.getOrbDragSensitivity(),
     onExpandHud: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSecretCodeVerifier: () -> Unit = {},
     onEnterPip: () -> Boolean,
     onStop: () -> Unit
 ) {
     val vault by vaultManager.vaultState.collectAsState()
+    val moodEvaluation by voiceLockEngine.lastMoodEvaluation.collectAsState()
     val dragSensitivity = vault.orbDragSensitivity.coerceIn(0.1f, 1.0f)
     val density = androidx.compose.ui.platform.LocalDensity.current
 
@@ -1042,23 +1303,21 @@ private fun JarvisStageCCornerOrbView(
         label = "orb_spin"
     )
 
-    // Dynamic Reactive Audio Amplitude
     val activeRms = if (liveState == LiveConnectionState.LIVE_AI_SPEAKING) outputRms else inputRms
     val audioGlowFactor = (activeRms / 60f).coerceIn(0.1f, 1.4f)
 
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .testTag("stage_c_corner_orb_container")
     ) {
-        val screenWidth = maxWidth
-        val screenHeight = maxHeight
         val screenWidthPx = constraints.maxWidth.toFloat()
         val screenHeightPx = constraints.maxHeight.toFloat()
         val maxOffsetX = (screenWidthPx - orbSizePx).coerceAtLeast(0f)
         val maxOffsetY = (screenHeightPx - orbSizePx).coerceAtLeast(0f)
 
-        // Dock initially in bottom-right corner with safe margins
         LaunchedEffect(screenWidthPx, screenHeightPx) {
             if (!isDockInitialized && screenWidthPx > 0) {
                 val marginY = with(density) { 140.dp.toPx() }
@@ -1074,20 +1333,24 @@ private fun JarvisStageCCornerOrbView(
         var hudTouchX by remember { mutableFloatStateOf(540f) }
         var hudTouchY by remember { mutableFloatStateOf(1200f) }
 
-        // 1. Live Interactive Main Window Viewer (Full screen visibility behind corner orb)
+        // 1. Live Neural Viewport (Clean, Clutter-Free Observation Canvas)
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 120.dp)
+                .padding(top = 12.dp, start = 16.dp, end = 16.dp, bottom = 124.dp)
         ) {
             Surface(
                 color = StarkCardBg,
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(14.dp),
                 border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
-                modifier = Modifier.fillMaxWidth().height(42.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
             ) {
                 Row(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -1095,17 +1358,20 @@ private fun JarvisStageCCornerOrbView(
                         Surface(shape = CircleShape, color = EmeraldTertiary, modifier = Modifier.size(8.dp)) {}
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "LIVE WINDOW: $actionDetail",
+                            text = "NEURAL STREAM: $actionDetail",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = TextPrimary
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Text(
-                        text = "HUD: (${hudTouchX.roundToInt()}, ${hudTouchY.roundToInt()})",
-                        fontSize = 11.sp,
+                        text = moodEvaluation.detectedMood.romanUrduLabel,
+                        fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = StarkCyan
+                        fontWeight = FontWeight.Bold,
+                        color = EmeraldTertiary
                     )
                 }
             }
@@ -1113,8 +1379,8 @@ private fun JarvisStageCCornerOrbView(
             Spacer(modifier = Modifier.height(10.dp))
 
             Surface(
-                color = Color(0xFF030712),
-                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF040812),
+                shape = RoundedCornerShape(18.dp),
                 border = BorderStroke(1.dp, DarkSurfaceBorder),
                 modifier = Modifier
                     .weight(1f)
@@ -1133,12 +1399,12 @@ private fun JarvisStageCCornerOrbView(
                         val grid = 44.dp.toPx()
                         var cx = 0f
                         while (cx < w) {
-                            drawLine(color = Color(0xFF0A1828), start = Offset(cx, 0f), end = Offset(cx, h), strokeWidth = 1f)
+                            drawLine(color = Color(0xFF091526), start = Offset(cx, 0f), end = Offset(cx, h), strokeWidth = 1f)
                             cx += grid
                         }
                         var cy = 0f
                         while (cy < h) {
-                            drawLine(color = Color(0xFF0A1828), start = Offset(0f, cy), end = Offset(w, cy), strokeWidth = 1f)
+                            drawLine(color = Color(0xFF091526), start = Offset(0f, cy), end = Offset(w, cy), strokeWidth = 1f)
                             cy += grid
                         }
                         drawCircle(
@@ -1149,22 +1415,31 @@ private fun JarvisStageCCornerOrbView(
                         )
                     }
                     Column(
-                        modifier = Modifier.align(Alignment.Center).padding(20.dp),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(Icons.Default.Layers, contentDescription = null, tint = StarkCyan.copy(alpha = 0.5f), modifier = Modifier.size(40.dp))
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Icon(
+                            imageVector = Icons.Default.Layers,
+                            contentDescription = null,
+                            tint = StarkCyan.copy(alpha = 0.55f),
+                            modifier = Modifier.size(42.dp)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "LIVE MAIN WINDOW OBSERVATION STREAM ACTIVE",
+                            text = "JARVIS AUTONOMOUS OS CONTROLLER ACTIVE",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = StarkCyan,
-                            letterSpacing = 1.sp
+                            letterSpacing = 1.sp,
+                            textAlign = TextAlign.Center
                         )
                         Text(
-                            text = "Background apps fully visible • Continuous Live Screen Vision",
+                            text = "Voice Lock, Mood Analysis, Routines & Memory running silently in backend",
                             fontSize = 11.sp,
                             color = TextSecondary,
+                            textAlign = TextAlign.Center,
                             modifier = Modifier.padding(top = 4.dp)
                         )
                     }
@@ -1172,21 +1447,20 @@ private fun JarvisStageCCornerOrbView(
             }
         }
 
-        // Unobstructed / Transparent Live Interactive Workspace View
+        // 2. Bottom Live Subtitle & Quick Control Bar
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(20.dp),
+                .padding(horizontal = 18.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.Bottom
         ) {
-            // Live Subtitle Transcript Float Card
             if (userTranscript.isNotBlank() || aiTranscript.isNotBlank()) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 12.dp),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg.copy(alpha = 0.88f)),
-                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
+                    colors = CardDefaults.cardColors(containerColor = StarkCardBg.copy(alpha = 0.92f)),
+                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.40f)),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -1214,19 +1488,18 @@ private fun JarvisStageCCornerOrbView(
                 }
             }
 
-            // Quick Control Bottom Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    color = StarkCardBg.copy(alpha = 0.85f),
+                    color = StarkCardBg.copy(alpha = 0.9f),
                     shape = RoundedCornerShape(20.dp),
                     border = BorderStroke(1.dp, DarkSurfaceBorder)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Surface(
@@ -1245,6 +1518,22 @@ private fun JarvisStageCCornerOrbView(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Secret Code Quick Button
+                    IconButton(
+                        onClick = onOpenSecretCodeVerifier,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(StarkCardBg, CircleShape)
+                            .border(1.dp, EmeraldTertiary.copy(alpha = 0.6f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = "Verify or Type Secret Code",
+                            tint = EmeraldTertiary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
                     // PiP Button
                     IconButton(
                         onClick = { onEnterPip() },
@@ -1277,7 +1566,7 @@ private fun JarvisStageCCornerOrbView(
                         )
                     }
 
-                    // Expand HUD
+                    // Expand Neural Status Console
                     IconButton(
                         onClick = onExpandHud,
                         modifier = Modifier
@@ -1287,7 +1576,7 @@ private fun JarvisStageCCornerOrbView(
                     ) {
                         Icon(
                             imageVector = Icons.Default.OpenInFull,
-                            contentDescription = "Expand HUD",
+                            contentDescription = "Expand Neural Console",
                             tint = StarkCyan,
                             modifier = Modifier.size(18.dp)
                         )
@@ -1312,7 +1601,7 @@ private fun JarvisStageCCornerOrbView(
             }
         }
 
-        // Draggable 92px x 92px (92.dp) Glowing Arc-Reactor Orb Docked in Corner
+        // 3. Draggable 92.dp Glowing Arc-Reactor Orb with Magnetic Edge Snap
         Box(
             modifier = Modifier
                 .offset { IntOffset(animatedOffsetX.roundToInt(), animatedOffsetY.roundToInt()) }
@@ -1376,7 +1665,6 @@ private fun JarvisStageCCornerOrbView(
                             offsetY = finalSnap.targetY
                             snappedEdgeLabel = finalSnap.snappedEdge
                         } else if (totalDistance < slopThresholdPx) {
-                            // If user performed a clean tap without exceeding the anti-accidental slop threshold
                             onExpandHud()
                         }
                     }
@@ -1384,7 +1672,6 @@ private fun JarvisStageCCornerOrbView(
                 .testTag("jarvis_corner_floating_orb"),
             contentAlignment = Alignment.Center
         ) {
-            // Dragging / Magnetic Edge Snap feedback badge directly above orb
             if (isDraggingState) {
                 Surface(
                     color = StarkCardBg.copy(alpha = 0.95f),
@@ -1395,9 +1682,9 @@ private fun JarvisStageCCornerOrbView(
                         .offset(y = (-28).dp)
                 ) {
                     val statusTag = if (snappedEdgeLabel != "NONE") {
-                        "MAGNETIC PULL [$snappedEdgeLabel] (${offsetX.roundToInt()}, ${offsetY.roundToInt()})"
+                        "MAGNETIC SNAP [$snappedEdgeLabel]"
                     } else {
-                        "DRAGGING (${offsetX.roundToInt()}, ${offsetY.roundToInt()})"
+                        "MOVING (${offsetX.roundToInt()}, ${offsetY.roundToInt()})"
                     }
                     Text(
                         text = statusTag,
@@ -1410,12 +1697,10 @@ private fun JarvisStageCCornerOrbView(
                 }
             }
 
-            // Arc-Reactor Canvas with Reactive Audio Pulse
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val radius = size.minDimension / 2f
                 val center = Offset(size.width / 2f, size.height / 2f)
 
-                // Outer reactive glow
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
@@ -1429,7 +1714,6 @@ private fun JarvisStageCCornerOrbView(
                     center = center
                 )
 
-                // Rotating Segmented Reactor Ring
                 rotate(spinAngle, pivot = center) {
                     for (i in 0 until 8) {
                         val angle = (i * 45f) * (PI / 180f)
@@ -1452,7 +1736,6 @@ private fun JarvisStageCCornerOrbView(
                     )
                 }
 
-                // Inner core
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
@@ -1468,7 +1751,6 @@ private fun JarvisStageCCornerOrbView(
                 )
             }
 
-            // Central Icon based on State
             Icon(
                 imageVector = when (actionState) {
                     JarvisOrbActionState.IN_CALL -> Icons.Default.Call
@@ -1491,6 +1773,7 @@ private fun JarvisStageCCornerOrbView(
 @Composable
 private fun JarvisSettingsAndVaultModal(
     vaultManager: BiometricVaultManager,
+    onOpenAdvancedSettingsHub: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val vault by vaultManager.vaultState.collectAsState()
@@ -1507,8 +1790,8 @@ private fun JarvisSettingsAndVaultModal(
                 .fillMaxWidth(0.92f)
                 .padding(16.dp),
             colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-            border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.4f)),
-            shape = RoundedCornerShape(16.dp)
+            border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f)),
+            shape = RoundedCornerShape(18.dp)
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
                 Row(
@@ -1517,9 +1800,9 @@ private fun JarvisSettingsAndVaultModal(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "JARVIS VAULT & CONTROLS",
+                        text = "JARVIS VAULT & ORB CONTROLS",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.ExtraBold,
                         color = StarkCyan,
                         letterSpacing = 1.sp
                     )
@@ -1560,7 +1843,6 @@ private fun JarvisSettingsAndVaultModal(
                     singleLine = true
                 )
 
-                // Floating Orb Drag Sensitivity Section
                 Spacer(modifier = Modifier.height(14.dp))
                 HorizontalDivider(color = DarkSurfaceBorder, thickness = 1.dp)
                 Spacer(modifier = Modifier.height(12.dp))
@@ -1591,7 +1873,6 @@ private fun JarvisSettingsAndVaultModal(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Sensitivity Preset Chips
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1632,7 +1913,9 @@ private fun JarvisSettingsAndVaultModal(
                         activeTrackColor = StarkCyan,
                         inactiveTrackColor = DarkSurfaceBorder
                     ),
-                    modifier = Modifier.fillMaxWidth().testTag("slider_orb_drag_sensitivity")
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("slider_orb_drag_sensitivity")
                 )
 
                 Text(
@@ -1648,22 +1931,36 @@ private fun JarvisSettingsAndVaultModal(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                Button(
-                    onClick = {
-                        vaultManager.enrollVault(
-                            masterPin = pinEdit,
-                            lockScreenPattern = vault.lockScreenPattern,
-                            secretVoiceWord = voiceEdit,
-                            biometricEnrolled = true
-                        )
-                        vaultManager.setOrbDragSensitivity(orbSensitivityEdit)
-                        onDismiss()
-                    },
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
-                    shape = RoundedCornerShape(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("SAVE SETTINGS & VAULT", fontWeight = FontWeight.Bold, color = Color(0xFF030712))
+                    OutlinedButton(
+                        onClick = onOpenAdvancedSettingsHub,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, StarkCyan)
+                    ) {
+                        Text("SYSTEM HUB", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = StarkCyan)
+                    }
+
+                    Button(
+                        onClick = {
+                            vaultManager.enrollVault(
+                                masterPin = pinEdit,
+                                lockScreenPattern = vault.lockScreenPattern,
+                                secretVoiceWord = voiceEdit,
+                                biometricEnrolled = true
+                            )
+                            vaultManager.setOrbDragSensitivity(orbSensitivityEdit)
+                            onDismiss()
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("SAVE VAULT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF030712))
+                    }
                 }
             }
         }
@@ -1671,17 +1968,20 @@ private fun JarvisSettingsAndVaultModal(
 }
 
 // =========================================================================
-// EXPANDED HUD / TERMINAL DRAWER
+// REVAMPED NEURAL STATUS CONSOLE (ZERO HISTORY / ROUTINES / MEMORY UI LISTS)
 // =========================================================================
 @Composable
 private fun JarvisExpandedHudDrawer(
     viewModel: VoiceAssistantViewModel,
-    osKernel: OsKernel,
+    voiceLockEngine: VoiceAppLockAndMoodEngine,
+    onOpenVoiceLockSetup: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val logs by viewModel.jarvisTerminalLogs.collectAsState()
     val userTranscript by viewModel.liveUserTranscript.collectAsState()
     val aiTranscript by viewModel.liveAiTranscript.collectAsState()
+    val moodEvaluation by voiceLockEngine.lastMoodEvaluation.collectAsState()
+    val secretCodes by voiceLockEngine.secretCodes.collectAsState()
+    val availableCodes = secretCodes.count { it.isAvailableNow }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1690,16 +1990,15 @@ private fun JarvisExpandedHudDrawer(
         Card(
             modifier = Modifier
                 .fillMaxWidth(0.94f)
-                .heightIn(max = 580.dp)
                 .padding(14.dp),
             colors = CardDefaults.cardColors(containerColor = StarkDeepBlack),
-            border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f)),
-            shape = RoundedCornerShape(16.dp)
+            border = BorderStroke(1.5.dp, StarkCyan.copy(alpha = 0.55f)),
+            shape = RoundedCornerShape(18.dp)
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
+                    .fillMaxWidth()
+                    .padding(18.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1707,12 +2006,12 @@ private fun JarvisExpandedHudDrawer(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Terminal, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Security, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "JARVIS HUD & OS KERNEL LOGS",
+                            text = "JARVIS NEURAL CORE & BACKEND ENGINE",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.ExtraBold,
                             color = StarkCyan,
                             letterSpacing = 1.sp
                         )
@@ -1722,58 +2021,85 @@ private fun JarvisExpandedHudDrawer(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-                // Transcripts Box
+                // Live Dialogue Stream Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, DarkSurfaceBorder)
                 ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = "User: ${userTranscript.ifBlank { "Listening..." }}",
-                            fontSize = 11.sp,
+                            text = "You: ${userTranscript.ifBlank { "Listening for your voice..." }}",
+                            fontSize = 12.sp,
                             color = TextSecondary
                         )
                         Text(
-                            text = "Jarvis: ${aiTranscript.ifBlank { "Standby" }}",
-                            fontSize = 12.sp,
+                            text = "Jarvis: ${aiTranscript.ifBlank { "Ready for autonomous execution." }}",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             color = StarkCyan,
-                            modifier = Modifier.padding(top = 4.dp)
+                            modifier = Modifier.padding(top = 6.dp)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Terminal Logs
-                Text(
-                    text = "LIVE EXECUTION LOGS",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextSecondary,
-                    letterSpacing = 1.sp
-                )
-
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(top = 6.dp)
-                        .background(Color(0xFF020408), RoundedCornerShape(6.dp))
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                // Silent Backend Systems Summary (No visible History, Routines, or Memory lists)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = StarkCardBg),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, EmeraldTertiary.copy(alpha = 0.4f))
                 ) {
-                    items(logs.takeLast(25)) { log ->
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
-                            text = "[${log.layerTag}] ${log.command} → ${log.status} (${log.detail})",
+                            text = "SILENT BACKEND INTELLIGENCE (AUTO-MANAGED)",
                             fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = if (log.status == "SAVED" || log.status == "EXECUTED") EmeraldTertiary else StarkCyan
+                            fontWeight = FontWeight.ExtraBold,
+                            color = EmeraldTertiary,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = "• Mood & Andaz Engine: ${moodEvaluation.detectedMood.romanUrduLabel} (${moodEvaluation.detectedAndaz.displayName})",
+                            fontSize = 11.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "• Universal App Voice Lock: Active ($availableCodes/10 Secret Codes Ready)",
+                            fontSize = 11.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "• Routines, Memory & Command Processing: Running 100% silently in backend",
+                            fontSize = 11.sp,
+                            color = TextSecondary
                         )
                     }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = onOpenVoiceLockSetup,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF030712), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "CONFIGURE VOICE LOCK & 10 SECRET CODES",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF030712)
+                    )
                 }
             }
         }

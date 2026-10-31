@@ -126,6 +126,29 @@ object UiTools {
             )
         }
         val (targetPkg, label) = resolved
+        val voiceLockEngine = com.example.engine.VoiceAppLockAndMoodEngine.getInstance(context)
+        val lockChallenge = voiceLockEngine.interceptAppOpenCommand(
+            appName = label,
+            packageName = targetPkg,
+            rawUtterance = cleaned,
+            pendingAction = com.example.data.model.VoiceAction(action = "open_app", target = label)
+        )
+        if (lockChallenge != null) {
+            return ToolResult(
+                ok = false,
+                status = ToolStatus.NEEDS_CONFIRMATION.name,
+                tool = "open_app",
+                message = lockChallenge.failureReasonRomanUrdu,
+                verified = false,
+                verificationNote = "Voice Lock active for $label ($targetPkg). Awaiting 1 of 10 Secret Codes.",
+                data = JSONObject().apply {
+                    put("packageName", targetPkg)
+                    put("appLabel", label)
+                    put("requiresSecretCode", true)
+                },
+                errorCode = "VOICE_LOCK_SECRET_CODE_REQUIRED"
+            )
+        }
         val launchIntent = context.packageManager.getLaunchIntentForPackage(targetPkg)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
         } ?: return ToolResult.failure(

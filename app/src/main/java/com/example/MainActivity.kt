@@ -15,64 +15,74 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoMode
-import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.engine.JarvisHandsFreeEngine
 import com.example.service.WakeWordForegroundService
-import com.example.ui.screens.HistoryLogScreen
-import com.example.ui.screens.OmniOrbScreen
-import com.example.ui.screens.RoutinesScreen
+import com.example.ui.screens.JarvisStageFlowScreen
 import com.example.ui.screens.SettingsHubScreen
-import com.example.ui.screens.VocabularyScreen
 import com.example.ui.theme.CyanPrimary
+import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.MyApplicationTheme
-import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextPrimary
 import com.example.ui.viewmodel.VoiceAssistantViewModel
 
+/**
+ * Revamped navigation destinations:
+ * History, Routines, and Memory (Vocabulary) tabs have been completely removed from the UI.
+ * Their engines (CommandHistoryRepository, RoutineRepository, MemoryBankRepository, StandingRulesEngine)
+ * continue to run 100% silently in the backend.
+ */
 enum class OmniMainDestination(
     val label: String,
     val icon: ImageVector,
     val testTag: String
 ) {
-    HOME("Home", Icons.Default.Mic, "nav_tab_home"),
-    HISTORY("History", Icons.Default.History, "nav_tab_history"),
-    ROUTINES("Routines", Icons.Default.AutoMode, "nav_tab_routines"),
-    VOCABULARY("Memory", Icons.Default.School, "nav_tab_vocabulary"),
-    SETTINGS("Settings", Icons.Default.Settings, "nav_tab_settings")
+    HOME("Neural Core", Icons.Default.Mic, "nav_tab_home"),
+    SETTINGS("System Config", Icons.Default.Settings, "nav_tab_settings")
 }
 
 class MainActivity : ComponentActivity() {
@@ -149,8 +159,7 @@ fun MainScreen(
     onEnterPipMode: () -> Boolean = { false }
 ) {
     val context = LocalContext.current
-    var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
-    val destinations = OmniMainDestination.entries
+    var showFullSettingsHub by rememberSaveable { mutableStateOf(false) }
 
     var hasMicPermission by remember {
         mutableStateOf(
@@ -177,123 +186,87 @@ fun MainScreen(
         }
     }
 
-    if (selectedTabIndex != 0) {
+    if (showFullSettingsHub) {
         BackHandler {
-            selectedTabIndex = 0
+            showFullSettingsHub = false
         }
     }
 
-    androidx.compose.foundation.layout.BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val isWideScreen = maxWidth >= 600.dp
+    Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        containerColor = DarkBackground
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .testTag("omnivoice_revamped_root")
+        ) {
+            // Full-screen Revamped Jarvis Neural OS Interface (Zero Bottom-Bar Clutter;
+            // History, Routines & Memory run 100% silently in the backend)
+            JarvisStageFlowScreen(
+                viewModel = viewModel,
+                onEnterPipMode = onEnterPipMode,
+                onOpenAdvancedSettingsHub = { showFullSettingsHub = true }
+            )
 
-        if (isWideScreen) {
-            // Tablet / Foldable / Landscape: Canonical Side NavigationRail Layout
-            androidx.compose.foundation.layout.Row(modifier = Modifier.fillMaxSize()) {
-                androidx.compose.material3.NavigationRail(
-                    containerColor = DarkSurface,
-                    modifier = Modifier.testTag("omnivoice_nav_rail")
-                ) {
-                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(16.dp))
-                    destinations.forEachIndexed { index, dest ->
-                        val isSelected = selectedTabIndex == index
-                        androidx.compose.material3.NavigationRailItem(
-                            selected = isSelected,
-                            onClick = { selectedTabIndex = index },
-                            icon = {
-                                Icon(
-                                    imageVector = dest.icon,
-                                    contentDescription = dest.label
-                                )
-                            },
-                            label = {
-                                Text(
-                                    text = dest.label,
-                                    fontSize = 11.sp
-                                )
-                            },
-                            colors = androidx.compose.material3.NavigationRailItemDefaults.colors(
-                                selectedIconColor = Color(0xFF041019),
-                                selectedTextColor = CyanPrimary,
-                                indicatorColor = CyanPrimary,
-                                unselectedIconColor = TextSecondary,
-                                unselectedTextColor = TextSecondary
-                            ),
-                            modifier = Modifier.testTag(dest.testTag)
-                        )
-                    }
-                }
-
-                Box(
+            // Optional Full System Configuration Overlay when user requests advanced settings
+            AnimatedVisibility(
+                visible = showFullSettingsHub,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .weight(1f)
+                        .background(DarkBackground)
+                        .statusBarsPadding()
+                        .testTag("revamped_settings_hub_overlay")
                 ) {
-                    when (destinations[selectedTabIndex]) {
-                        OmniMainDestination.HOME -> com.example.ui.screens.JarvisStageFlowScreen(
-                            viewModel = viewModel,
-                            onEnterPipMode = onEnterPipMode
-                        )
-                        OmniMainDestination.HISTORY -> HistoryLogScreen(viewModel = viewModel)
-                        OmniMainDestination.ROUTINES -> RoutinesScreen(viewModel = viewModel)
-                        OmniMainDestination.VOCABULARY -> VocabularyScreen(viewModel = viewModel)
-                        OmniMainDestination.SETTINGS -> SettingsHubScreen(viewModel = viewModel)
-                    }
-                }
-            }
-        } else {
-            // Handheld / Compact Screen: Bottom NavigationBar Layout
-            Scaffold(
-                contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                bottomBar = {
-                    NavigationBar(
-                        containerColor = DarkSurface,
-                        windowInsets = WindowInsets.navigationBars,
-                        modifier = Modifier.testTag("omnivoice_bottom_nav")
+                    Surface(
+                        color = DarkSurface,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        destinations.forEachIndexed { index, dest ->
-                            val isSelected = selectedTabIndex == index
-                            NavigationBarItem(
-                                selected = isSelected,
-                                onClick = { selectedTabIndex = index },
-                                icon = {
-                                    Icon(
-                                        imageVector = dest.icon,
-                                        contentDescription = dest.label
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = dest.label,
-                                        fontSize = 11.sp
-                                    )
-                                },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = Color(0xFF041019),
-                                    selectedTextColor = CyanPrimary,
-                                    indicatorColor = CyanPrimary,
-                                    unselectedIconColor = TextSecondary,
-                                    unselectedTextColor = TextSecondary
-                                ),
-                                modifier = Modifier.testTag(dest.testTag)
-                            )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = { showFullSettingsHub = false },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(CyanPrimary.copy(alpha = 0.14f), CircleShape)
+                                    .testTag("btn_back_from_settings_hub")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back to Neural Core",
+                                    tint = CyanPrimary
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "JARVIS NEURAL CONFIGURATION",
+                                    color = CyanPrimary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 1.5.sp
+                                )
+                                Text(
+                                    text = "Voice, Gestures, Security Vault & Diagnostics",
+                                    color = TextPrimary,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
-                }
-            ) { innerPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                ) {
-                    when (destinations[selectedTabIndex]) {
-                        OmniMainDestination.HOME -> com.example.ui.screens.JarvisStageFlowScreen(
-                            viewModel = viewModel,
-                            onEnterPipMode = onEnterPipMode
-                        )
-                        OmniMainDestination.HISTORY -> HistoryLogScreen(viewModel = viewModel)
-                        OmniMainDestination.ROUTINES -> RoutinesScreen(viewModel = viewModel)
-                        OmniMainDestination.VOCABULARY -> VocabularyScreen(viewModel = viewModel)
-                        OmniMainDestination.SETTINGS -> SettingsHubScreen(viewModel = viewModel)
+
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        SettingsHubScreen(viewModel = viewModel)
                     }
                 }
             }
