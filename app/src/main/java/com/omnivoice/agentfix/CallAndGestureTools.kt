@@ -46,6 +46,7 @@ object CallController {
                 var answeredViaTelecom = false
                 if (hasAnswerPerm && telecomManager != null) {
                     try {
+                        @Suppress("DEPRECATION")
                         telecomManager.acceptRingingCall()
                         answeredViaTelecom = true
                     } catch (e: Exception) {
@@ -104,6 +105,7 @@ object CallController {
                 var endedViaTelecom = false
                 if (hasAnswerPerm && telecomManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     try {
+                        @Suppress("DEPRECATION")
                         endedViaTelecom = telecomManager.endCall()
                     } catch (e: Exception) {
                         AgentLog.w("CallController", "TelecomManager.endCall failed: ${e.message}")

@@ -38,8 +38,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -1166,7 +1166,7 @@ private fun SmartContactItemCard(
                 item {
                     QuickActionPill(
                         label = "WhatsApp",
-                        icon = Icons.Default.Send,
+                        icon = Icons.AutoMirrored.Filled.Send,
                         color = AccentEmerald,
                         onClick = onLaunchWhatsApp
                     )
@@ -1183,7 +1183,7 @@ private fun SmartContactItemCard(
                     item {
                         QuickActionPill(
                             label = "IG DM",
-                            icon = Icons.Default.Send,
+                            icon = Icons.AutoMirrored.Filled.Send,
                             color = Color(0xFFEC4899),
                             onClick = onLaunchInstagramDm
                         )
@@ -1193,7 +1193,7 @@ private fun SmartContactItemCard(
                     item {
                         QuickActionPill(
                             label = "FB Msg",
-                            icon = Icons.Default.Send,
+                            icon = Icons.AutoMirrored.Filled.Send,
                             color = Color(0xFF3B82F6),
                             onClick = onLaunchFacebookMsg
                         )

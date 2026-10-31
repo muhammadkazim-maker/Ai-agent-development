@@ -227,23 +227,6 @@ class ActionExecutor(private val context: Context) {
                     action.spokenResponse.ifBlank { "Saved to long-term memory." }
                 )
 
-                "verify_secret_code", "type_secret_code" -> {
-                    val codeInput = action.parameters["secretCode"] ?: action.parameters["code"] ?: action.target
-                    val lockEngine = VoiceAppLockAndMoodEngine.getInstance(context)
-                    when (val verifyRes = lockEngine.verifySecretCode(codeInput)) {
-                        is SecretCodeVerificationResult.Unlocked -> {
-                            verifyRes.pendingAction?.let { pending ->
-                                execute(pending)
-                            }
-                            ExecutionResult.Success(verifyRes.spokenConfirmationRomanUrdu)
-                        }
-                        is SecretCodeVerificationResult.CodeOnCooldown ->
-                            ExecutionResult.Failure(verifyRes.spokenErrorRomanUrdu)
-                        is SecretCodeVerificationResult.InvalidCode ->
-                            ExecutionResult.Failure(verifyRes.spokenErrorRomanUrdu)
-                    }
-                }
-
                 "general_chat" -> ExecutionResult.Success(action.spokenResponse)
                 else -> ExecutionResult.Success(action.spokenResponse.ifBlank { "Action completed." })
             }
@@ -500,6 +483,7 @@ class ActionExecutor(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    @Suppress("DEPRECATION")
     private fun executeAnswerCall(): ExecutionResult {
         val hasAnswerPermission = ContextCompat.checkSelfPermission(
             context,
@@ -516,6 +500,7 @@ class ActionExecutor(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    @Suppress("DEPRECATION")
     private fun executeEndCall(): ExecutionResult {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val hasPhonePermission = ContextCompat.checkSelfPermission(
@@ -644,17 +629,6 @@ class ActionExecutor(private val context: Context) {
     // --- App Launching & Navigation ---
 
     private fun executeOpenApp(appName: String): ExecutionResult {
-        val lockEngine = VoiceAppLockAndMoodEngine.getInstance(context)
-        val challenge = lockEngine.interceptAppOpenCommand(
-            appName = appName,
-            packageName = appName,
-            rawUtterance = appName,
-            pendingAction = VoiceAction(action = "open_app", target = appName)
-        )
-        if (challenge != null) {
-            return ExecutionResult.Failure(challenge.failureReasonRomanUrdu)
-        }
-
         val pm = context.packageManager
         val query = appName.lowercase().trim()
 

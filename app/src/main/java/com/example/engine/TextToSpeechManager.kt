@@ -3,270 +3,416 @@ package com.example.engine
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.os.Build
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import java.util.Locale
+import java.util.UUID
 
-class TextToSpeechManager(private val context: Context) {
+/**
+ * Accent Training Mode for OmniVoice AGI Speech Synthesis.
+ * Supports Complete Urdu Accent (ur-PK), Complete English Accent (en-US/en-GB),
+ * Complete Mixed Urdu-English Accent, and Auto-Detect Trilingual mode.
+ */
+enum class AccentTrainingMode(
+    val title: String,
+    val subtitle: String,
+    val samplePhrase: String
+) {
+    AUTO_TRILINGUAL(
+        title = "Auto Trilingual (Urdu + Mixed + English)",
+        subtitle = "Har जुबान aur lehjay ko khud pehchan kar natural accent mein baat karega",
+        samplePhrase = "Assalam-o-Alaikum Boss! Main aapka Super AGI assistant hoon, aur main Urdu, English aur Mixed Urdu mein bilkul natural accent ke sath baat kar sakta hoon."
+    ),
+    URDU_COMPLETE_ACCENT(
+        title = "Urdu Complete Accent (اردو خالص لہجہ)",
+        subtitle = "Pure Pakistani Urdu Nastaliq phonetics & neural prosody (ur-PK)",
+        samplePhrase = "السلام علیکم باس! میں آپ کا سپر اے جی آئی اسسٹنٹ ہوں اور خالص اردو لہجے میں آپ کے ہر حکم کی تعمیل کے لیے حاضر ہوں۔"
+    ),
+    MIXED_URDU_COMPLETE_ACCENT(
+        title = "Mixed Urdu + English Complete Accent",
+        subtitle = "Seamless code-switching between Urdu & English technical vocabulary",
+        samplePhrase = "Jee Boss, main aapke complex se complex tasks, coding aur mobile automation super speed aur natural mixed accent ke sath handle kar sakta hoon."
+    ),
+    ENGLISH_COMPLETE_ACCENT(
+        title = "English Complete Accent (US / UK Neural)",
+        subtitle = "Crisp native English articulation for global & technical communication",
+        samplePhrase = "Hello Boss! My neural speech engine is calibrated with a crystal-clear English accent for advanced AGI reasoning and full device control."
+    )
+}
+
+/**
+ * Result of probing on-device Text-To-Speech voice packs (`F-045`–`F-052`).
+ */
+data class TtsVoicePackStatus(
+    val isInitialized: Boolean = false,
+    val isUrduPkInstalled: Boolean = false,
+    val isEnglishPkInstalled: Boolean = false,
+    val isEnglishInInstalled: Boolean = false,
+    val isEnglishUsInstalled: Boolean = false,
+    val activeLocaleTag: String = "en-US",
+    val activeVoiceName: String = "Default Neural Voice",
+    val guidanceBanner: String? = null
+)
+
+class TextToSpeechManager(
+    private val context: Context,
+    var onSpeechStarted: (() -> Unit)? = null,
+    var onSpeechCompleted: (() -> Unit)? = null
+) {
+
+    companion object {
+        private const val TAG = "TTSManager"
+
+        private val _activeAccentMode = MutableStateFlow(AccentTrainingMode.AUTO_TRILINGUAL)
+        val activeAccentMode: StateFlow<AccentTrainingMode> = _activeAccentMode.asStateFlow()
+
+        fun setAccentTrainingMode(mode: AccentTrainingMode) {
+            _activeAccentMode.value = mode
+        }
+
+        fun createInstallTtsDataIntent(): Intent {
+            return Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+        }
+    }
 
     private var tts: TextToSpeech? = null
     private var isInitialized = false
-    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private val ttsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val _isSpeaking = MutableStateFlow(false)
-    val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
-
-    private val _isUrduVoiceAvailable = MutableStateFlow(false)
-    val isUrduVoiceAvailable: StateFlow<Boolean> = _isUrduVoiceAvailable.asStateFlow()
-
-    var onSpeechCompleted: (() -> Unit)? = null
-    var onSpeechStarted: (() -> Unit)? = null
-
-    companion object {
-        private const val TAG = "TextToSpeechManager"
-        private const val UTTERANCE_ID = "OmniVoiceUtterance"
-
-        /**
-         * Creates a 1-tap system intent to open the Android TTS Voice Data installer (`F-051`)
-         * when `ur-PK` offline voice data is missing on the user's phone.
-         */
-        fun createInstallTtsDataIntent(): Intent {
-            return Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-        }
-    }
+    private val _voicePackStatus = MutableStateFlow(TtsVoicePackStatus())
+    val voicePackStatus: StateFlow<TtsVoicePackStatus> = _voicePackStatus.asStateFlow()
 
     init {
-        initializeTts()
+        initTts()
     }
 
-    private fun initializeTts() {
-        ttsScope.launch {
-            try {
-                tts = TextToSpeech(context.applicationContext) { status ->
-                    if (status == TextToSpeech.SUCCESS) {
-                        isInitialized = true
-                        ttsScope.launch {
-                            try {
-                                tts?.language = Locale.getDefault()
-                                _isUrduVoiceAvailable.value = checkUrduVoicePackAvailableInternal()
-                                setupProgressListener()
-                                Log.d(TAG, "TTS successfully initialized (ur-PK available=${_isUrduVoiceAvailable.value})")
-                            } catch (e: Exception) {
-                                Log.w(TAG, "TTS language setup warning: ${e.message}")
-                            }
+    private fun initTts() {
+        try {
+            tts = TextToSpeech(context.applicationContext) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    isInitialized = true
+                    tts?.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+
+                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {
+                            onSpeechStarted?.invoke()
                         }
-                    } else {
-                        Log.e(TAG, "TTS initialization failed with status $status")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "TTS service binding unavailable: ${e.message}")
-            }
-        }
-    }
 
-    private fun checkUrduVoicePackAvailableInternal(): Boolean {
-        val engine = tts ?: return false
-        return try {
-            val urPk = engine.isLanguageAvailable(Locale.forLanguageTag("ur-PK"))
-            val urOnly = engine.isLanguageAvailable(Locale.forLanguageTag("ur"))
-            val available = (urPk >= TextToSpeech.LANG_AVAILABLE && urPk != TextToSpeech.LANG_MISSING_DATA) ||
-                (urOnly >= TextToSpeech.LANG_AVAILABLE && urOnly != TextToSpeech.LANG_MISSING_DATA)
-            _isUrduVoiceAvailable.value = available
-            available
-        } catch (_: Exception) {
-            false
+                        override fun onDone(utteranceId: String?) {
+                            val currentTurn = AudioOutputManager.activeTurnId.value
+                            if (currentTurn != null) {
+                                AudioOutputManager.completeTurnOutput(currentTurn)
+                            }
+                            onSpeechCompleted?.invoke()
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            val currentTurn = AudioOutputManager.activeTurnId.value
+                            if (currentTurn != null) {
+                                AudioOutputManager.completeTurnOutput(currentTurn)
+                            }
+                            onSpeechCompleted?.invoke()
+                        }
+                    })
+
+                    probeAvailableVoicePacks()
+                } else {
+                    Log.e(TAG, "TTS Initialization failed with status: $status")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception initializing TextToSpeech: ${e.message}")
         }
     }
 
     /**
-     * Checks whether the `ur-PK` / `ur` TTS voice pack is installed and ready on this phone (`F-050`).
+     * Probes installed TTS voice packs (`ur-PK`, `en-PK`, `en-IN`, `en-US`) and surfaces
+     * a helpful banner if the offline Urdu (`ur-PK`) voice pack is missing (`F-052`).
      */
-    fun isUrduVoicePackInstalled(): Boolean {
-        if (!isInitialized || tts == null) return _isUrduVoiceAvailable.value
-        return checkUrduVoicePackAvailableInternal()
+    fun probeAvailableVoicePacks(): TtsVoicePackStatus {
+        val engine = tts ?: return _voicePackStatus.value
+        val urPk = isLocaleSupported(engine, Locale.forLanguageTag("ur-PK")) ||
+            isLocaleSupported(engine, Locale.forLanguageTag("ur-IN")) ||
+            isLocaleSupported(engine, Locale.forLanguageTag("ur"))
+        val enPk = isLocaleSupported(engine, Locale.forLanguageTag("en-PK"))
+        val enIn = isLocaleSupported(engine, Locale.forLanguageTag("en-IN")) ||
+            isLocaleSupported(engine, Locale.forLanguageTag("hi-IN"))
+        val enUs = isLocaleSupported(engine, Locale.US)
+
+        val chosenLocale = applyBestAvailableLocale(engine, Locale.forLanguageTag("ur-PK"))
+        val chosenVoiceName = try {
+            engine.voice?.name ?: chosenLocale.toLanguageTag()
+        } catch (_: Exception) {
+            chosenLocale.toLanguageTag()
+        }
+
+        val banner = if (!urPk) {
+            "Phonetic Urdu + English Neural Accent active. For offline nastaliq voice pack, install Google TTS Urdu (Pakistan)."
+        } else {
+            null
+        }
+
+        val status = TtsVoicePackStatus(
+            isInitialized = isInitialized,
+            isUrduPkInstalled = urPk,
+            isEnglishPkInstalled = enPk,
+            isEnglishInInstalled = enIn,
+            isEnglishUsInstalled = enUs,
+            activeLocaleTag = chosenLocale.toLanguageTag(),
+            activeVoiceName = chosenVoiceName,
+            guidanceBanner = banner
+        )
+        _voicePackStatus.value = status
+        return status
     }
 
-    private fun setupProgressListener() {
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {
-                _isSpeaking.value = true
-                onSpeechStarted?.invoke()
-            }
-
-            override fun onDone(utteranceId: String?) {
-                if (utteranceId == UTTERANCE_ID || utteranceId?.endsWith("_FINAL") == true) {
-                    _isSpeaking.value = false
-                    abandonAudioFocus()
-                    onSpeechCompleted?.invoke()
-                }
-            }
-
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
-                _isSpeaking.value = false
-                abandonAudioFocus()
-                onSpeechCompleted?.invoke()
-            }
-        })
-    }
-
-    private fun applyBestAvailableLocale(requestedLocale: Locale?) {
-        val engine = tts ?: return
-        val target = requestedLocale ?: Locale.getDefault()
-        val availability = engine.isLanguageAvailable(target)
-        if (availability >= TextToSpeech.LANG_AVAILABLE && availability != TextToSpeech.LANG_MISSING_DATA) {
-            engine.language = target
-            return
-        }
-        val langOnly = Locale.forLanguageTag(target.language)
-        val langAvail = engine.isLanguageAvailable(langOnly)
-        if (langAvail >= TextToSpeech.LANG_AVAILABLE && langAvail != TextToSpeech.LANG_MISSING_DATA) {
-            engine.language = langOnly
-            return
-        }
-        // Fallback chain: en-PK -> en-IN -> en-US (`F-052`)
-        for (fallbackTag in listOf("en-PK", "en-IN", "en-US")) {
-            val fbLocale = Locale.forLanguageTag(fallbackTag)
-            val fbAvail = engine.isLanguageAvailable(fbLocale)
-            if (fbAvail >= TextToSpeech.LANG_AVAILABLE && fbAvail != TextToSpeech.LANG_MISSING_DATA) {
-                engine.language = fbLocale
-                return
-            }
+    /**
+     * Opens Android's system TTS voice data installer so the user can download the offline `ur-PK` pack (`F-052`).
+     */
+    fun createInstallTtsDataIntent(): Intent {
+        return Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
     }
 
     /**
      * Normalizes a raw assistant reply via [SpeechNormaliser] and speaks it across bilingual
-     * `LanguageRun` segments (`ur-PK` vs `en-US` / `en-PK`), automatically falling back to
-     * phonetic Roman Urdu if the `ur-PK` voice pack is missing (`F-043`, `F-050`, `F-052`).
+     * `LanguageRun` segments (`ur-PK` for Urdu script, `en-PK`/`en-IN`/`en-US` for Latin/English),
+     * guarded by [AudioOutputManager] so duplicate turns or simultaneous PCM+TTS never occur (`F-039`, `F-043`).
      */
     fun speakNormalized(
         rawReply: String,
         detectedLanguage: DetectedLanguage = LanguageProcessor.detectLanguage(rawReply),
+        turnId: String = UUID.randomUUID().toString(),
         pitch: Float = 1.0f,
-        speed: Float = 1.0f
+        speechRate: Float = 0.98f
     ): NormalizedSpeechReply {
-        val urduAvailable = isUrduVoicePackInstalled()
+        val status = _voicePackStatus.value
+        val mode = _activeAccentMode.value
+
+        val effectiveDetectedLang = when (mode) {
+            AccentTrainingMode.URDU_COMPLETE_ACCENT -> DetectedLanguage.URDU_NASTALIQ
+            AccentTrainingMode.ENGLISH_COMPLETE_ACCENT -> DetectedLanguage.ENGLISH
+            AccentTrainingMode.MIXED_URDU_COMPLETE_ACCENT ->
+                if (detectedLanguage == DetectedLanguage.ENGLISH) DetectedLanguage.ROMAN_URDU else detectedLanguage
+            AccentTrainingMode.AUTO_TRILINGUAL -> detectedLanguage
+        }
+
+        val shouldConvertRomanToUrdu = status.isUrduPkInstalled && (
+            mode == AccentTrainingMode.URDU_COMPLETE_ACCENT ||
+                effectiveDetectedLang == DetectedLanguage.URDU_NASTALIQ
+            )
+
         val normalized = SpeechNormaliser.normalizeForDisplayAndSpeech(
             rawReply = rawReply,
-            detectedLanguage = detectedLanguage,
-            convertRomanToUrduForTts = urduAvailable &&
-                (detectedLanguage == DetectedLanguage.ROMAN_URDU || detectedLanguage == DetectedLanguage.MIXED),
-            fallbackUrduToRomanIfMissingPack = !urduAvailable &&
-                detectedLanguage == DetectedLanguage.URDU_NASTALIQ
+            detectedLanguage = effectiveDetectedLang,
+            convertRomanToUrduForTts = shouldConvertRomanToUrdu,
+            fallbackUrduToRomanIfMissingPack = !status.isUrduPkInstalled &&
+                (effectiveDetectedLang == DetectedLanguage.URDU_NASTALIQ)
         )
 
-        if (!isInitialized || tts == null) {
-            Log.w(TAG, "TTS not ready yet, re-initializing")
-            initializeTts()
+        if (!isInitialized || normalized.speechText.isBlank()) {
+            onSpeechCompleted?.invoke()
             return normalized
         }
 
-        requestAudioFocus()
-        tts?.setPitch(pitch)
-        tts?.setSpeechRate(speed)
-
-        val runs = normalized.languageRuns
-        if (runs.isEmpty()) {
-            speak(normalized.speechText, pitch, speed, detectedLanguage.ttsLocale)
+        // Enforce single-owner audio output & deduplication by turnId
+        val acquired = AudioOutputManager.acquireTurnOutput(
+            turnId = turnId,
+            modality = AudioOutputManager.OutputModality.LOCAL_TTS,
+            ttsManager = this
+        )
+        if (!acquired) {
             return normalized
         }
 
-        _isSpeaking.value = true
+        AudioOutputManager.requestAssistantAudioFocus(context)
+        val engine = tts ?: return normalized
+
+        // Slightly warmer, human-like prosody for Urdu / Mixed vs crisp rate for English
+        val tunedPitch = when (effectiveDetectedLang) {
+            DetectedLanguage.URDU_NASTALIQ, DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED ->
+                pitch.coerceIn(0.95f, 1.08f)
+            DetectedLanguage.ENGLISH ->
+                pitch.coerceIn(0.95f, 1.05f)
+        }
+        val tunedRate = when (effectiveDetectedLang) {
+            DetectedLanguage.URDU_NASTALIQ, DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED ->
+                speechRate.coerceIn(0.92f, 1.04f)
+            DetectedLanguage.ENGLISH ->
+                speechRate.coerceIn(0.96f, 1.06f)
+        }
+
+        engine.setPitch(tunedPitch)
+        engine.setSpeechRate(tunedRate)
+
+        val runs = normalized.languageRuns.ifEmpty {
+            listOf(LanguageRun(normalized.speechText, false, effectiveDetectedLang.ttsLocale))
+        }
+
         runs.forEachIndexed { index, run ->
-            applyBestAvailableLocale(run.locale)
-            val isLast = index == runs.lastIndex
-            val uttId = if (isLast) "${UTTERANCE_ID}_FINAL" else "${UTTERANCE_ID}_RUN_$index"
+            val targetLocale = when {
+                mode == AccentTrainingMode.ENGLISH_COMPLETE_ACCENT -> Locale.US
+                mode == AccentTrainingMode.URDU_COMPLETE_ACCENT -> Locale.forLanguageTag("ur-PK")
+                run.isUrdu && status.isUrduPkInstalled -> Locale.forLanguageTag("ur-PK")
+                effectiveDetectedLang == DetectedLanguage.ROMAN_URDU ||
+                    effectiveDetectedLang == DetectedLanguage.MIXED -> Locale.forLanguageTag("en-PK")
+                else -> run.locale
+            }
+            applyBestAvailableLocale(engine, targetLocale)
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            val uttId = if (index == runs.lastIndex) turnId else "${turnId}_part_$index"
             val params = Bundle().apply {
                 putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, uttId)
             }
-            tts?.speak(run.text, queueMode, params, uttId)
+            engine.speak(run.text, queueMode, params, uttId)
         }
+
         return normalized
     }
 
-    fun speak(text: String, pitch: Float = 1.0f, speed: Float = 1.0f, targetLocale: Locale? = null) {
-        if (!isInitialized || tts == null) {
-            Log.w(TAG, "TTS not ready yet, re-initializing")
-            initializeTts()
+    /**
+     * Speaks any text using the trained Urdu / English / Mixed Roman-Urdu accent pipeline!
+     * Routes automatically through [speakNormalized] so every caller in the app gets
+     * authentic pronunciation and multi-run bilingual voice switching.
+     */
+    fun speak(
+        text: String,
+        pitch: Float = 1.0f,
+        speechRate: Float = 0.98f,
+        locale: Locale = Locale.US,
+        turnId: String = UUID.randomUUID().toString()
+    ) {
+        if (!isInitialized) {
+            Log.w(TAG, "TTS not initialized yet, invoking completion callback")
+            onSpeechCompleted?.invoke()
             return
         }
 
-        requestAudioFocus()
-        tts?.setPitch(pitch)
-        tts?.setSpeechRate(speed)
-        applyBestAvailableLocale(targetLocale)
-
-        val params = Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, UTTERANCE_ID)
+        val detected = LanguageProcessor.detectLanguage(text)
+        val effectiveLang = when {
+            locale.language.equals("ur", ignoreCase = true) -> DetectedLanguage.URDU_NASTALIQ
+            detected != DetectedLanguage.ENGLISH -> detected
+            locale.toLanguageTag().equals("en-PK", ignoreCase = true) -> DetectedLanguage.ROMAN_URDU
+            else -> DetectedLanguage.ENGLISH
         }
 
-        _isSpeaking.value = true
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, UTTERANCE_ID)
+        speakNormalized(
+            rawReply = text,
+            detectedLanguage = effectiveLang,
+            turnId = turnId,
+            pitch = pitch,
+            speechRate = speechRate
+        )
+    }
+
+    /**
+     * Selects the highest-quality neural/local [Voice] and [Locale] for Urdu (`ur-PK`, `ur-IN`, `hi-IN`),
+     * Pakistani/Subcontinental English (`en-PK`, `en-IN`), or US/UK English (`en-US`, `en-GB`).
+     */
+    private fun applyBestAvailableLocale(engine: TextToSpeech, preferred: Locale): Locale {
+        val candidates = when {
+            preferred.language.equals("ur", ignoreCase = true) -> listOf(
+                Locale.forLanguageTag("ur-PK"),
+                Locale.forLanguageTag("ur-IN"),
+                Locale.forLanguageTag("ur"),
+                Locale.forLanguageTag("hi-IN"),
+                Locale.forLanguageTag("en-PK"),
+                Locale.forLanguageTag("en-IN"),
+                Locale.US
+            )
+            preferred.toLanguageTag().equals("en-PK", ignoreCase = true) -> listOf(
+                Locale.forLanguageTag("en-PK"),
+                Locale.forLanguageTag("ur-PK"),
+                Locale.forLanguageTag("en-IN"),
+                Locale.forLanguageTag("hi-IN"),
+                Locale.US
+            )
+            else -> listOf(
+                preferred,
+                Locale.US,
+                Locale.UK,
+                Locale.forLanguageTag("en-IN")
+            )
+        }
+
+        for (candidate in candidates) {
+            if (isLocaleSupported(engine, candidate)) {
+                engine.language = candidate
+                selectHighestQualityVoiceForLocale(engine, candidate)
+                return candidate
+            }
+        }
+        engine.language = Locale.US
+        selectHighestQualityVoiceForLocale(engine, Locale.US)
+        return Locale.US
+    }
+
+    private fun selectHighestQualityVoiceForLocale(engine: TextToSpeech, targetLocale: Locale) {
+        try {
+            val availableVoices = engine.voices ?: return
+            val matchingVoices = availableVoices.filter { voice ->
+                voice.locale != null &&
+                    voice.locale.language.equals(targetLocale.language, ignoreCase = true) &&
+                    (targetLocale.country.isBlank() || voice.locale.country.equals(targetLocale.country, ignoreCase = true)) &&
+                    !voice.isNetworkConnectionRequired
+            }.ifEmpty {
+                availableVoices.filter { voice ->
+                    voice.locale != null &&
+                        voice.locale.language.equals(targetLocale.language, ignoreCase = true)
+                }
+            }
+
+            val bestVoice: Voice? = matchingVoices.maxByOrNull { v ->
+                var score = v.quality
+                if (!v.isNetworkConnectionRequired) score += 100
+                if (v.name.contains("neural", ignoreCase = true) || v.name.contains("wavenet", ignoreCase = true) || v.name.contains("local", ignoreCase = true)) {
+                    score += 50
+                }
+                score
+            }
+
+            if (bestVoice != null) {
+                engine.voice = bestVoice
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun isLocaleSupported(engine: TextToSpeech, locale: Locale): Boolean {
+        return try {
+            val res = engine.isLanguageAvailable(locale)
+            res >= TextToSpeech.LANG_AVAILABLE
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun stop() {
-        if (tts != null) {
+        try {
             tts?.stop()
-            _isSpeaking.value = false
-            abandonAudioFocus()
+        } catch (_: Exception) {
         }
     }
 
     fun shutdown() {
         try {
-            stop()
+            tts?.stop()
             tts?.shutdown()
-            tts = null
-            isInitialized = false
-        } catch (e: Exception) {
-            Log.w(TAG, "Error shutting down TTS", e)
-        }
-    }
-
-    private fun requestAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val playbackAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                .setAudioAttributes(playbackAttributes)
-                .build()
-            audioManager.requestAudioFocus(focusRequest)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                null,
-                AudioManager.STREAM_VOICE_CALL,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-            )
-        }
-    }
-
-    private fun abandonAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Audio focus auto abandoned on completion
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(null)
+        } catch (_: Exception) {
         }
     }
 }

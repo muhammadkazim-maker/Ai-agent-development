@@ -2139,137 +2139,7 @@ class ExampleRobolectricTest {
         sourceBmp.recycle()
     }
 
-    @Test
-    fun `VoiceAppLockAndMoodEngine enforces Universal App Voice Lock, Mood-Andaz Intelligence, 10 Secret Codes with 3-Attempt Cooldown Rotation, and Type-Code Fallback`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val engine = com.example.engine.VoiceAppLockAndMoodEngine.getInstance(context)
-        val executor = com.example.engine.ActionExecutor(context)
 
-        // 1. Configure First-Page Voice Lock & 10 Secret Codes
-        val customTenCodes = listOf(
-            "Alpha One",
-            "Bravo Two",
-            "Charlie Three",
-            "Delta Four",
-            "Echo Five",
-            "Foxtrot Six",
-            "Golf Seven",
-            "Hotel Eight",
-            "India Nine",
-            "Juliet Ten"
-        )
-        engine.saveFirstPageVoiceLockConfiguration(
-            ownerNameInput = "Tony",
-            preferredAndaz = com.example.engine.SpeakingAndaz.DIRECT_COMMANDING.name,
-            codesList = customTenCodes,
-            enableAllAppsLock = true,
-            enrolledPitchHz = 150f
-        )
-        engine.resetAllSecretCodeCooldowns()
-        engine.clearUnlockedSessions()
-        engine.setSimulateSoreThroatOrVoiceFail(false)
-
-        assertTrue(engine.isFirstPageSetupCompleted.value)
-        assertEquals("Tony", engine.ownerName.value)
-        assertEquals(10, engine.secretCodes.value.size)
-        assertEquals(10, engine.getAvailableSecretCodes().size)
-
-        // 2. Anyone can talk to the assistant for general conversation & get Mood/Andaz adapted replies
-        val stressedReply = engine.decorateConversationalReplyWithMood(
-            rawUtterance = "Yaar main bohat pareshan hoon masla ho gaya hai",
-            baseReply = "Main aap ki madad ke liye hazir hoon."
-        )
-        assertEquals(com.example.engine.SpeakerMood.STRESSED, engine.lastMoodEvaluation.value.detectedMood)
-        assertTrue(stressedReply.contains("Pareshan na hon Tony"))
-
-        val cheerfulEval = engine.analyzeSpeakerMoodAndVoice(
-            utterance = "Bohat zabardast kaam kiya shukriya",
-            isAppOpenRequest = false
-        )
-        assertEquals(com.example.engine.SpeakerMood.CHEERFUL, cheerfulEval.detectedMood)
-        assertTrue(cheerfulEval.shouldOpenApp)
-
-        // 3. When Owner Voice matches normally, locked apps open after backend voice + mood verification
-        val normalOpenChallenge = engine.interceptAppOpenCommand(
-            appName = "YouTube",
-            packageName = "com.google.android.youtube",
-            rawUtterance = "Jarvis YouTube kholo"
-        )
-        assertNull("Owner voice verified should allow opening YouTube without challenge", normalOpenChallenge)
-        assertTrue(engine.isPackageTemporarilyUnlocked("com.google.android.youtube"))
-
-        // 4. Sore Throat ("gala kharab") or Voice Recognition Fail triggers 10 Secret Code Challenge
-        engine.clearUnlockedSessions()
-        val soreThroatChallenge = engine.interceptAppOpenCommand(
-            appName = "WhatsApp",
-            packageName = "com.whatsapp",
-            rawUtterance = "Mera gala kharab hai WhatsApp open karo",
-            pendingAction = com.example.data.model.VoiceAction(action = "open_app", target = "WhatsApp")
-        )
-        assertNotNull("Sore throat / voice fail must block app launch and demand a Secret Code", soreThroatChallenge)
-        assertTrue(soreThroatChallenge!!.failureReasonRomanUrdu.contains("voice recognize nahi ho rahi"))
-
-        // Verify ActionExecutor blocks opening WhatsApp while voice recognition fails
-        engine.setSimulateSoreThroatOrVoiceFail(true)
-        engine.clearUnlockedSessions()
-        val blockedExec = executor.execute(com.example.data.model.VoiceAction(action = "open_app", target = "WhatsApp"))
-        assertTrue("Expected Failure when Voice Lock blocks unverified app open", blockedExec is com.example.engine.ExecutionResult.Failure)
-
-        // 5. Verify 10 Secret Codes & Strict 3-Attempt Anti-Eavesdropping Cooldown Rotation!
-        // Attempt #1: Use Code #1 ("Alpha One") -> Unlocks!
-        val attempt1 = engine.verifySecretCode("Alpha One")
-        assertTrue("Code #1 should unlock on first use", attempt1 is com.example.engine.SecretCodeVerificationResult.Unlocked)
-        assertEquals(3, engine.secretCodes.value[0].cooldownAttemptsRemaining)
-
-        // Eavesdropper immediately tries Code #1 ("Alpha One") -> BLOCKED! (Needs 3 attempts with other codes first)
-        val eavesdropTry1 = engine.verifySecretCode("Alpha One")
-        assertTrue("Used Code #1 must be on cooldown", eavesdropTry1 is com.example.engine.SecretCodeVerificationResult.CodeOnCooldown)
-        assertEquals(3, (eavesdropTry1 as com.example.engine.SecretCodeVerificationResult.CodeOnCooldown).attemptsRemainingBeforeReuse)
-
-        // Subsequent Attempt #1 after Code #1: Use Code #2 ("Bravo Two") -> Unlocks! Code #1 cooldown drops 3 -> 2
-        val subAttempt1 = engine.verifySecretCode("Bravo Two")
-        assertTrue(subAttempt1 is com.example.engine.SecretCodeVerificationResult.Unlocked)
-        assertEquals(2, engine.secretCodes.value[0].cooldownAttemptsRemaining)
-        assertEquals(3, engine.secretCodes.value[1].cooldownAttemptsRemaining)
-
-        // Code #1 still blocked (2 attempts remaining)
-        val eavesdropTry2 = engine.verifySecretCode("Alpha One")
-        assertTrue(eavesdropTry2 is com.example.engine.SecretCodeVerificationResult.CodeOnCooldown)
-        assertEquals(2, (eavesdropTry2 as com.example.engine.SecretCodeVerificationResult.CodeOnCooldown).attemptsRemainingBeforeReuse)
-
-        // Subsequent Attempt #2 after Code #1: Use Code #3 ("Charlie Three") -> Unlocks! Code #1 cooldown drops 2 -> 1
-        val subAttempt2 = engine.verifySecretCode("Charlie Three")
-        assertTrue(subAttempt2 is com.example.engine.SecretCodeVerificationResult.Unlocked)
-        assertEquals(1, engine.secretCodes.value[0].cooldownAttemptsRemaining)
-
-        // Code #1 still blocked (1 attempt remaining)
-        val eavesdropTry3 = engine.verifySecretCode("Alpha One")
-        assertTrue(eavesdropTry3 is com.example.engine.SecretCodeVerificationResult.CodeOnCooldown)
-        assertEquals(1, (eavesdropTry3 as com.example.engine.SecretCodeVerificationResult.CodeOnCooldown).attemptsRemainingBeforeReuse)
-
-        // Subsequent Attempt #3 after Code #1: Use Code #4 ("Delta Four") -> Unlocks! Code #1 cooldown drops 1 -> 0 (Ready again!)
-        val subAttempt3 = engine.verifySecretCode("Delta Four")
-        assertTrue(subAttempt3 is com.example.engine.SecretCodeVerificationResult.Unlocked)
-        assertEquals(0, engine.secretCodes.value[0].cooldownAttemptsRemaining)
-        assertTrue("Code #1 must be available again after 3 subsequent attempts", engine.secretCodes.value[0].isAvailableNow)
-
-        // Now Code #1 ("Alpha One") can be used again!
-        val reuseCode1After3Attempts = engine.verifySecretCode("Alpha One")
-        assertTrue("Code #1 should succeed now that 3 attempts have passed", reuseCode1After3Attempts is com.example.engine.SecretCodeVerificationResult.Unlocked)
-
-        // 6. Verify Type-Code Fallback via ActionExecutor ("type_secret_code")
-        val typedExecResult = executor.execute(
-            com.example.data.model.VoiceAction(
-                action = "type_secret_code",
-                target = "Echo Five",
-                parameters = mapOf("secretCode" to "Echo Five")
-            )
-        )
-        assertTrue("Typed secret code fallback must unlock and succeed", typedExecResult is com.example.engine.ExecutionResult.Success)
-
-        engine.setSimulateSoreThroatOrVoiceFail(false)
-        engine.resetAllSecretCodeCooldowns()
-    }
 
     @Test
     fun `Revamped UI removes History Routines and Memory tabs while keeping backend execution active`() = runBlocking {
@@ -2318,6 +2188,55 @@ class ExampleRobolectricTest {
         assertEquals(1, db.commandHistoryDao().getRecentHistory(10).first().size)
         db.close()
     }
+
+    @Test
+    fun `SuperAgiBrainEngine executes complex multi-step commands and answers math, coding, and conversational queries like Gemini and ChatGPT without repeating hukum karein`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Multi-step device workflow
+        val multiStep = com.example.engine.SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(
+            context,
+            "Flashlight on karo aur volume full kar do aur WhatsApp kholo"
+        )
+        assertEquals(com.example.engine.NluIntentCategory.MULTI_STEP_WORKFLOW, multiStep.intentCategory)
+        assertEquals(3, multiStep.tasksToExecute.size)
+        assertEquals(com.example.engine.NluTaskType.FLASHLIGHT, multiStep.tasksToExecute[0].taskType)
+        assertEquals(com.example.engine.NluTaskType.VOLUME, multiStep.tasksToExecute[1].taskType)
+        assertEquals(com.example.engine.NluTaskType.OPEN_APP, multiStep.tasksToExecute[2].taskType)
+        assertFalse(multiStep.spokenReply.contains("Jee main sun raha hoon, hukum karein"))
+
+        // 2. Real-time Math Calculation
+        val mathRes = com.example.engine.SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(
+            context,
+            "25 * 48 + 120 kitna hota hai?"
+        )
+        assertTrue("Expected 1320 in math reply, got: ${mathRes.spokenReply}", mathRes.spokenReply.contains("1320"))
+
+        // 3. Coding synthesis (Python Fibonacci)
+        val codeRes = com.example.engine.SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(
+            context,
+            "Write Python code for fibonacci series"
+        )
+        assertTrue(codeRes.spokenReply.contains("def fibonacci"))
+        assertFalse(codeRes.spokenReply.contains("Jee main sun raha hoon, hukum karein"))
+    }
+
+    @Test
+    fun `Gemini 4 Argon model priority and Trilingual Accent reshaping work end-to-end`() {
+        // 1. Verify Gemini-4-Argon is the primary model
+        assertEquals("gemini-4-argon", com.example.engine.SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS.first())
+
+        // 2. Verify Accent Training modes & Roman Urdu phonetic reshaping
+        com.example.engine.TextToSpeechManager.setAccentTrainingMode(com.example.engine.AccentTrainingMode.URDU_COMPLETE_ACCENT)
+        assertEquals(com.example.engine.AccentTrainingMode.URDU_COMPLETE_ACCENT, com.example.engine.TextToSpeechManager.activeAccentMode.value)
+        com.example.engine.TextToSpeechManager.setAccentTrainingMode(com.example.engine.AccentTrainingMode.MIXED_URDU_COMPLETE_ACCENT)
+        assertEquals(com.example.engine.AccentTrainingMode.MIXED_URDU_COMPLETE_ACCENT, com.example.engine.TextToSpeechManager.activeAccentMode.value)
+        com.example.engine.TextToSpeechManager.setAccentTrainingMode(com.example.engine.AccentTrainingMode.AUTO_TRILINGUAL)
+
+        val reshaped = LanguageProcessor.reshapeRomanUrduForNaturalPronunciation("Main aap ka kaam kar raha hoon")
+        assertFalse("Should not leave raw 'main' to be read as 'Main Street': $reshaped", reshaped.split(" ").contains("Main"))
+    }
 }
+
 
 

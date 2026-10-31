@@ -360,35 +360,22 @@ class AiBrainEngine(
             )
         }
 
-        if (lower.contains("who are you") || lower.contains("kaun ho") || lower.contains("kon ho") || lower.contains("کون ہو")) {
-            val response = LanguageProcessor.formatReplyInLanguage(
-                "I am OmniVoice, your AI voice assistant with full phone control.",
-                "Main OmniVoice hoon, aapka smart AI assistant jo aapke phone ko awaz se control karta hai.",
-                "میں OmniVoice ہوں، آپ کا ذہین وائس اسسٹنٹ جو فون کو مکمل کنٹرول کرتا ہے۔",
-                detectedLang
-            )
-            return VoiceAction(
-                action = "general_chat",
-                spokenResponse = response,
-                confirmationRequired = false
-            )
+        val nluLang = when (detectedLang) {
+            DetectedLanguage.URDU_NASTALIQ -> NluLanguageEnum.URDU_SCRIPT
+            DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED -> NluLanguageEnum.ROMAN_URDU_MIXED
+            DetectedLanguage.ENGLISH -> NluLanguageEnum.ENGLISH
         }
-
-        if (lower.contains("how are you") || lower.contains("kya haal hai") || lower.contains("kia hal ha") || lower.contains("کیا حال ہے")) {
-            val response = LanguageProcessor.formatReplyInLanguage(
-                "All systems are operational and ready for your command.",
-                "Shukriya, main theek hoon aur aapke hukum ke liye tayar hoon.",
-                "شکریہ، تمام سسٹمز فعال ہیں اور آپ کے حکم کے منتظر ہیں۔",
-                detectedLang
-            )
-            return VoiceAction(
-                action = "general_chat",
-                spokenResponse = response,
-                confirmationRequired = false
-            )
-        }
-
-        return defaultFallback
+        val agiResponse = SuperAgiBrainEngine.generateLocalSuperAgiResponse(
+            context = com.omnivoice.agentfix.AgentBridge.appContext,
+            rawText = query,
+            detectedLang = nluLang
+        )
+        return VoiceAction(
+            action = "general_chat",
+            parameters = mapOf("thought_summary" to "Analyzed with SuperAgiBrainEngine"),
+            spokenResponse = agiResponse,
+            confirmationRequired = false
+        )
     }
 
     fun parseJsonAction(jsonString: String): VoiceAction? {

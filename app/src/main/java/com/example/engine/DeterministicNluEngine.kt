@@ -491,9 +491,14 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             MultiEngineSpeechManager.isConversationalQuery(cleanTranscript)
         ) {
             val nonRejectingReply = if (response.spokenReply.isBlank() ||
-                response.spokenReply.contains("dobara boliye", ignoreCase = true)
+                response.spokenReply.contains("dobara boliye", ignoreCase = true) ||
+                response.spokenReply.contains("hukum karein", ignoreCase = true)
             ) {
-                "Jee bilkul, maine aapki baat sun li: \"$cleanTranscript\". Bataiye main aapke liye kya karoon?"
+                SuperAgiBrainEngine.generateLocalSuperAgiResponse(
+                    context = null,
+                    rawText = cleanTranscript,
+                    detectedLang = response.detectedLanguage
+                )
             } else {
                 response.spokenReply
             }
@@ -570,11 +575,11 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             }
         """.trimIndent()
 
-        // 1. Try REST Gemini API with `gemini-2.5-flash`
+        // 1. Try REST Gemini API with preferred models (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-2.5-flash`)
         val apiKey = BuildConfig.GEMINI_API_KEY
         if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
             val base64Audio = Base64.encodeToString(wavData, Base64.NO_WRAP)
-            val modelsToTry = listOf("gemini-2.5-flash")
+            val modelsToTry = SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS
 
             for (useSchema in listOf(true)) {
                 val requestJson = JSONObject().apply {
@@ -646,8 +651,8 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             }
         }
 
-        // 2. Try Firebase AI Logic SDK (`gemini-2.5-flash`) with `temperature = 0.0f`, `topP = 0.1f`
-        for (sdkModelName in listOf("gemini-2.5-flash")) {
+        // 2. Try Firebase AI Logic SDK (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-2.5-flash`) with `temperature = 0.0f`, `topP = 0.1f`
+        for (sdkModelName in SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS) {
             for (useSchema in listOf(true)) {
                 try {
                     val config = generationConfig {
@@ -752,140 +757,49 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
 
         // 2. Check User-Taught Custom Trigger Rules in `omni_learned_rules`
         val learnedRules = getLearnedRules(context)
-        val lower = trimmed.lowercase()
 
-        // 3. Check Mic Test / Greeting / General Question -> PURE_CONVERSATION
-        if (MultiEngineSpeechManager.isConversationalQuery(trimmed)) {
-            val reply = when {
-                lower.contains("awaaz") || lower.contains("sun") || lower.contains("baat") ->
-                    "Jee bilkul, mujhe aapki awaaz saaf aa rahi hai! Bataiye main aapke liye kya karoon?"
-                nluLang == NluLanguageEnum.URDU_SCRIPT ->
-                    "جی بالکل، مجھے آپ کی آواز صاف آ رہی ہے! بتائیے میں آپ کے لیے کیا کروں؟"
-                nluLang == NluLanguageEnum.ROMAN_URDU_MIXED ->
-                    "Jee bilkul, mujhe aapki awaaz saaf aa rahi hai! Bataiye main aapke liye kya karoon?"
-                else ->
-                    "Yes, I can hear you loud and clear! How can I help you today?"
-            }
+        // 3. Extract all explicit single or multi-step device tasks via SuperAgiBrainEngine
+        val tasks = SuperAgiBrainEngine.extractAllDeviceTasks(context, trimmed).toMutableList()
+
+        // 4. If no device tasks matched, or if it's a pure conversational/knowledge/coding/math query,
+        // answer intelligently using SuperAgiBrainEngine
+        if (tasks.isEmpty()) {
+            val smartReply = SuperAgiBrainEngine.generateLocalSuperAgiResponse(
+                context = context,
+                rawText = trimmed,
+                detectedLang = nluLang
+            )
             return enforceHardGuardrailValidator(
                 DeterministicNluResponse(
                     verbatimTranscript = trimmed,
                     detectedLanguage = nluLang,
                     audioClarityScore = 98,
-                    chainOfThoughtReasoning = "User is testing the microphone, greeting, or asking a conversational question without commanding any phone action. Setting intentCategory to PURE_CONVERSATION and tasksToExecute to [].",
+                    chainOfThoughtReasoning = "Analyzed user query with SuperAgiBrainEngine (${learnedRules.size} learned rules active). Generated intelligent conversational/analytical response.",
                     intentCategory = NluIntentCategory.PURE_CONVERSATION,
                     confidenceScore = 99,
                     tasksToExecute = emptyList(),
-                    spokenReply = reply
+                    spokenReply = smartReply
                 )
             )
         }
 
-        // 4. Parse explicit single or multi-step device tasks deterministically
-        val tasks = mutableListOf<DeterministicNluTask>()
-        var stepCounter = 1
-
-        // AI Image + WhatsApp DP workflow
-        val wantsImage = (lower.contains("image") || lower.contains("tasveer") || lower.contains("photo") || lower.contains("pic") || lower.contains("dp")) &&
-            (lower.contains("make") || lower.contains("generate") || lower.contains("create") || lower.contains("banao") || lower.contains("lagao") || lower.contains("change"))
-        val wantsWhatsAppDp = lower.contains("whatsapp dp") || lower.contains("profile pic") || (lower.contains("dp") && (lower.contains("change") || lower.contains("laga") || lower.contains("upload") || lower.contains("set")))
-
-        if (wantsImage) {
-            val prompt = extractImagePrompt(trimmed)
-            tasks.add(
-                DeterministicNluTask(
-                    stepNumber = stepCounter++,
-                    taskType = NluTaskType.GENERATE_AI_IMAGE,
-                    target = "AI Image Generator",
-                    actionValue = prompt,
-                    androidDeepLink = ""
-                )
-            )
-        }
-        if (wantsWhatsAppDp) {
-            tasks.add(
-                DeterministicNluTask(
-                    stepNumber = stepCounter++,
-                    taskType = NluTaskType.WHATSAPP_DP_UPDATE,
-                    target = "WhatsApp Profile Picture",
-                    actionValue = if (wantsImage) "USE_STEP_1_IMAGE" else "UPDATE_DP",
-                    androidDeepLink = "whatsapp://settings/profile"
-                )
-            )
-        }
-
-        // Explicit Flashlight check (ONLY if flashlight keyword is present)
-        val hasFlashKeyword = FLASHLIGHT_KEYWORDS.any { lower.contains(it) }
-        if (hasFlashKeyword && (lower.contains("on") || lower.contains("off") || lower.contains("jala") || lower.contains("bujha") || lower.contains("turn") || lower.contains("band") || lower.contains("khol"))) {
-            val isOff = lower.contains("off") || lower.contains("bujha") || lower.contains("band")
-            tasks.add(
-                DeterministicNluTask(
-                    stepNumber = stepCounter++,
-                    taskType = NluTaskType.FLASHLIGHT,
-                    target = "torch",
-                    actionValue = if (isOff) "OFF" else "ON",
-                    androidDeepLink = ""
-                )
-            )
-        }
-
-        // WhatsApp message
-        if (!wantsWhatsAppDp && (lower.contains("whatsapp") || lower.contains("message bhejo") || lower.contains("msg bhejo"))) {
-            val contact = Regex("""(?:to|par|ko)\s+([A-Za-z]+)""" , RegexOption.IGNORE_CASE)
-                .find(trimmed)?.groupValues?.getOrNull(1) ?: "Ali"
-            val msgBody = Regex("""(?:saying|that|ke)\s+(.+)$""", RegexOption.IGNORE_CASE)
-                .find(trimmed)?.groupValues?.getOrNull(1)?.trim() ?: trimmed
-            tasks.add(
-                DeterministicNluTask(
-                    stepNumber = stepCounter++,
-                    taskType = NluTaskType.WHATSAPP_MESSAGE,
-                    target = contact,
-                    actionValue = msgBody,
-                    androidDeepLink = "https://wa.me/?text=${Uri.encode(msgBody)}"
-                )
-            )
-        }
-
-        // Phone call
-        if (lower.contains("call ") || lower.contains("ko call") || lower.contains("phone mila")) {
-            val contact = Regex("""(?:call|phone)\s+([A-Za-z0-9+]+)""", RegexOption.IGNORE_CASE)
-                .find(trimmed)?.groupValues?.getOrNull(1) ?: "Contact"
-            tasks.add(
-                DeterministicNluTask(
-                    stepNumber = stepCounter++,
-                    taskType = NluTaskType.PHONE_CALL,
-                    target = contact,
-                    actionValue = "DIAL",
-                    androidDeepLink = "tel:$contact"
-                )
-            )
-        }
-
-        val category = when {
-            tasks.isEmpty() -> NluIntentCategory.PURE_CONVERSATION
-            tasks.size == 1 -> NluIntentCategory.SINGLE_DEVICE_TASK
-            else -> NluIntentCategory.MULTI_STEP_WORKFLOW
-        }
-
-        val reasoning = if (tasks.isEmpty()) {
-            "Analyzed user utterance against learned rules (${learnedRules.size} active). No explicit hardware or app execution verbs matched, or treated as general conversation."
+        val category = if (tasks.size == 1) {
+            NluIntentCategory.SINGLE_DEVICE_TASK
         } else {
-            "User explicitly commanded ${tasks.size} action(s): ${tasks.joinToString(" -> ") { "${it.taskType}(${it.actionValue})" }}. Verified against Hard Guardrail."
+            NluIntentCategory.MULTI_STEP_WORKFLOW
         }
 
-        val reply = when (nluLang) {
-            NluLanguageEnum.URDU_SCRIPT -> "جی ضرور، میں آپ کی ہدایت پر عمل کر رہا ہوں۔"
-            NluLanguageEnum.ROMAN_URDU_MIXED -> "Jee bilkul, main aapka kaam abhi mukammal kar raha hoon."
-            NluLanguageEnum.ENGLISH -> "Executing your requested workflow now."
-        }
+        val reasoning = "User explicitly commanded ${tasks.size} action(s): ${tasks.joinToString(" -> ") { "${it.taskType}(${it.target}:${it.actionValue})" }}. Verified against Hard Guardrail."
+        val reply = SuperAgiBrainEngine.buildSpokenSummaryForTasks(tasks, nluLang)
 
         return enforceHardGuardrailValidator(
             DeterministicNluResponse(
                 verbatimTranscript = trimmed,
                 detectedLanguage = nluLang,
-                audioClarityScore = 96,
+                audioClarityScore = 98,
                 chainOfThoughtReasoning = reasoning,
                 intentCategory = category,
-                confidenceScore = if (tasks.isEmpty()) 90 else 98,
+                confidenceScore = 99,
                 tasksToExecute = tasks,
                 spokenReply = reply
             )

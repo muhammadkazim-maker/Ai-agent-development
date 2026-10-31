@@ -465,6 +465,8 @@ object SpeechNormaliser {
             speech = LanguageProcessor.transliterateUrduScriptToRomanUrdu(speech)
         } else if (convertRomanToUrduForTts) {
             speech = LanguageProcessor.transliterateRomanUrduToUrduScript(speech)
+        } else if (detectedLanguage == DetectedLanguage.ROMAN_URDU || detectedLanguage == DetectedLanguage.MIXED) {
+            speech = LanguageProcessor.reshapeRomanUrduForNaturalPronunciation(speech)
         }
 
         speech = speech.replace(Regex("\\s+"), " ").trim()
@@ -522,3 +524,4 @@ object SpeechNormaliser {
         return runs
     }
 }
+

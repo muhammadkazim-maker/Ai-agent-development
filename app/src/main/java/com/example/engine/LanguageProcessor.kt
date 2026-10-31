@@ -40,7 +40,11 @@ object LanguageProcessor {
         "bhejo", "bhej", "parho", "parh", "dikhao", "rasta", "raaste", "shuru", "hoon", "main", "mein",
         "yaad", "matlab", "batti", "jalao", "bujhao", "agar", "kaat", "baad", "karunga", "chachu",
         "jee", "ji", "hazir", "hukum", "karein", "karen", "bataiye", "batayein", "sun", "raha", "rahi",
-        "hogaya", "hoga", "diya", "pehle", "pehli", "doosri", "dusri", "sim", "rupay", "rupee", "paise"
+        "hogaya", "hoga", "diya", "pehle", "pehli", "doosri", "dusri", "sim", "rupay", "rupee", "paise",
+        "bilkul", "zaroor", "foran", "apni", "apne", "aapka", "aapki", "aapke", "bolein", "bolain",
+        "likhein", "dekhein", "samajh", "sakta", "sakti", "sakte", "chuka", "chuki", "chukay", "gaya",
+        "gayi", "gaye", "liye", "sath", "saath", "walay", "wala", "wali", "lekin", "magar", "kyunke",
+        "bohat", "bahut", "zyada", "kam", "jaldi", "aaram", "sukoon", "pareshan", "khush", "shandar"
     )
 
     private val ROMAN_TO_URDU_CONVERSATIONAL_LEXICON = linkedMapOf(
@@ -52,34 +56,107 @@ object LanguageProcessor {
         "hukum karein" to "حکم کریں",
         "kaam ho gaya hai" to "کام ہو گیا ہے",
         "ho gaya hai" to "ہو گیا ہے",
+        "ho gayi hai" to "ہو گئی ہے",
+        "kar diya gaya hai" to "کر دیا گیا ہے",
         "kar diya hai" to "کر دیا ہے",
+        "kar di hai" to "کر دی ہے",
         "bhej diya hai" to "بھیج دیا ہے",
+        "bhej raha hoon" to "بھیج رہا ہوں",
         "laga diya hai" to "لگا دیا ہے",
         "khol diya hai" to "کھول دیا ہے",
+        "khol raha hoon" to "کھول رہا ہوں",
         "band kar diya hai" to "بند کر دیا ہے",
         "on kar diya hai" to "آن کر دیا ہے",
         "off kar diya hai" to "آف کر دیا ہے",
+        "open kar diya hai" to "اوپن کر دیا ہے",
+        "open kar raha hoon" to "اوپن کر رہا ہوں",
+        "call mila raha hoon" to "کال ملا رہا ہوں",
+        "search kar raha hoon" to "سرچ کر رہا ہوں",
+        "chala raha hoon" to "چلا رہا ہوں",
+        "tayyar kar raha hoon" to "تیار کر رہا ہوں",
         "kya aap" to "کیا آپ",
         "chahte hain" to "چاہتے ہیں",
+        "aap ki voice recognize nahi ho rahi" to "آپ کی آواز پہچانی نہیں جا رہی",
+        "aap ki awaz verify ho gayi hai" to "آپ کی آواز تصدیق ہو گئی ہے",
+        "secret code bolein ya type karein" to "سیکرٹ کوڈ بولیں یا ٹائپ کریں",
+        "verify ho gaya" to "تصدیق ہو گیا",
+        "unlock kar diya gaya hai" to "ان لاک کر دیا گیا ہے",
+        "pareshan na hon" to "پریشان نہ ہوں",
+        "main aap ke sath hoon" to "میں آپ کے ساتھ ہوں",
+        "foran kar raha hoon" to "فوراً کر رہا ہوں",
+        "jee bilkul" to "جی بالکل",
+        "ji bilkul" to "جی بالکل",
         "shukriya" to "شکریہ",
         "meherbani" to "مہربانی",
+        "baraye meherbani" to "برائے مہربانی",
         "ammi" to "امی",
         "abbu" to "ابو",
         "bhai" to "بھائی",
         "baji" to "باجی",
+        "janab" to "جناب",
         "subah" to "صبح",
+        "dopahar" to "دوپہر",
         "shaam" to "شام",
         "raat" to "رات",
         "baje" to "بجے",
+        "aapka" to "آپ کا",
+        "aapki" to "آپ کی",
+        "aapke" to "آپ کے",
+        "aap" to "آپ",
+        "mujhe" to "مجھے",
+        "mera" to "میرا",
+        "meri" to "میری",
+        "mere" to "میرے",
+        "apna" to "اپنا",
+        "apni" to "اپنی",
+        "apne" to "اپنے",
         "aur" to "اور",
+        "lekin" to "لیکن",
+        "magar" to "مگر",
+        "agar" to "اگر",
+        "phir" to "پھر",
+        "abhi" to "ابھی",
+        "foran" to "فوراً",
+        "bilkul" to "بالکل",
+        "zaroor" to "ضرور",
+        "bohat" to "بہت",
+        "bahut" to "بہت",
+        "zyada" to "زیادہ",
+        "shandar" to "شاندار",
+        "zabardast" to "زبردست",
+        "bolein" to "بولیں",
+        "karein" to "کریں",
+        "batayein" to "بتائیں",
+        "batao" to "بتاؤ",
+        "kholo" to "کھولو",
+        "lagao" to "لگاؤ",
+        "bhejo" to "بھیجو",
+        "karo" to "کرو",
+        "raha" to "رہا",
+        "rahi" to "رہی",
+        "rahe" to "رہے",
+        "gaya" to "گیا",
+        "gayi" to "گئی",
+        "gaye" to "گئے",
+        "diya" to "دیا",
         "mein" to "میں",
         "main" to "میں",
         "hoon" to "ہوں",
         "hai" to "ہے",
         "hain" to "ہیں",
         "nahi" to "نہیں",
+        "nahin" to "نہیں",
         "theek" to "ٹھیک",
-        "jee" to "جی"
+        "acha" to "اچھا",
+        "jee" to "جی",
+        "ji" to "جی",
+        "ko" to "کو",
+        "ka" to "کا",
+        "ki" to "کی",
+        "ke" to "کے",
+        "se" to "سے",
+        "par" to "پر",
+        "ne" to "نے"
     )
 
     private val URDU_TO_ROMAN_CONVERSATIONAL_LEXICON = linkedMapOf(
@@ -106,16 +183,16 @@ object LanguageProcessor {
         "صبح" to "subah",
         "شام" to "shaam",
         "رات" to "raat",
-        "ساڑھے" to "saarhe",
+        "ساڑھے" to "sarhe",
         "بجے" to "baje",
-        "روپے" to "rupay",
+        "روپے" to "rupees",
         "کال" to "call",
         "میسج" to "message",
         "واٹس ایپ" to "WhatsApp",
         "علی" to "Ali",
         "احمد" to "Ahmed",
         "اور" to "aur",
-        "میں" to "mein",
+        "میں" to "main",
         "ہوں" to "hoon",
         "ہے" to "hai",
         "ہیں" to "hain",
@@ -128,6 +205,56 @@ object LanguageProcessor {
         "کے" to "ke",
         "سے" to "se",
         "پر" to "par"
+    )
+
+    /**
+     * Maps Roman Urdu words that English/Latin TTS engines typically mispronounce
+     * (such as "main" -> "Main Street", "hoon" -> "noon", "kar" -> "car", "hai" -> "high",
+     * "aap" -> "app") to phonetically natural Subcontinental pronunciations while leaving
+     * real English words intact.
+     */
+    private val ROMAN_URDU_PHONETIC_PRONUNCIATION_MAP = linkedMapOf(
+        "assalam-o-alaikum" to "Assalaam o Alaikum",
+        "assalam o alaikum" to "Assalaam o Alaikum",
+        "walaikum assalam" to "Walaikum Assalaam",
+        "main ne" to "mein ney",
+        "main aap" to "mein aap",
+        "main aapka" to "mein aap ka",
+        "main aapki" to "mein aap ki",
+        "main abhi" to "mein abhi",
+        "main hazir" to "mein haazir",
+        "jee main" to "jee mein",
+        "ji main" to "jee mein",
+        "ke main" to "key mein",
+        "aapka" to "aap ka",
+        "aapki" to "aap ki",
+        "aapke" to "aap key",
+        "aapko" to "aap ko",
+        "mujhe" to "mujhey",
+        "tumhe" to "tumhey",
+        "unhein" to "un-hein",
+        "inhein" to "in-hein",
+        "karein" to "ka-rein",
+        "bolein" to "bo-lein",
+        "batayein" to "ba-taayein",
+        "batao" to "ba-taao",
+        "lagao" to "la-gaao",
+        "chalao" to "cha-laao",
+        "dikhao" to "di-khaao",
+        "sunao" to "su-naao",
+        "kholo" to "kho-lo",
+        "bhejo" to "bhey-jo",
+        "bhej" to "bheyj",
+        "hoon" to "huun",
+        "hain" to "hein",
+        "hai" to "hey",
+        "kar" to "karr",
+        "karo" to "ka-ro",
+        "kardo" to "karr do",
+        "hazir" to "haazir",
+        "shukriya" to "shuk-riya",
+        "meherbani" to "meher-baani",
+        "kripya" to "bara-e-meherbaani"
     )
 
     private val ENGLISH_MARKERS = setOf(
@@ -348,6 +475,28 @@ object LanguageProcessor {
             )
         }
         return result
+    }
+
+    /**
+     * Reshapes Roman Urdu spelling into natural Subcontinental phonetics so that Latin/English
+     * TTS voices (`en-PK`, `en-IN`, `hi-IN`, `en-US`) pronounce Roman Urdu words with authentic
+     * Urdu/Hindustani vowels and consonants instead of American English ("Main Street", "car", "noon").
+     */
+    fun reshapeRomanUrduForNaturalPronunciation(text: String): String {
+        var result = text
+        for ((rawPhrase, phoneticPhrase) in ROMAN_URDU_PHONETIC_PRONUNCIATION_MAP) {
+            result = result.replace(
+                Regex("(?<![\\p{L}\\p{N}])${Regex.escape(rawPhrase)}(?![\\p{L}\\p{N}])", RegexOption.IGNORE_CASE),
+                phoneticPhrase
+            )
+        }
+        return result
+    }
+
+    fun isRomanUrduToken(token: String): Boolean {
+        val clean = token.lowercase(Locale.ROOT).trim { !it.isLetterOrDigit() }
+        if (clean.isEmpty()) return false
+        return ROMAN_URDU_MARKERS.contains(clean) || ROMAN_TO_URDU_CONVERSATIONAL_LEXICON.containsKey(clean)
     }
 
     /**

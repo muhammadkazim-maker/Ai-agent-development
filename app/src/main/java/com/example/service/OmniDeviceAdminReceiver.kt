@@ -5,6 +5,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.UserHandle
 import android.util.Log
 
 class OmniDeviceAdminReceiver : DeviceAdminReceiver() {
@@ -59,13 +60,13 @@ class OmniDeviceAdminReceiver : DeviceAdminReceiver() {
         Log.i(TAG, "Device Admin disabled for OmniVoice")
     }
 
-    override fun onPasswordFailed(context: Context, intent: Intent) {
-        super.onPasswordFailed(context, intent)
+    override fun onPasswordFailed(context: Context, intent: Intent, user: UserHandle) {
+        super.onPasswordFailed(context, intent, user)
         Log.w(TAG, "Device unlock password attempt failed")
     }
 
-    override fun onPasswordSucceeded(context: Context, intent: Intent) {
-        super.onPasswordSucceeded(context, intent)
+    override fun onPasswordSucceeded(context: Context, intent: Intent, user: UserHandle) {
+        super.onPasswordSucceeded(context, intent, user)
         Log.i(TAG, "Device unlock password attempt succeeded")
     }
 }

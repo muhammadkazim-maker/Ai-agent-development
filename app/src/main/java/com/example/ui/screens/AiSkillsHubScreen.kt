@@ -24,16 +24,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RecordVoiceOver
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
@@ -95,7 +95,7 @@ fun AiSkillsHubScreen(viewModel: VoiceAssistantViewModel) {
     val scrollState = rememberScrollState()
 
     val sections = listOf(
-        SkillSectionTab("Chatbot & Grounding", "Argon • 3.8 Flash • Search & Maps", Icons.Default.Chat, "skill_tab_chat"),
+        SkillSectionTab("Chatbot & Grounding", "Argon • 3.8 Flash • Search & Maps", Icons.AutoMirrored.Filled.Chat, "skill_tab_chat"),
         SkillSectionTab("Create & Edit Image", GeminiSkillsEngine.IMAGE_MODEL, Icons.Default.Image, "skill_tab_image"),
         SkillSectionTab("Animate to Video", GeminiSkillsEngine.VIDEO_MODEL, Icons.Default.Movie, "skill_tab_video"),
         SkillSectionTab("Live Voice & STT", "3.8 Live • 3.5 Transcribe", Icons.Default.RecordVoiceOver, "skill_tab_live_voice")
@@ -620,7 +620,7 @@ private fun ChatMessageBubble(
                     modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.VolumeUp,
+                        imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = "Speak Reply",
                         tint = CyanPrimary,
                         modifier = Modifier.size(16.dp)

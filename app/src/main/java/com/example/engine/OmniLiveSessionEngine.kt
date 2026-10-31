@@ -20,8 +20,12 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -1058,6 +1062,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     val toolDispatcher: com.omnivoice.agentfix.ToolDispatcher =
         com.omnivoice.agentfix.ToolDispatcher.getInstance(context)
 
+    private var nativeSpeechRecognizer: SpeechRecognizer? = null
+    private var isNativeRecognizerListening = false
+
     init {
         instance = this
         com.omnivoice.agentfix.AgentBridge.appContext = context.applicationContext
@@ -1194,8 +1201,133 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         JarvisHandsFreeEngine.setKeepAliveCarrierActive(true)
         start24kHzGaplessOutputQueue()
         connectBidiWebSocket(LIVE_MODEL_PRIMARY)
-        start16kHzMicrophonePcmStream()
+
+        val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (_: Exception) { "" }
+        val hasCloudKey = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.startsWith("YOUR_")
+        if (!hasCloudKey && isNativeSpeechRecognitionAvailableSafe()) {
+            startNativeSpeechRecognizerLoop()
+        } else {
+            start16kHzMicrophonePcmStream()
+        }
         start60SecondInactivityWatchdog()
+    }
+
+    private fun isNativeSpeechRecognitionAvailableSafe(): Boolean {
+        return try {
+            SpeechRecognizer.isRecognitionAvailable(context)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Starts on-device Android SpeechRecognizer on the main thread when cloud Gemini API key
+     * is not set, ensuring spoken commands in Roman Urdu / Urdu / English are accurately
+     * transcribed into text and executed by SuperAgiBrainEngine without holding AudioRecord lock.
+     */
+    fun startNativeSpeechRecognizerLoop() {
+        mainHandler.post {
+            if (!_isSessionActive.value || _isMicMuted.value) return@post
+            try {
+                if (nativeSpeechRecognizer == null) {
+                    nativeSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                        setRecognitionListener(object : RecognitionListener {
+                            override fun onReadyForSpeech(params: Bundle?) {
+                                isNativeRecognizerListening = true
+                                if (_connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING) {
+                                    _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                                }
+                            }
+
+                            override fun onBeginningOfSpeech() {
+                                OmniAutonomousCoreEngine.resetInactivityTimer()
+                            }
+
+                            override fun onRmsChanged(rmsdB: Float) {
+                                val scaled = ((rmsdB + 2f) * 8f).coerceIn(0f, 100f)
+                                _inputAudioRms.value = scaled
+                            }
+
+                            override fun onBufferReceived(buffer: ByteArray?) {}
+
+                            override fun onEndOfSpeech() {
+                                isNativeRecognizerListening = false
+                                _inputAudioRms.value = 0f
+                            }
+
+                            override fun onError(error: Int) {
+                                isNativeRecognizerListening = false
+                                _inputAudioRms.value = 0f
+                                if (_isSessionActive.value && !_isMicMuted.value &&
+                                    _connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING
+                                ) {
+                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 650L)
+                                }
+                            }
+
+                            override fun onResults(results: Bundle?) {
+                                isNativeRecognizerListening = false
+                                _inputAudioRms.value = 0f
+                                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                val topText = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+                                if (topText.isNotBlank()) {
+                                    scope.launch {
+                                        processFallbackLiveTurn(topText, null)
+                                    }
+                                } else if (_isSessionActive.value && !_isMicMuted.value) {
+                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 400L)
+                                }
+                            }
+
+                            override fun onPartialResults(partialResults: Bundle?) {
+                                val partial = partialResults
+                                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                    ?.firstOrNull()
+                                    ?.trim()
+                                    .orEmpty()
+                                if (partial.isNotBlank()) {
+                                    _liveUserTranscript.value = partial
+                                }
+                            }
+
+                            override fun onEvent(eventType: Int, params: Bundle?) {}
+                        })
+                    }
+                }
+                if (!isNativeRecognizerListening && _connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING) {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ur-PK")
+                        putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "ur-PK", "hi-IN"))
+                        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    }
+                    nativeSpeechRecognizer?.startListening(intent)
+                    isNativeRecognizerListening = true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Native SpeechRecognizer fallback to 16kHz PCM stream: ${e.message}")
+                isNativeRecognizerListening = false
+                if (micStreamingJob?.isActive != true) {
+                    start16kHzMicrophonePcmStream()
+                }
+            }
+        }
+    }
+
+    fun stopNativeSpeechRecognizerLoop() {
+        mainHandler.post {
+            try {
+                isNativeRecognizerListening = false
+                nativeSpeechRecognizer?.stopListening()
+                nativeSpeechRecognizer?.cancel()
+                nativeSpeechRecognizer?.destroy()
+            } catch (_: Exception) {
+            } finally {
+                nativeSpeechRecognizer = null
+            }
+        }
     }
 
     /**
@@ -1335,6 +1467,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         micStreamingJob?.cancel()
         micStreamingJob = null
         releaseMicAudioRecord()
+        stopNativeSpeechRecognizerLoop()
 
         clearPlaybackQueueAndStopImmediately()
         outputPlaybackJob?.cancel()
@@ -1667,7 +1800,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         val singleResp = executeLiveFunctionCallSingle(fnCall)
                         responsesArray.put(singleResp)
                     }
-                    if (webSocket != null && isWebSocketReady.get() && responsesArray.length() > 0) {
+                    if (isWebSocketReady.get() && responsesArray.length() > 0) {
                         val toolResponsePayload = JSONObject().apply {
                             put("toolResponse", JSONObject().apply {
                                 put("functionResponses", responsesArray)
@@ -2925,28 +3058,68 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     }
 
     // =========================================================================
-    // 5. HYBRID LIVE TURN FALLBACK (WHEN WEBSOCKET IS NOT OPEN)
+    // 5. HYBRID LIVE TURN FALLBACK & SUPER-AGI BRAIN EXECUTION
     // =========================================================================
     private suspend fun processFallbackLiveTurn(textInput: String?, wavBytes: ByteArray?) {
         _connectionState.value = LiveConnectionState.CONNECTING
-        val result = if (wavBytes != null) {
-            DeterministicNluEngine.analyzeAudioDeterministically(context, wavBytes, "audio/wav")
+
+        val rawResult = if (!textInput.isNullOrBlank()) {
+            SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(context, textInput)
+        } else if (wavBytes != null) {
+            val audioRes = DeterministicNluEngine.analyzeAudioDeterministically(context, wavBytes, "audio/wav")
+            if (audioRes.verbatimTranscript.isNotBlank()) {
+                SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(context, audioRes.verbatimTranscript)
+            } else {
+                audioRes
+            }
         } else {
-            DeterministicNluEngine.analyzeTextDeterministicallyLocal(context, textInput.orEmpty())
+            DeterministicNluEngine.analyzeTextDeterministicallyLocal(context, "")
         }
 
-        if (result.verbatimTranscript.isNotBlank()) {
-            _liveUserTranscript.value = result.verbatimTranscript
-            OmniAutonomousCoreEngine.analyzeUserMood(result.verbatimTranscript, _inputAudioRms.value)
-            com.omnivoice.agentfix.AgentSession.onUserUtterance(result.verbatimTranscript)
+        // CRITICAL FIX: Never endlessly speak "Jee main sun raha hoon, hukum karein." on unverified silence/background noise!
+        if (rawResult.verbatimTranscript.isBlank() && textInput.isNullOrBlank()) {
+            _connectionState.value = LiveConnectionState.LIVE_LISTENING
+            if (isNativeSpeechRecognitionAvailableSafe()) {
+                startNativeSpeechRecognizerLoop()
+            }
+            return
         }
-        _liveAiTranscript.value = result.spokenReply
 
-        // Execute any explicit tasks via our Live Functions
-        for (task in result.tasksToExecute) {
+        val cleanUtterance = rawResult.verbatimTranscript.ifBlank { textInput.orEmpty().trim() }
+        if (cleanUtterance.isNotBlank()) {
+            _liveUserTranscript.value = cleanUtterance
+            OmniAutonomousCoreEngine.analyzeUserMood(cleanUtterance, _inputAudioRms.value)
+            com.omnivoice.agentfix.AgentSession.onUserUtterance(cleanUtterance)
+        }
+
+        val finalSpokenReply = rawResult.spokenReply
+
+        // Execute all explicit tasks via our Live Functions & AgentFix Kit
+        for (task in rawResult.tasksToExecute) {
             when (task.taskType) {
+                NluTaskType.OPEN_APP -> {
+                    val fnObj = JSONObject().apply {
+                        put("name", "open_app")
+                        put("args", JSONObject().apply {
+                            put("app_name", task.target)
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
+                }
+
+                NluTaskType.WHATSAPP_MESSAGE -> {
+                    val fnObj = JSONObject().apply {
+                        put("name", "whatsapp_send_message")
+                        put("args", JSONObject().apply {
+                            put("contact", task.target)
+                            put("message", task.actionValue)
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
+                }
+
                 NluTaskType.GENERATE_AI_IMAGE, NluTaskType.WHATSAPP_DP_UPDATE -> {
-                    val targetAction = if (result.tasksToExecute.any { it.taskType == NluTaskType.WHATSAPP_DP_UPDATE }) {
+                    val targetAction = if (rawResult.tasksToExecute.any { it.taskType == NluTaskType.WHATSAPP_DP_UPDATE }) {
                         "whatsapp_dp"
                     } else {
                         "display"
@@ -2966,21 +3139,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     val fnObj = JSONObject().apply {
                         put("name", "control_phone_hardware")
                         put("args", JSONObject().apply {
-                            put("feature", task.taskType.name.lowercase())
+                            put("feature", if (task.taskType == NluTaskType.SYSTEM_SETTING) task.target.lowercase() else task.taskType.name.lowercase())
                             put("state", task.actionValue)
-                            put("value", task.target)
-                        })
-                    }
-                    executeLiveFunctionCallAndRespond(null, fnObj)
-                }
-
-                NluTaskType.WHATSAPP_MESSAGE -> {
-                    // replaced by agentfix
-                    val fnObj = JSONObject().apply {
-                        put("name", "whatsapp_send_message")
-                        put("args", JSONObject().apply {
-                            put("contact", task.target)
-                            put("message", task.actionValue)
+                            put("value", task.actionValue)
                         })
                     }
                     executeLiveFunctionCallAndRespond(null, fnObj)
@@ -2996,36 +3157,72 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     executeLiveFunctionCallAndRespond(null, fnObj)
                 }
 
-                NluTaskType.OPEN_APP -> {
-                    // replaced by agentfix
-                    val fnObj = JSONObject().apply {
-                        put("name", "open_app")
-                        put("args", JSONObject().apply {
-                            put("app_name", task.target)
-                        })
-                    }
-                    executeLiveFunctionCallAndRespond(null, fnObj)
+                NluTaskType.YOUTUBE_SEARCH -> {
+                    actionExecutor.execute(
+                        com.example.data.model.VoiceAction(
+                            action = "search_web",
+                            target = task.actionValue,
+                            parameters = mapOf("query" to task.actionValue, "platform" to "youtube"),
+                            spokenResponse = finalSpokenReply
+                        )
+                    )
                 }
 
-                else -> {
-                    // replaced by agentfix
-                    val fnObj = JSONObject().apply {
-                        put("name", "open_app")
-                        put("args", JSONObject().apply {
-                            put("app_name", task.target.ifBlank { "youtube" })
-                        })
+                NluTaskType.GOOGLE_SEARCH -> {
+                    actionExecutor.execute(
+                        com.example.data.model.VoiceAction(
+                            action = "search_web",
+                            target = task.actionValue,
+                            parameters = mapOf("query" to task.actionValue, "platform" to "google"),
+                            spokenResponse = finalSpokenReply
+                        )
+                    )
+                }
+
+                NluTaskType.SMS -> {
+                    actionExecutor.execute(
+                        com.example.data.model.VoiceAction(
+                            action = "send_sms",
+                            target = task.target,
+                            parameters = mapOf("contact_name" to task.target, "message" to task.actionValue),
+                            spokenResponse = finalSpokenReply
+                        )
+                    )
+                }
+
+                NluTaskType.CUSTOM_ANDROID_INTENT -> {
+                    when (task.target.lowercase()) {
+                        "screenshot" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_screenshot", target = "screen", spokenResponse = finalSpokenReply))
+                        "camera" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_photo", target = "camera", spokenResponse = finalSpokenReply))
+                        "navigation" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "navigate", target = task.actionValue.lowercase(), parameters = mapOf("action" to task.actionValue.lowercase()), spokenResponse = finalSpokenReply))
+                        else -> {
+                            val fnObj = JSONObject().apply {
+                                put("name", "open_app")
+                                put("args", JSONObject().apply {
+                                    put("app_name", task.target.ifBlank { "settings" })
+                                })
+                            }
+                            executeLiveFunctionCallAndRespond(null, fnObj)
+                        }
                     }
-                    executeLiveFunctionCallAndRespond(null, fnObj)
                 }
             }
         }
 
+        _liveAiTranscript.value = finalSpokenReply
         _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
-        val detectedLang = LanguageProcessor.detectLanguage(result.spokenReply)
+        val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
         ttsFallback?.onSpeechCompleted = {
             _connectionState.value = LiveConnectionState.LIVE_LISTENING
+            if (_isSessionActive.value && !_isMicMuted.value && isNativeSpeechRecognitionAvailableSafe()) {
+                startNativeSpeechRecognizerLoop()
+            }
         }
-        ttsFallback?.speak(result.spokenReply, 1.0f, 1.0f, detectedLang.ttsLocale)
+        ttsFallback?.speak(finalSpokenReply, 1.0f, 1.0f, detectedLang.ttsLocale)
+
+        mainHandler.post {
+            onTranscriptTurnCompleted?.invoke(cleanUtterance, finalSpokenReply)
+        }
     }
 
     private fun updateVisualizerFromFloatSamples(samples: FloatArray, isAiOutput: Boolean) {

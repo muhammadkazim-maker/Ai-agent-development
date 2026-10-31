@@ -161,6 +161,7 @@ class AiCallSecretary(
     /**
      * Completes call screening session, generates summary and logs result.
      */
+    @Suppress("DEPRECATION")
     fun endCall(summary: String = ""): Boolean {
         Log.i(TAG, "Ending call session. Summary: $summary")
         var ended = false

@@ -388,24 +388,6 @@ class OmniAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         com.omnivoice.agentfix.ScreenObserver.onEvent(event, packageName)
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val fgPkg = event.packageName?.toString().orEmpty()
-            if (fgPkg.isNotBlank() && fgPkg != packageName) {
-                val lockEngine = com.example.engine.VoiceAppLockAndMoodEngine.getInstance(applicationContext)
-                if (lockEngine.isAppProtectedByVoiceLock(fgPkg) &&
-                    lockEngine.simulateSoreThroatOrVoiceFail.value &&
-                    !lockEngine.isPackageTemporarilyUnlocked(fgPkg)
-                ) {
-                    val label = com.omnivoice.agentfix.ScreenObserver.resolveAppLabel(fgPkg)
-                    lockEngine.interceptAppOpenCommand(
-                        appName = label,
-                        packageName = fgPkg,
-                        rawUtterance = "",
-                        forceVoiceVerificationFailure = true
-                    )
-                }
-            }
-        }
     }
 
     // FIX FOR KEYBOARD SUGGESTION BUG: Directly injects text into the Search Bar / EditText and presses Enter!

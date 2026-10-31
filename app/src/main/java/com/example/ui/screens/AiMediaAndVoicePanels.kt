@@ -47,8 +47,8 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -950,7 +950,7 @@ fun LiveVoiceAndTranscribePanel(viewModel: VoiceAssistantViewModel) {
                                 )
                                 IconButton(onClick = { viewModel.speakResponse(note) }) {
                                     Icon(
-                                        imageVector = Icons.Default.VolumeUp,
+                                        imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                                         contentDescription = "Speak Transcription",
                                         tint = CyanPrimary
                                     )

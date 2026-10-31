@@ -440,7 +440,12 @@ class DefaultGeminiApiClient(
         .build(),
     private val apiKeyProvider: () -> String = {
         try {
-            BuildConfig.GEMINI_API_KEY
+            val argon = try { BuildConfig.GEMINI_ARGON_API_KEY.trim() } catch (_: Throwable) { "" }
+            if (argon.isNotBlank() && argon != "MY_GEMINI_ARGON_API_KEY") {
+                argon
+            } else {
+                BuildConfig.GEMINI_API_KEY
+            }
         } catch (e: Exception) {
             ""
         }
