@@ -548,13 +548,14 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
         viewModelScope.launch {
             // STRICT TWO-STEP VERIFICATION:
-            // If Gemini classified this audio as UNCLEAR or CONVERSATION (e.g. "Can you listen?", "Hello", "Kya tum sun sakte ho?"),
-            // NEVER trigger routines, Flashlight, Wi-Fi, or any phone action!
-            val isExplicitConversationOrUnclear =
-                voiceAnalysis?.intentType == VoiceIntentType.CONVERSATION ||
+            // Only bypass device actions if the audio was literally unclear or a pure mic-check/greeting
+            // AND SuperAgiBrainEngine does not detect an explicit device task in the utterance.
+            val hasExplicitDeviceTask = com.example.engine.SuperAgiBrainEngine.extractAllDeviceTasks(context, contextualSpeech).isNotEmpty()
+            val isExplicitConversationOrUnclear = !hasExplicitDeviceTask && (
                 voiceAnalysis?.intentType == VoiceIntentType.UNCLEAR ||
                 speech.equals("[Unclear Audio]", ignoreCase = true) ||
                 MultiEngineSpeechManager.isConversationalQuery(contextualSpeech)
+            )
 
             if (!isExplicitConversationOrUnclear) {
                 // 1. Check for matching custom routines first (backed by Room database)
@@ -578,7 +579,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                 contextualSpeech
             }
 
-            // 3. Process through AI Brain (skip redundant network call if voiceAnalysis already verified CONVERSATION/UNCLEAR)
+            // 3. Process through AI Brain (fast-path resolves explicit OS/video/search actions in <2ms!)
             val recentContext = "Last target: $lastTarget, Last action: ${lastAction?.action ?: "none"}"
             val vocabSummary = _personalVocabulary.value.take(10).joinToString("; ") { "${it.spokenPhrase}=${it.canonicalMeaning}" }
             val memorySummary = _userMemories.value.take(10).joinToString("; ") { "${it.memoryKey}:${it.memoryValue}" }
@@ -602,58 +603,83 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             _detectedLanguage.value = lang
             _pendingAction.value = action
 
-            // Run Autonomous Multi-Step Task Engine with Two-Step Verification & Hard Guardrail
-            // Pass null for audioWavBytes if voiceAnalysis already transcribed the audio so we never upload WAV twice!
-            val wavBytes = if (voiceAnalysis != null) null else sttManager.lastRecordedWavBytes.value
-            val completedFeedEntry = autonomousTaskEngine.executeAutonomousCommand(
-                rawCommand = effectiveSpeech,
-                audioWavBytes = wavBytes,
-                preVerifiedIntent = voiceAnalysis?.intentType,
-                preVerifiedReply = voiceAnalysis?.reply,
-                preVerifiedReasoning = voiceAnalysis?.chainOfThoughtReasoning,
-                preVerifiedConfidence = voiceAnalysis?.confidenceScore,
-                preVerifiedClarity = voiceAnalysis?.audioClarityScore,
-                preVerifiedCategory = voiceAnalysis?.intentCategory,
-                onProgressUpdate = { liveEntry ->
-                    val existingIdx = _autonomousFeed.value.indexOfFirst { it.id == liveEntry.id }
-                    if (existingIdx >= 0) {
-                        val updated = _autonomousFeed.value.toMutableList()
-                        updated[existingIdx] = liveEntry
-                        _autonomousFeed.value = updated
-                    } else {
-                        _autonomousFeed.value = (listOf(liveEntry) + _autonomousFeed.value).take(25)
-                    }
-                    _plannedSteps.value = liveEntry.steps.map { s ->
-                        val badge = when (s.status) {
-                            TaskStepStatus.COMPLETED -> "✓"
-                            TaskStepStatus.IN_PROGRESS -> "⟳"
-                            TaskStepStatus.FAILED -> "✕"
-                            TaskStepStatus.PENDING -> "•"
+            val lowerSpeech = effectiveSpeech.lowercase()
+            val needsAutonomousMultiStepOrImage =
+                action.action == "multi_step" ||
+                    lowerSpeech.contains("image") ||
+                    lowerSpeech.contains("tasveer") ||
+                    lowerSpeech.contains("picture") ||
+                    lowerSpeech.contains("dp ") ||
+                    lowerSpeech.contains("profile photo") ||
+                    (voiceAnalysis?.deterministicTasks?.size ?: 0) > 1
+
+            if (needsAutonomousMultiStepOrImage) {
+                val wavBytes = if (voiceAnalysis != null) null else sttManager.lastRecordedWavBytes.value
+                val completedFeedEntry = autonomousTaskEngine.executeAutonomousCommand(
+                    rawCommand = effectiveSpeech,
+                    audioWavBytes = wavBytes,
+                    preVerifiedIntent = voiceAnalysis?.intentType,
+                    preVerifiedReply = voiceAnalysis?.reply,
+                    preVerifiedReasoning = voiceAnalysis?.chainOfThoughtReasoning,
+                    preVerifiedConfidence = voiceAnalysis?.confidenceScore,
+                    preVerifiedClarity = voiceAnalysis?.audioClarityScore,
+                    preVerifiedCategory = voiceAnalysis?.intentCategory,
+                    onProgressUpdate = { liveEntry ->
+                        val existingIdx = _autonomousFeed.value.indexOfFirst { it.id == liveEntry.id }
+                        if (existingIdx >= 0) {
+                            val updated = _autonomousFeed.value.toMutableList()
+                            updated[existingIdx] = liveEntry
+                            _autonomousFeed.value = updated
+                        } else {
+                            _autonomousFeed.value = (listOf(liveEntry) + _autonomousFeed.value).take(25)
                         }
-                        "${s.stepIndex}. ${s.title} $badge"
+                        _plannedSteps.value = liveEntry.steps.map { s ->
+                            val badge = when (s.status) {
+                                TaskStepStatus.COMPLETED -> "✓"
+                                TaskStepStatus.IN_PROGRESS -> "⟳"
+                                TaskStepStatus.FAILED -> "✕"
+                                TaskStepStatus.PENDING -> "•"
+                            }
+                            "${s.stepIndex}. ${s.title} $badge"
+                        }
                     }
+                )
+
+                if (completedFeedEntry.intentCategory == NluIntentCategory.LEARN_CORRECTION_RULE) {
+                    _learnedRules.value = DeterministicNluEngine.getLearnedRules(context)
                 }
-            )
 
-            if (completedFeedEntry.intentCategory == NluIntentCategory.LEARN_CORRECTION_RULE) {
-                _learnedRules.value = DeterministicNluEngine.getLearnedRules(context)
-            }
-
-            // If AutonomousTaskEngine classified as CONVERSATION or UNCLEAR, or handled an AI Image / multi-step chain,
-            // speak its reply directly and DO NOT run any hardware action!
-            if (completedFeedEntry.intentType == VoiceIntentType.CONVERSATION ||
-                completedFeedEntry.intentType == VoiceIntentType.UNCLEAR ||
-                action.action == "general_chat" ||
-                completedFeedEntry.generatedImage != null ||
-                completedFeedEntry.steps.size > 1
-            ) {
-                val replyText = completedFeedEntry.aiReply
+                if (completedFeedEntry.intentType == VoiceIntentType.CONVERSATION ||
+                    completedFeedEntry.intentType == VoiceIntentType.UNCLEAR ||
+                    action.action == "general_chat" ||
+                    completedFeedEntry.generatedImage != null ||
+                    completedFeedEntry.steps.size > 1
+                ) {
+                    val replyText = completedFeedEntry.aiReply
+                    speakResponse(replyText)
+                    _voiceState.value = VoiceState.Idle
+                    recordLog(
+                        action = if (completedFeedEntry.intentType != VoiceIntentType.ACTION) {
+                            VoiceAction(action = "conversation", target = effectiveSpeech, spokenResponse = replyText)
+                        } else action,
+                        isLocked = isDeviceLocked(),
+                        passed = true,
+                        summary = replyText
+                    )
+                    return@launch
+                }
+            } else if (action.action == "general_chat") {
+                val replyText = action.spokenResponse.ifBlank {
+                    com.example.engine.SuperAgiBrainEngine.generateLocalSuperAgiResponse(
+                        context = context,
+                        rawText = effectiveSpeech,
+                        detectedLang = if (lang == DetectedLanguage.ENGLISH) com.example.engine.NluLanguageEnum.ENGLISH else com.example.engine.NluLanguageEnum.ROMAN_URDU_MIXED
+                    )
+                }
                 speakResponse(replyText)
                 _voiceState.value = VoiceState.Idle
                 recordLog(
-                    action = if (completedFeedEntry.intentType != VoiceIntentType.ACTION) {
-                        VoiceAction(action = "conversation", target = effectiveSpeech, spokenResponse = replyText)
-                    } else action,
+                    action = VoiceAction(action = "conversation", target = effectiveSpeech, spokenResponse = replyText),
                     isLocked = isDeviceLocked(),
                     passed = true,
                     summary = replyText

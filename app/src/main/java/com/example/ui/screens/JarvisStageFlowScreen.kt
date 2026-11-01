@@ -31,12 +31,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -47,30 +47,36 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SettingsAccessibility
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -104,12 +110,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -119,7 +128,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
-import com.example.engine.AccentTrainingMode
 import com.example.engine.BiometricVaultManager
 import com.example.engine.DraggableOrbState
 import com.example.engine.GeminiLiveVoice
@@ -130,13 +138,26 @@ import com.example.engine.SuperAgiBrainEngine
 import com.example.engine.TextToSpeechManager
 import com.example.service.OmniAccessibilityService
 import com.example.service.OmniNotificationListenerService
+import com.example.ui.theme.CyanPrimary
+import com.example.ui.theme.DangerRed
+import com.example.ui.theme.DarkBackground
+import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.DarkSurfaceBorder
+import com.example.ui.theme.DarkSurfaceElevated
+import com.example.ui.theme.DarkSurfaceVariant
 import com.example.ui.theme.EmeraldTertiary
+import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.ui.theme.PlusJakartaSansFontFamily
+import com.example.ui.theme.SpaceGroteskFontFamily
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.VioletSecondary
+import com.example.ui.theme.WarningAmber
+import com.example.ui.theme.fontFamilyForBilingualText
+import com.example.ui.theme.textDirectionForBilingualText
 import com.example.ui.viewmodel.VoiceAssistantViewModel
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -147,13 +168,17 @@ enum class JarvisStage {
     STAGE_C_CORNER_ORB
 }
 
-private val StarkDeepBlack = Color(0xFF03050A)
-private val StarkObsidianSurface = Color(0xFF070C16)
-private val StarkCardBg = Color(0xFF0A1120)
-private val StarkCyan = Color(0xFF00E5FF)
-private val StarkBlue = Color(0xFF2563EB)
-private val StarkGold = Color(0xFFF59E0B)
-private val StarkRed = Color(0xFFEF4444)
+// Bespoke Aether-X Quantum Neural OS Palette Tokens
+private val QuantumVoid = Color(0xFF04060C)
+private val QuantumObsidian = Color(0xFF090D18)
+private val QuantumGlassCard = Color(0xFF101729)
+private val QuantumElevatedCard = Color(0xFF162038)
+private val QuantumBorder = Color(0xFF243252)
+private val QuantumCyan = CyanPrimary
+private val QuantumMint = EmeraldTertiary
+private val QuantumViolet = VioletSecondary
+private val QuantumAmber = WarningAmber
+private val QuantumCrimson = DangerRed
 
 @Composable
 fun JarvisStageFlowScreen(
@@ -186,7 +211,6 @@ fun JarvisStageFlowScreen(
     var showQuickSettingsDialog by remember { mutableStateOf(false) }
     var showExpandedHudDrawer by remember { mutableStateOf(false) }
 
-    // If live session starts, transition automatically to Stage C Corner Orb
     LaunchedEffect(isLiveActive) {
         if (isLiveActive && currentStage != JarvisStage.STAGE_C_CORNER_ORB) {
             currentStage = JarvisStage.STAGE_C_CORNER_ORB
@@ -199,14 +223,17 @@ fun JarvisStageFlowScreen(
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        StarkDeepBlack,
-                        StarkObsidianSurface,
-                        StarkDeepBlack
+                        QuantumVoid,
+                        QuantumObsidian,
+                        QuantumVoid
                     )
                 )
             )
             .testTag("jarvis_stage_flow_root")
     ) {
+        // Ambient Bioluminescent Spatial Backdrop Canvas
+        QuantumSpatialBackdrop()
+
         when (currentStage) {
             JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER -> {
                 JarvisStageAPermissionsGatekeeper(
@@ -227,6 +254,12 @@ fun JarvisStageFlowScreen(
                         viewModel.startGeminiLiveSession()
                         onEnterPipMode()
                         currentStage = JarvisStage.STAGE_C_CORNER_ORB
+                    },
+                    onSwitchToLiveHud = {
+                        currentStage = JarvisStage.STAGE_C_CORNER_ORB
+                    },
+                    onTriggerVoiceListen = {
+                        viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
                     },
                     onSendPrompt = { queryText ->
                         viewModel.omniLiveEngine.sendTextMessageToLiveSession(queryText)
@@ -256,7 +289,11 @@ fun JarvisStageFlowScreen(
                     },
                     onExpandHud = { showExpandedHudDrawer = true },
                     onOpenSettings = { showQuickSettingsDialog = true },
+                    onOpenAdvancedSettingsHub = onOpenAdvancedSettingsHub,
                     onEnterPip = { onEnterPipMode() },
+                    onReturnToHub = {
+                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                    },
                     onStop = {
                         viewModel.endGeminiLiveSession()
                         currentStage = JarvisStage.STAGE_B_MINIMAL_START
@@ -265,7 +302,6 @@ fun JarvisStageFlowScreen(
             }
         }
 
-        // Quick Settings Drawer (Gear Icon)
         if (showQuickSettingsDialog) {
             JarvisSettingsAndVaultModal(
                 vaultManager = vaultManager,
@@ -277,7 +313,6 @@ fun JarvisStageFlowScreen(
             )
         }
 
-        // Revamped Neural Status Console (Zero History/Routines/Memory Clutter — Backend Only)
         if (showExpandedHudDrawer) {
             JarvisExpandedHudDrawer(
                 viewModel = viewModel,
@@ -287,8 +322,45 @@ fun JarvisStageFlowScreen(
     }
 }
 
+@Composable
+private fun QuantumSpatialBackdrop() {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val w = size.width
+        val h = size.height
+
+        // Top-right Cyan Nebula Glow
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    QuantumCyan.copy(alpha = 0.11f),
+                    QuantumViolet.copy(alpha = 0.04f),
+                    Color.Transparent
+                ),
+                center = Offset(w * 0.85f, h * 0.12f),
+                radius = w * 0.75f
+            ),
+            radius = w * 0.75f,
+            center = Offset(w * 0.85f, h * 0.12f)
+        )
+
+        // Bottom-left Bioluminescent Mint Glow
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    QuantumMint.copy(alpha = 0.08f),
+                    Color.Transparent
+                ),
+                center = Offset(w * 0.15f, h * 0.82f),
+                radius = w * 0.65f
+            ),
+            radius = w * 0.65f,
+            center = Offset(w * 0.15f, h * 0.82f)
+        )
+    }
+}
+
 // =========================================================================
-// STAGE A: SYSTEM PERMISSIONS GATEKEEPER
+// STAGE A: AUTONOMOUS OS PERMISSIONS GATEKEEPER (BENTO DECK)
 // =========================================================================
 @Composable
 private fun JarvisStageAPermissionsGatekeeper(
@@ -320,11 +392,6 @@ private fun JarvisStageAPermissionsGatekeeper(
         )
     }
 
-    var masterPinInput by remember { mutableStateOf(vaultManager.getMasterPin().ifBlank { "1234" }) }
-    var patternInput by remember { mutableStateOf("L-Shape TopToBottom") }
-    var voiceUnlockInput by remember { mutableStateOf(vaultManager.getSecretVoiceUnlockWord()) }
-    var biometricEnrolled by remember { mutableStateOf(true) }
-
     val runtimePermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -341,12 +408,10 @@ private fun JarvisStageAPermissionsGatekeeper(
         }
     }
 
-    val totalSteps = 5
+    val totalSteps = 3
     val completedSteps = (if (hasAccessibility) 1 else 0) +
-        1 + // Shizuku / ADB God-Mode is software enabled
         (if (hasNotificationListener) 1 else 0) +
-        (if (hasMic && hasContacts) 1 else 0) +
-        (if (masterPinInput.length >= 4) 1 else 0)
+        (if (hasMic && hasContacts && hasOverlay) 1 else 0)
 
     val progress = (completedSteps.toFloat() / totalSteps.toFloat()).coerceIn(0.25f, 1f)
 
@@ -356,56 +421,72 @@ private fun JarvisStageAPermissionsGatekeeper(
             .statusBarsPadding()
             .navigationBarsPadding()
             .imePadding()
-            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .padding(horizontal = 20.dp, vertical = 14.dp)
             .testTag("stage_a_permission_gatekeeper"),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(6.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        // Bento Readiness Header Card
+        Surface(
+            color = QuantumGlassCard,
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, QuantumBorder),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Column {
-                Text(
-                    text = "JARVIS NEURAL OS • SYSTEM SETUP",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = StarkCyan,
-                    letterSpacing = 2.sp
-                )
-                Text(
-                    text = "Autonomous OS Permissions Gatekeeper",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Black,
-                    color = TextPrimary
-                )
-            }
-            Surface(
-                color = StarkCyan.copy(alpha = 0.16f),
-                shape = CircleShape,
-                border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f))
-            ) {
-                Text(
-                    text = "$completedSteps / $totalSteps Ready",
-                    fontSize = 11.sp,
-                    color = StarkCyan,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                    fontWeight = FontWeight.Bold
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "AETHER-X // KERNEL INITIALIZATION",
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumMint,
+                            letterSpacing = 1.6.sp
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Autonomous OS Gatekeeper",
+                            fontSize = 20.sp,
+                            fontFamily = SpaceGroteskFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                    }
+                    Surface(
+                        color = QuantumCyan.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.45f))
+                    ) {
+                        Text(
+                            text = "$completedSteps/$totalSteps READY",
+                            fontSize = 11.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = QuantumCyan,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = QuantumMint,
+                    trackColor = QuantumVoid
                 )
             }
         }
 
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 12.dp)
-                .height(5.dp)
-                .clip(RoundedCornerShape(3.dp)),
-            color = StarkCyan,
-            trackColor = StarkCardBg
-        )
+        Spacer(modifier = Modifier.height(12.dp))
 
         LazyColumn(
             modifier = Modifier
@@ -413,14 +494,13 @@ private fun JarvisStageAPermissionsGatekeeper(
                 .fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // 1. Accessibility Service
             item {
                 GatekeeperPermissionRow(
-                    title = "1. Android Accessibility Service",
-                    subtitle = "Required for zero-touch auto-click, gesture automation & screen observation",
+                    title = "01 // Accessibility Vision & Auto-Click",
+                    subtitle = "Powers WhatsApp message delete, voice call clicker & full screen icon awareness",
                     isGranted = hasAccessibility,
                     icon = Icons.Default.SettingsAccessibility,
-                    actionLabel = if (hasAccessibility) "Enabled" else "Open Settings",
+                    actionLabel = if (hasAccessibility) "ACTIVE" else "ENABLE",
                     onAction = {
                         try {
                             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
@@ -431,74 +511,13 @@ private fun JarvisStageAPermissionsGatekeeper(
                 )
             }
 
-            // 2. Shizuku / Local ADB Shell God-Mode Bridge (http://127.0.0.1:8765)
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Surface(
-                                color = StarkCyan.copy(alpha = 0.15f),
-                                shape = CircleShape,
-                                modifier = Modifier.size(38.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Default.Terminal, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(20.dp))
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "2. Shizuku / Local ADB Shell Bridge",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary
-                                )
-                                Text(
-                                    text = "Rootless God-Mode on http://127.0.0.1:8765 for raw OS commands (input tap, swipe, keyevent, screencap)",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        OutlinedButton(
-                            onClick = {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                val clip = android.content.ClipData.newPlainText("JARVIS_BRIDGE", vaultManager.getPythonBridgeOneLiner())
-                                clipboard.setPrimaryClip(clip)
-                                android.widget.Toast.makeText(context, "Copied 1-Click Shizuku / Termux Bridge Command (Port 8765)!", android.widget.Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, StarkCyan),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = StarkCyan)
-                        ) {
-                            Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Copy 1-Click Bridge Command (Port 8765)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-
-            // 3. Notification Listener & Call Screening
             item {
                 GatekeeperPermissionRow(
-                    title = "3. Notification & Call Screening",
-                    subtitle = "Intercepts incoming notifications & powers AI Call Secretary in backend",
+                    title = "02 // Notification & Call Interceptor",
+                    subtitle = "Reads incoming alerts & powers autonomous AI Call Secretary in background",
                     isGranted = hasNotificationListener,
                     icon = Icons.Default.Notifications,
-                    actionLabel = if (hasNotificationListener) "Connected" else "Grant Access",
+                    actionLabel = if (hasNotificationListener) "LINKED" else "GRANT",
                     onAction = {
                         try {
                             context.startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS").apply {
@@ -509,14 +528,13 @@ private fun JarvisStageAPermissionsGatekeeper(
                 )
             }
 
-            // 4. Contacts, Mic, Overlay & Screen Capture
             item {
                 GatekeeperPermissionRow(
-                    title = "4. Audio, Contacts & System Overlay",
-                    subtitle = "Real-time 16kHz microphone stream, full contacts sync & floating orb",
+                    title = "03 // 16kHz Audio, Contacts & Overlay",
+                    subtitle = "Bilingual voice recognition, WhatsApp contact matcher & floating plasma orb",
                     isGranted = hasMic && hasContacts && hasOverlay,
                     icon = Icons.Default.Layers,
-                    actionLabel = if (hasMic && hasContacts && hasOverlay) "Granted" else "Request All",
+                    actionLabel = if (hasMic && hasContacts && hasOverlay) "READY" else "ALLOW",
                     onAction = {
                         runtimePermLauncher.launch(
                             arrayOf(
@@ -539,113 +557,31 @@ private fun JarvisStageAPermissionsGatekeeper(
                     }
                 )
             }
-
-            // 5. Biometric Fingerprint & Master PIN/Password Vault Enrollment
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.3f)),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Fingerprint, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(22.dp))
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "5. Biometric Vault & Secret Device Unlock",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                        }
-                        Text(
-                            text = "Enables hands-free phone unlock without manual screen touch.",
-                            fontSize = 11.sp,
-                            color = TextSecondary,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
-                        )
-
-                        OutlinedTextField(
-                            value = masterPinInput,
-                            onValueChange = { masterPinInput = it },
-                            label = { Text("Device Master PIN", fontSize = 12.sp) },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = StarkCyan,
-                                unfocusedBorderColor = DarkSurfaceBorder,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            ),
-                            singleLine = true
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        OutlinedTextField(
-                            value = voiceUnlockInput,
-                            onValueChange = { voiceUnlockInput = it },
-                            label = { Text("Secret Voice Unlock Phrase", fontSize = 12.sp) },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = StarkCyan,
-                                unfocusedBorderColor = DarkSurfaceBorder,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary
-                            ),
-                            singleLine = true
-                        )
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Enroll Biometric Fingerprint", fontSize = 12.sp, color = TextPrimary)
-                            Switch(
-                                checked = biometricEnrolled,
-                                onCheckedChange = { biometricEnrolled = it },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = StarkCyan,
-                                    checkedTrackColor = StarkCyan.copy(alpha = 0.3f)
-                                )
-                            )
-                        }
-                    }
-                }
-            }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         Button(
             onClick = {
-                vaultManager.enrollVault(
-                    masterPin = masterPinInput,
-                    lockScreenPattern = patternInput,
-                    secretVoiceWord = voiceUnlockInput,
-                    biometricEnrolled = biometricEnrolled
-                )
                 vaultManager.markPermissionsCompleted()
                 onAllGranted()
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(54.dp)
+                .height(56.dp)
                 .testTag("btn_grant_all_permissions"),
-            colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
-            shape = RoundedCornerShape(14.dp)
+            colors = ButtonDefaults.buttonColors(containerColor = QuantumCyan),
+            shape = RoundedCornerShape(16.dp)
         ) {
-            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF030712))
-            Spacer(modifier = Modifier.width(8.dp))
+            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = QuantumVoid)
+            Spacer(modifier = Modifier.width(10.dp))
             Text(
-                text = "ACTIVATE JARVIS & LAUNCH NEURAL CORE",
+                text = "INITIALIZE QUANTUM NEURAL CORE",
                 fontSize = 13.sp,
-                fontWeight = FontWeight.Black,
-                color = Color(0xFF030712),
-                letterSpacing = 1.sp
+                fontFamily = SpaceGroteskFontFamily,
+                fontWeight = FontWeight.Bold,
+                color = QuantumVoid,
+                letterSpacing = 1.2.sp
             )
         }
     }
@@ -656,35 +592,35 @@ private fun GatekeeperPermissionRow(
     title: String,
     subtitle: String,
     isGranted: Boolean,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     actionLabel: String,
     onAction: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = StarkCardBg),
+        colors = CardDefaults.cardColors(containerColor = QuantumGlassCard),
         border = BorderStroke(
             1.dp,
-            if (isGranted) EmeraldTertiary.copy(alpha = 0.45f) else DarkSurfaceBorder
+            if (isGranted) QuantumMint.copy(alpha = 0.5f) else QuantumBorder
         ),
-        shape = RoundedCornerShape(14.dp)
+        shape = RoundedCornerShape(18.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .padding(15.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                color = if (isGranted) EmeraldTertiary.copy(alpha = 0.15f) else StarkCyan.copy(alpha = 0.12f),
-                shape = CircleShape,
-                modifier = Modifier.size(38.dp)
+                color = if (isGranted) QuantumMint.copy(alpha = 0.15f) else QuantumCyan.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.size(42.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = icon,
                         contentDescription = null,
-                        tint = if (isGranted) EmeraldTertiary else StarkCyan,
+                        tint = if (isGranted) QuantumMint else QuantumCyan,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -695,7 +631,8 @@ private fun GatekeeperPermissionRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    fontSize = 13.sp,
+                    fontSize = 14.sp,
+                    fontFamily = SpaceGroteskFontFamily,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
@@ -708,22 +645,23 @@ private fun GatekeeperPermissionRow(
                 )
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
             OutlinedButton(
                 onClick = onAction,
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(12.dp),
                 border = BorderStroke(
                     1.dp,
-                    if (isGranted) EmeraldTertiary else StarkCyan
+                    if (isGranted) QuantumMint else QuantumCyan
                 ),
                 colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isGranted) EmeraldTertiary else StarkCyan
+                    contentColor = if (isGranted) QuantumMint else QuantumCyan
                 )
             ) {
                 Text(
                     text = actionLabel,
                     fontSize = 11.sp,
+                    fontFamily = JetBrainsMonoFontFamily,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -732,7 +670,7 @@ private fun GatekeeperPermissionRow(
 }
 
 // =========================================================================
-// STAGE B: REVAMPED NEURAL COMMAND CENTER (ZERO UI CLUTTER)
+// STAGE B: AETHER-X QUANTUM NEURAL COMMAND CENTER (COMPLETELY REVAMPED)
 // =========================================================================
 @Composable
 private fun JarvisStageBMinimalLaunchScreen(
@@ -741,33 +679,46 @@ private fun JarvisStageBMinimalLaunchScreen(
     aiTranscript: String = "",
     onSelectVoice: (GeminiLiveVoice) -> Unit,
     onStartJarvis: () -> Unit,
+    onSwitchToLiveHud: () -> Unit = {},
+    onTriggerVoiceListen: () -> Unit = {},
     onSendPrompt: (String) -> Unit = {},
     onOpenSettings: () -> Unit,
     onOpenAdvancedSettingsHub: () -> Unit = {},
     onTestAccent: (String) -> Unit = {}
 ) {
-    val activeAccentMode by TextToSpeechManager.activeAccentMode.collectAsState()
+    val context = LocalContext.current
     var stageBPromptInput by remember { mutableStateOf("") }
+    val isAccessibilityConnected = remember { OmniAccessibilityService.isConnected() }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "arc_reactor")
+    val infiniteTransition = rememberInfiniteTransition(label = "quantum_core")
     val rotation by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(11000, easing = LinearEasing),
+            animation = tween(14000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "reactor_spin"
+        label = "orbital_spin"
+    )
+
+    val wavePhase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(3200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "harmonic_phase"
     )
 
     val pulseGlow by infiniteTransition.animateFloat(
-        initialValue = 0.60f,
+        initialValue = 0.68f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = FastOutSlowInEasing),
+            animation = tween(2200, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "pulse_glow"
+        label = "core_pulse"
     )
 
     Column(
@@ -775,234 +726,623 @@ private fun JarvisStageBMinimalLaunchScreen(
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .imePadding()
+            .padding(horizontal = 16.dp, vertical = 10.dp)
             .testTag("stage_b_minimal_screen"),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // 1. Sleek Top Telemetry Header Bar with Gemini-4-Argon AGI Badge
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        // -----------------------------------------------------------------
+        // 1. TOP SPATIAL TELEMETRY PILL BAR
+        // -----------------------------------------------------------------
+        Surface(
+            color = QuantumGlassCard.copy(alpha = 0.92f),
+            shape = RoundedCornerShape(22.dp),
+            border = BorderStroke(1.dp, QuantumBorder),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = CircleShape,
-                    color = EmeraldTertiary,
-                    modifier = Modifier.size(9.dp)
-                ) {}
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = "OMNIVOICE • JARVIS AGI",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Black,
-                        color = StarkCyan,
-                        letterSpacing = 2.sp
-                    )
-                    Text(
-                        text = "Autonomous OS Controller • ${SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS.first().uppercase()}",
-                        fontSize = 10.sp,
-                        color = EmeraldTertiary,
-                        fontWeight = FontWeight.SemiBold
-                    )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    // Glowing Bioluminescent Status Dot
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .background(QuantumMint.copy(alpha = 0.15f), CircleShape)
+                            .border(1.dp, QuantumMint.copy(alpha = 0.5f), CircleShape)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = QuantumMint,
+                            modifier = Modifier.size(9.dp)
+                        ) {}
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "OMNIVOICE",
+                                fontSize = 15.sp,
+                                fontFamily = SpaceGroteskFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                letterSpacing = 1.2.sp
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                color = QuantumCyan.copy(alpha = 0.16f),
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(0.8.dp, QuantumCyan.copy(alpha = 0.5f))
+                            ) {
+                                Text(
+                                    text = "AGI 4.0",
+                                    fontSize = 9.sp,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = QuantumCyan,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "${SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS.first().uppercase()} • ZERO-LATENCY OS",
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
-            }
 
-            IconButton(
-                onClick = onOpenSettings,
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(StarkCardBg, CircleShape)
-                    .border(1.dp, StarkCyan.copy(alpha = 0.35f), CircleShape)
-                    .testTag("btn_quick_settings_gear")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Quick Settings & Vault",
-                    tint = StarkCyan,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-        }
-
-        // 2. Centerpiece: Revamped Multi-Layer Neural Arc-Reactor Core
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.clickable { onStartJarvis() }
-        ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(204.dp)
-                    .testTag("btn_start_jarvis")
-            ) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val radius = size.minDimension / 2f
-                    val center = Offset(size.width / 2f, size.height / 2f)
-
-                    // Atmospheric Outer Halo
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                StarkCyan.copy(alpha = 0.38f * pulseGlow),
-                                VioletSecondary.copy(alpha = 0.14f * pulseGlow),
-                                Color.Transparent
-                            ),
-                            center = center,
-                            radius = radius
-                        ),
-                        radius = radius,
-                        center = center
-                    )
-
-                    // Outer Rotating Segmented Telemetry Ring
-                    rotate(rotation, pivot = center) {
-                        for (i in 0 until 16) {
-                            val angleRad = (i * 22.5f) * (PI / 180f)
-                            val startX = center.x + cos(angleRad).toFloat() * (radius * 0.78f)
-                            val startY = center.y + sin(angleRad).toFloat() * (radius * 0.78f)
-                            val endX = center.x + cos(angleRad).toFloat() * (radius * 0.94f)
-                            val endY = center.y + sin(angleRad).toFloat() * (radius * 0.94f)
-                            drawLine(
-                                color = if (i % 2 == 0) StarkCyan.copy(alpha = 0.85f) else EmeraldTertiary.copy(alpha = 0.65f),
-                                start = Offset(startX, startY),
-                                end = Offset(endX, endY),
-                                strokeWidth = 3.2f
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Switch to Live HUD Button
+                    Surface(
+                        color = QuantumElevatedCard,
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.4f)),
+                        modifier = Modifier.clickable { onSwitchToLiveHud() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Radar,
+                                contentDescription = "Live HUD",
+                                tint = QuantumCyan,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "HUD",
+                                fontSize = 10.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = QuantumCyan
                             )
                         }
-                        drawCircle(
-                            color = StarkCyan.copy(alpha = 0.55f),
-                            radius = radius * 0.73f,
-                            center = center,
-                            style = Stroke(width = 2f)
-                        )
                     }
 
-                    // Counter-Rotating Neural Ring
-                    rotate(-rotation * 1.4f, pivot = center) {
-                        drawCircle(
-                            color = VioletSecondary.copy(alpha = 0.75f),
-                            radius = radius * 0.55f,
-                            center = center,
-                            style = Stroke(width = 2.5f)
+                    // System Settings Hub Gear Button
+                    IconButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(QuantumElevatedCard, CircleShape)
+                            .border(1.dp, QuantumBorder, CircleShape)
+                            .testTag("btn_quick_settings_gear")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Quick Settings & Vault",
+                            tint = QuantumCyan,
+                            modifier = Modifier.size(19.dp)
                         )
                     }
-
-                    // Inner Glowing Reactor Core
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                Color.White,
-                                StarkCyan,
-                                Color(0xFF0284C7)
-                            ),
-                            center = center,
-                            radius = radius * 0.41f
-                        ),
-                        radius = radius * 0.41f,
-                        center = center
-                    )
                 }
+            }
+        }
 
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+        // -----------------------------------------------------------------
+        // 2. SCROLLABLE CENTER WORKSPACE: QUANTUM PLASMA ORB + BENTO ACTION DECK
+        // -----------------------------------------------------------------
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Accessibility & Screen Vision Quick Status Banner
+            Surface(
+                color = if (isAccessibilityConnected) QuantumMint.copy(alpha = 0.1f) else QuantumAmber.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(
+                    1.dp,
+                    if (isAccessibilityConnected) QuantumMint.copy(alpha = 0.4f) else QuantumAmber.copy(alpha = 0.45f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (!isAccessibilityConnected) {
+                            try {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                )
+                            } catch (_: Exception) {}
+                        } else {
+                            onOpenAdvancedSettingsHub()
+                        }
+                    }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Start Jarvis",
-                        tint = Color(0xFF030712),
-                        modifier = Modifier.size(34.dp)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.SettingsAccessibility,
+                            contentDescription = null,
+                            tint = if (isAccessibilityConnected) QuantumMint else QuantumAmber,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isAccessibilityConnected) {
+                                "SCREEN ICON VISION & WHATSAPP AUTO-CLICK ACTIVE"
+                            } else {
+                                "ENABLE ACCESSIBILITY FOR FULL SCREEN ICON & WHATSAPP CONTROL"
+                            },
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isAccessibilityConnected) QuantumMint else QuantumAmber,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     Text(
-                        text = "ACTIVATE",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF030712),
-                        letterSpacing = 2.sp
+                        text = if (isAccessibilityConnected) "ONLINE" else "ENABLE →",
+                        fontSize = 10.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            // Centerpiece: Interactive Multi-Harmonic Quantum Plasma Core
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable { onStartJarvis() }
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(192.dp)
+                        .testTag("btn_start_jarvis")
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val radius = size.minDimension / 2f
+                        val center = Offset(size.width / 2f, size.height / 2f)
 
-            Text(
-                text = "TAP TO START NEURAL CORE",
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Black,
-                color = TextPrimary,
-                letterSpacing = 1.6.sp
-            )
+                        // Deep Bioluminescent Aura
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(
+                                    QuantumCyan.copy(alpha = 0.34f * pulseGlow),
+                                    QuantumMint.copy(alpha = 0.16f * pulseGlow),
+                                    QuantumViolet.copy(alpha = 0.08f * pulseGlow),
+                                    Color.Transparent
+                                ),
+                                center = center,
+                                radius = radius
+                            ),
+                            radius = radius,
+                            center = center
+                        )
 
-            Text(
-                text = "GEMINI-4-ARGON AGI • URDU + ENGLISH + MIXED ACCENT • OS CONTROLLER",
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                color = StarkCyan,
-                letterSpacing = 0.8.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 3.dp)
-            )
-        }
+                        // Outer Precision Telemetry Ticks
+                        rotate(rotation, pivot = center) {
+                            for (i in 0 until 24) {
+                                val angleRad = (i * 15f) * (PI / 180f)
+                                val isMajor = i % 3 == 0
+                                val innerR = if (isMajor) radius * 0.80f else radius * 0.85f
+                                val outerR = radius * 0.94f
+                                val startX = center.x + cos(angleRad).toFloat() * innerR
+                                val startY = center.y + sin(angleRad).toFloat() * innerR
+                                val endX = center.x + cos(angleRad).toFloat() * outerR
+                                val endY = center.y + sin(angleRad).toFloat() * outerR
+                                drawLine(
+                                    color = if (isMajor) QuantumCyan else QuantumMint.copy(alpha = 0.55f),
+                                    start = Offset(startX, startY),
+                                    end = Offset(endX, endY),
+                                    strokeWidth = if (isMajor) 3f else 1.5f,
+                                    cap = StrokeCap.Round
+                                )
+                            }
+                        }
 
-        // 3. Bottom Control Deck: Super-AGI Prompt Bar + Trilingual Accent Training Card + Voice Profile + Voice Lock
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Live Super-AGI Response Card (when user asks a question or runs a command from Stage B)
+                        // Harmonic Sine-Wave Plasma Ring
+                        val wavePath = Path()
+                        val steps = 72
+                        val baseWaveR = radius * 0.66f
+                        for (s in 0..steps) {
+                            val theta = (s.toFloat() / steps) * (2f * PI.toFloat())
+                            val harmonicOffset = sin(theta * 6f + wavePhase) * (radius * 0.045f * pulseGlow)
+                            val r = baseWaveR + harmonicOffset
+                            val px = center.x + cos(theta) * r
+                            val py = center.y + sin(theta) * r
+                            if (s == 0) wavePath.moveTo(px, py) else wavePath.lineTo(px, py)
+                        }
+                        wavePath.close()
+                        drawPath(
+                            path = wavePath,
+                            color = QuantumMint.copy(alpha = 0.78f),
+                            style = Stroke(width = 2.2f)
+                        )
+
+                        // Counter-Rotating Orbital Ring
+                        rotate(-rotation * 1.5f, pivot = center) {
+                            drawCircle(
+                                color = QuantumViolet.copy(alpha = 0.65f),
+                                radius = radius * 0.54f,
+                                center = center,
+                                style = Stroke(width = 2f)
+                            )
+                        }
+
+                        // Inner Quantum Core Sphere
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(
+                                    Color.White,
+                                    QuantumCyan,
+                                    Color(0xFF0077B6),
+                                    QuantumObsidian
+                                ),
+                                center = center,
+                                radius = radius * 0.42f
+                            ),
+                            radius = radius * 0.40f,
+                            center = center
+                        )
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Activate Neural Core",
+                            tint = QuantumVoid,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Text(
+                            text = "LAUNCH AGI",
+                            fontSize = 11.sp,
+                            fontFamily = SpaceGroteskFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumVoid,
+                            letterSpacing = 1.4.sp
+                        )
+                    }
+                }
+
+                Text(
+                    text = "TAP ORB FOR HANDS-FREE LIVE SESSION",
+                    fontSize = 14.sp,
+                    fontFamily = SpaceGroteskFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    letterSpacing = 1.2.sp
+                )
+                Text(
+                    text = "WhatsApp Call • Auto Message Delete • Screen Icon Vision • Video Play",
+                    fontSize = 11.sp,
+                    color = QuantumCyan,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+
+            // -----------------------------------------------------------------
+            // 3. BENTO QUICK-COMMAND MATRIX (2x2 TACTILE GRID)
+            // -----------------------------------------------------------------
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "INSTANT AUTONOMOUS ACTIONS",
+                        fontSize = 10.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = TextSecondary,
+                        letterSpacing = 1.2.sp
+                    )
+                    Text(
+                        text = "1-TAP EXECUTE",
+                        fontSize = 10.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = QuantumMint,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    QuantumBentoActionTile(
+                        title = "WhatsApp Call",
+                        subtitle = "Voice / Video Call",
+                        badge = "VOIP",
+                        icon = Icons.Default.Call,
+                        accentColor = QuantumMint,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            stageBPromptInput = "WhatsApp par voice call karo "
+                        }
+                    )
+                    QuantumBentoActionTile(
+                        title = "Delete Msg",
+                        subtitle = "Delete for Everyone",
+                        badge = "AUTO",
+                        icon = Icons.Default.DeleteSweep,
+                        accentColor = QuantumCrimson,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            onSendPrompt("WhatsApp par last message delete karo")
+                        }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    QuantumBentoActionTile(
+                        title = "Screen Icon AI",
+                        subtitle = "Click Any Icon/UI",
+                        badge = "VISION",
+                        icon = Icons.Default.TouchApp,
+                        accentColor = QuantumCyan,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            onSendPrompt("Click Search icon")
+                        }
+                    )
+                    QuantumBentoActionTile(
+                        title = "Play Video",
+                        subtitle = "YouTube Instant Play",
+                        badge = "MEDIA",
+                        icon = Icons.Default.PlayCircle,
+                        accentColor = QuantumAmber,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            onSendPrompt("Play trending video on YouTube")
+                        }
+                    )
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // 4. LIVE CONVERSATIONAL AGI STREAM CARD
+            // -----------------------------------------------------------------
             if (userTranscript.isNotBlank() || aiTranscript.isNotBlank()) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 8.dp)
                         .testTag("stage_b_agi_response_card"),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg.copy(alpha = 0.95f)),
-                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f)),
-                    shape = RoundedCornerShape(14.dp)
+                    colors = CardDefaults.cardColors(containerColor = QuantumGlassCard),
+                    border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(18.dp)
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = QuantumCyan,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "NEURAL DIALOGUE STREAM",
+                                    fontSize = 10.sp,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = QuantumCyan
+                                )
+                            }
+                            if (aiTranscript.isNotBlank()) {
+                                Surface(
+                                    color = QuantumCyan.copy(alpha = 0.15f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.clickable { onTestAccent(aiTranscript) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                            contentDescription = "Speak Reply",
+                                            tint = QuantumCyan,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "REPLAY",
+                                            fontSize = 9.sp,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            color = QuantumCyan
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         if (userTranscript.isNotBlank()) {
                             Text(
-                                text = "You: $userTranscript",
-                                fontSize = 11.sp,
-                                color = TextSecondary,
-                                maxLines = 1,
+                                text = "YOU // $userTranscript",
+                                style = TextStyle(
+                                    fontFamily = fontFamilyForBilingualText(userTranscript),
+                                    textDirection = textDirectionForBilingualText(userTranscript),
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                ),
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                         if (aiTranscript.isNotBlank()) {
                             Text(
-                                text = "Jarvis AGI: $aiTranscript",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = StarkCyan,
-                                maxLines = 4,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 3.dp)
+                                text = aiTranscript,
+                                style = TextStyle(
+                                    fontFamily = fontFamilyForBilingualText(aiTranscript),
+                                    textDirection = textDirectionForBilingualText(aiTranscript),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                ),
+                                maxLines = 5,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
             }
 
-            // Direct Gemini-4-Argon / ChatGPT Super-AGI Input Bar on Stage B
+            // -----------------------------------------------------------------
+            // 5. NEURAL VOICE PERSONA SELECTION
+            // -----------------------------------------------------------------
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 8.dp),
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "VOICE",
+                    fontSize = 10.sp,
+                    fontFamily = JetBrainsMonoFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = QuantumMint,
+                    letterSpacing = 1.4.sp
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("voice_selector_chips")
+                ) {
+                    items(GeminiLiveVoice.entries) { voice ->
+                        val isSelected = voice == selectedVoice
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { onSelectVoice(voice) },
+                            label = {
+                                Text(
+                                    text = voice.voiceName,
+                                    fontSize = 10.sp,
+                                    fontFamily = SpaceGroteskFontFamily,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = QuantumCyan,
+                                selectedLabelColor = QuantumVoid,
+                                containerColor = QuantumGlassCard,
+                                labelColor = TextPrimary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = isSelected,
+                                borderColor = if (isSelected) QuantumCyan else QuantumBorder
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // 6. BOTTOM FLOATING GLASSMORPHIC COMMAND DOCK
+        // -----------------------------------------------------------------
+        Surface(
+            color = QuantumGlassCard,
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.4f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                IconButton(
+                    onClick = onTriggerVoiceListen,
+                    modifier = Modifier
+                        .size(46.dp)
+                        .background(QuantumMint.copy(alpha = 0.16f), CircleShape)
+                        .border(1.dp, QuantumMint.copy(alpha = 0.6f), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Mic,
+                        contentDescription = "Speak Command",
+                        tint = QuantumMint,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
                 OutlinedTextField(
                     value = stageBPromptInput,
                     onValueChange = { stageBPromptInput = it },
                     placeholder = {
                         Text(
-                            text = "Ask Gemini-4-Argon AGI or command phone...",
-                            fontSize = 11.sp,
+                            text = "Ask AGI or command WhatsApp, Calls, Video...",
+                            fontSize = 12.sp,
                             color = TextSecondary
                         )
                     },
@@ -1010,16 +1350,17 @@ private fun JarvisStageBMinimalLaunchScreen(
                         .weight(1f)
                         .testTag("stage_b_agi_input"),
                     singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = StarkCyan,
-                        unfocusedBorderColor = DarkSurfaceBorder,
+                        focusedBorderColor = QuantumCyan,
+                        unfocusedBorderColor = Color.Transparent,
                         focusedTextColor = TextPrimary,
                         unfocusedTextColor = TextPrimary,
-                        focusedContainerColor = StarkCardBg,
-                        unfocusedContainerColor = StarkCardBg
+                        focusedContainerColor = QuantumVoid,
+                        unfocusedContainerColor = QuantumVoid
                     )
                 )
+
                 Button(
                     onClick = {
                         val q = stageBPromptInput.trim()
@@ -1029,166 +1370,18 @@ private fun JarvisStageBMinimalLaunchScreen(
                         }
                     },
                     modifier = Modifier
-                        .height(50.dp)
+                        .height(46.dp)
                         .testTag("stage_b_agi_send_btn"),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = StarkCyan)
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = QuantumCyan),
+                    contentPadding = PaddingValues(horizontal = 16.dp)
                 ) {
                     Text(
                         text = "ASK",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF030712)
-                    )
-                }
-            }
-
-            // Trilingual Native Accent Training & Silent Backend Intelligence Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .testTag("silent_backend_intelligence_card"),
-                colors = CardDefaults.cardColors(containerColor = StarkCardBg.copy(alpha = 0.94f)),
-                border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.GraphicEq,
-                                contentDescription = null,
-                                tint = EmeraldTertiary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Accent Engine: ${activeAccentMode.title}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = EmeraldTertiary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Surface(
-                            color = StarkCyan.copy(alpha = 0.16f),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f)),
-                            modifier = Modifier
-                                .clickable {
-                                    val testPhrase = when (activeAccentMode) {
-                                        AccentTrainingMode.URDU_COMPLETE_ACCENT ->
-                                            "السلام علیکم باس، میں جاروس ہوں اور آپ کی اردو آواز بالکل خالص لہجے میں تیار ہے۔"
-                                        AccentTrainingMode.ENGLISH_COMPLETE_ACCENT ->
-                                            "Hello Boss, Jarvis Gemini Four Argon neural engine is online with complete English accent."
-                                        AccentTrainingMode.MIXED_URDU_COMPLETE_ACCENT,
-                                        AccentTrainingMode.AUTO_TRILINGUAL ->
-                                            "Assalam o Alaikum Boss, main Jarvis hoon aur aap ka har command super speed ke sath execute karne ke liye tayyar hoon."
-                                    }
-                                    onTestAccent(testPhrase)
-                                }
-                                .testTag("btn_test_accent")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                                    contentDescription = "Test Accent",
-                                    tint = StarkCyan,
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "Test Accent",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = StarkCyan
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("accent_mode_selector_row")
-                    ) {
-                        items(AccentTrainingMode.entries) { mode ->
-                            val isSelected = mode == activeAccentMode
-                            Surface(
-                                color = if (isSelected) EmeraldTertiary else Color(0xFF060B14),
-                                shape = RoundedCornerShape(8.dp),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isSelected) EmeraldTertiary else DarkSurfaceBorder
-                                ),
-                                modifier = Modifier.clickable {
-                                    TextToSpeechManager.setAccentTrainingMode(mode)
-                                }
-                            ) {
-                                Text(
-                                    text = mode.title,
-                                    fontSize = 10.sp,
-                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
-                                    color = if (isSelected) Color(0xFF030712) else TextPrimary,
-                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    Text(
-                        text = "Standing Rules, Routines & Long-Term Memory running silently in backend",
-                        fontSize = 9.sp,
-                        color = TextSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 5.dp)
-                    )
-                }
-            }
-
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.testTag("voice_selector_chips")
-            ) {
-                items(GeminiLiveVoice.entries) { voice ->
-                    val isSelected = voice == selectedVoice
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { onSelectVoice(voice) },
-                        label = {
-                            Text(
-                                text = voice.voiceName,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                            )
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = StarkCyan,
-                            selectedLabelColor = Color(0xFF040A18),
-                            containerColor = StarkCardBg,
-                            labelColor = TextPrimary
-                        ),
-                        border = FilterChipDefaults.filterChipBorder(
-                            enabled = true,
-                            selected = isSelected,
-                            borderColor = if (isSelected) StarkCyan else DarkSurfaceBorder
-                        )
+                        fontSize = 12.sp,
+                        fontFamily = SpaceGroteskFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = QuantumVoid
                     )
                 }
             }
@@ -1196,8 +1389,85 @@ private fun JarvisStageBMinimalLaunchScreen(
     }
 }
 
+@Composable
+private fun QuantumBentoActionTile(
+    title: String,
+    subtitle: String,
+    badge: String,
+    icon: ImageVector,
+    accentColor: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = QuantumGlassCard,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f)),
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable { onClick() }
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    color = accentColor.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = title,
+                            tint = accentColor,
+                            modifier = Modifier.size(17.dp)
+                        )
+                    }
+                }
+                Surface(
+                    color = accentColor.copy(alpha = 0.14f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = badge,
+                        fontSize = 9.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = accentColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            Column {
+                Text(
+                    text = title,
+                    fontSize = 13.sp,
+                    fontFamily = SpaceGroteskFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 10.sp,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
 // =========================================================================
-// STAGE C: REVAMPED LIVE FLOATING ORB HUD (CLEAN WORKSPACE)
+// STAGE C: REVAMPED LIVE FLOATING ORB HUD & RADAR WORKSPACE
 // =========================================================================
 @Composable
 private fun JarvisStageCCornerOrbView(
@@ -1214,7 +1484,9 @@ private fun JarvisStageCCornerOrbView(
     onTriggerVoiceListen: () -> Unit = {},
     onExpandHud: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenAdvancedSettingsHub: () -> Unit = {},
     onEnterPip: () -> Boolean,
+    onReturnToHub: () -> Unit = {},
     onStop: () -> Unit
 ) {
     val vault by vaultManager.vaultState.collectAsState()
@@ -1271,20 +1543,21 @@ private fun JarvisStageCCornerOrbView(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(8000, easing = LinearEasing),
+            animation = tween(7000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "orb_spin"
     )
 
     val activeRms = if (liveState == LiveConnectionState.LIVE_AI_SPEAKING) outputRms else inputRms
-    val audioGlowFactor = (activeRms / 60f).coerceIn(0.1f, 1.4f)
+    val audioGlowFactor = (activeRms / 60f).coerceIn(0.15f, 1.4f)
 
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
+            .imePadding()
             .testTag("stage_c_corner_orb_container")
     ) {
         val screenWidthPx = constraints.maxWidth.toFloat()
@@ -1294,7 +1567,7 @@ private fun JarvisStageCCornerOrbView(
 
         LaunchedEffect(screenWidthPx, screenHeightPx) {
             if (!isDockInitialized && screenWidthPx > 0) {
-                val marginY = with(density) { 140.dp.toPx() }
+                val marginY = with(density) { 160.dp.toPx() }
                 offsetX = (maxOffsetX - edgeMarginPx).coerceAtLeast(10f)
                 offsetY = (screenHeightPx - orbSizePx - marginY).coerceAtLeast(40f)
                 draggableOrbState.offsetX = offsetX
@@ -1305,57 +1578,85 @@ private fun JarvisStageCCornerOrbView(
         }
 
         var hudTouchX by remember { mutableFloatStateOf(540f) }
-        var hudTouchY by remember { mutableFloatStateOf(1200f) }
+        var hudTouchY by remember { mutableFloatStateOf(640f) }
 
-        // 1. Live Neural Viewport (Clean, Clutter-Free Observation Canvas)
+        // -----------------------------------------------------------------
+        // 1. LIVE NEURAL VIEWPORT & SPATIAL RADAR CANVAS
+        // -----------------------------------------------------------------
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = 12.dp, start = 16.dp, end = 16.dp, bottom = 124.dp)
+                .padding(top = 10.dp, start = 16.dp, end = 16.dp, bottom = 148.dp)
         ) {
+            // Top Telemetry Status Bar
             Surface(
-                color = StarkCardBg,
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(46.dp)
+                color = QuantumGlassCard,
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 14.dp),
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(shape = CircleShape, color = EmeraldTertiary, modifier = Modifier.size(8.dp)) {}
-                        Spacer(modifier = Modifier.width(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = QuantumMint,
+                            modifier = Modifier.size(9.dp)
+                        ) {}
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "LIVE NEURAL HUD // ${actionState.label.uppercase()}",
+                                fontSize = 10.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = QuantumMint
+                            )
+                            Text(
+                                text = actionDetail,
+                                fontSize = 12.sp,
+                                fontFamily = SpaceGroteskFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    Surface(
+                        color = QuantumElevatedCard,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, QuantumBorder),
+                        modifier = Modifier.clickable { onReturnToHub() }
+                    ) {
                         Text(
-                            text = "NEURAL STREAM: $actionDetail",
-                            fontSize = 11.sp,
+                            text = "HUB VIEW",
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.Bold,
-                            color = TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            color = QuantumCyan,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         )
                     }
-                    Text(
-                        text = "LIVE",
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        color = EmeraldTertiary
-                    )
                 }
             }
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            // Interactive Spatial Radar & Screen-Graph Visualizer
             Surface(
-                color = Color(0xFF040812),
-                shape = RoundedCornerShape(18.dp),
-                border = BorderStroke(1.dp, DarkSurfaceBorder),
+                color = Color(0xFF060A14),
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, QuantumBorder),
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -1370,90 +1671,159 @@ private fun JarvisStageCCornerOrbView(
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val w = size.width
                         val h = size.height
-                        val grid = 44.dp.toPx()
+                        val center = Offset(w / 2f, h / 2f)
+                        val maxR = size.minDimension * 0.36f
+
+                        // Subtle Tactical Grid
+                        val grid = 42.dp.toPx()
                         var cx = 0f
                         while (cx < w) {
-                            drawLine(color = Color(0xFF091526), start = Offset(cx, 0f), end = Offset(cx, h), strokeWidth = 1f)
+                            drawLine(
+                                color = Color(0xFF0C1528),
+                                start = Offset(cx, 0f),
+                                end = Offset(cx, h),
+                                strokeWidth = 1f
+                            )
                             cx += grid
                         }
                         var cy = 0f
                         while (cy < h) {
-                            drawLine(color = Color(0xFF091526), start = Offset(0f, cy), end = Offset(w, cy), strokeWidth = 1f)
+                            drawLine(
+                                color = Color(0xFF0C1528),
+                                start = Offset(0f, cy),
+                                end = Offset(w, cy),
+                                strokeWidth = 1f
+                            )
                             cy += grid
                         }
+
+                        // Concentric Radar Rings
+                        for (ring in 1..3) {
+                            drawCircle(
+                                color = QuantumCyan.copy(alpha = 0.14f),
+                                radius = maxR * (ring / 3f),
+                                center = center,
+                                style = Stroke(width = 1.2f)
+                            )
+                        }
+
+                        // Rotating Radar Sweep Line
+                        rotate(spinAngle, pivot = center) {
+                            drawLine(
+                                brush = Brush.linearGradient(
+                                    colors = listOf(QuantumMint.copy(alpha = 0.8f), Color.Transparent),
+                                    start = center,
+                                    end = Offset(center.x + maxR, center.y)
+                                ),
+                                start = center,
+                                end = Offset(center.x + maxR, center.y),
+                                strokeWidth = 3f,
+                                cap = StrokeCap.Round
+                            )
+                        }
+
+                        // Touch Reticle
+                        val tx = hudTouchX.coerceIn(24f, w - 24f)
+                        val ty = hudTouchY.coerceIn(24f, h - 24f)
                         drawCircle(
-                            color = StarkCyan.copy(alpha = 0.7f),
-                            radius = 16f,
-                            center = Offset(hudTouchX.coerceIn(0f, w), hudTouchY.coerceIn(0f, h)),
+                            color = QuantumCyan.copy(alpha = 0.65f),
+                            radius = 18f,
+                            center = Offset(tx, ty),
                             style = Stroke(width = 2f)
                         )
                     }
+
+                    // Center HUD Status Readouts
                     Column(
                         modifier = Modifier
                             .align(Alignment.Center)
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Layers,
-                            contentDescription = null,
-                            tint = StarkCyan.copy(alpha = 0.55f),
-                            modifier = Modifier.size(42.dp)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            color = QuantumCyan.copy(alpha = 0.12f),
+                            shape = CircleShape,
+                            border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.4f)),
+                            modifier = Modifier.size(54.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Bolt,
+                                    contentDescription = null,
+                                    tint = QuantumCyan,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+                        }
+
                         Text(
-                            text = "JARVIS AUTONOMOUS OS CONTROLLER ACTIVE",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = StarkCyan,
+                            text = "AUTONOMOUS SCREEN & OS ENGINE",
+                            fontSize = 13.sp,
+                            fontFamily = SpaceGroteskFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
                             letterSpacing = 1.sp,
                             textAlign = TextAlign.Center
                         )
-                        Text(
-                            text = "Standing Rules, Routines & Memory running silently in backend",
-                            fontSize = 11.sp,
-                            color = TextSecondary,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
+
+                        // Capability Status Pills
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            HudCapabilityBadge("WA CALLS", QuantumMint)
+                            HudCapabilityBadge("MSG DELETE", QuantumCrimson)
+                            HudCapabilityBadge("ICON AI", QuantumCyan)
+                        }
                     }
                 }
             }
         }
 
-        // 2. Bottom Live Subtitle & Quick Control Bar
+        // -----------------------------------------------------------------
+        // 2. BOTTOM LIVE DIALOGUE & TACTICAL CONTROL DOCK
+        // -----------------------------------------------------------------
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.Bottom
         ) {
             if (userTranscript.isNotBlank() || aiTranscript.isNotBlank()) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 10.dp),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg.copy(alpha = 0.94f)),
-                    border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f)),
-                    shape = RoundedCornerShape(14.dp)
+                        .padding(bottom = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = QuantumGlassCard.copy(alpha = 0.96f)),
+                    border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.45f)),
+                    shape = RoundedCornerShape(16.dp)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         if (userTranscript.isNotBlank()) {
                             Text(
-                                text = "You: $userTranscript",
-                                fontSize = 12.sp,
-                                color = TextSecondary,
+                                text = "YOU // $userTranscript",
+                                style = TextStyle(
+                                    fontFamily = fontFamilyForBilingualText(userTranscript),
+                                    textDirection = textDirectionForBilingualText(userTranscript),
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                ),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                         if (aiTranscript.isNotBlank()) {
                             Text(
-                                text = "Jarvis AGI: $aiTranscript",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = StarkCyan,
-                                maxLines = 6,
+                                text = aiTranscript,
+                                style = TextStyle(
+                                    fontFamily = fontFamilyForBilingualText(aiTranscript),
+                                    textDirection = textDirectionForBilingualText(aiTranscript),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = QuantumCyan
+                                ),
+                                maxLines = 5,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.padding(top = 4.dp)
                             )
@@ -1462,14 +1832,14 @@ private fun JarvisStageCCornerOrbView(
                 }
             }
 
-            // Quick Super-AGI Action & Question Chips
+            // Quick Super-AGI Action Chips (Updated with WhatsApp Call, Delete Msg & Screen Icon Click)
             val quickPrompts = remember {
                 listOf(
+                    "WhatsApp par last message delete karo",
+                    "WhatsApp par voice call karo",
+                    "Click Search icon",
+                    "Play trending video on YouTube",
                     "Flashlight on karo",
-                    "Open WhatsApp",
-                    "Write Python Fibonacci code",
-                    "25 * 48 + 120 kitna hai?",
-                    "Biryani recipe batao",
                     "Battery status batao"
                 )
             }
@@ -1481,23 +1851,24 @@ private fun JarvisStageCCornerOrbView(
             ) {
                 items(quickPrompts) { chipText ->
                     Surface(
-                        color = StarkCardBg.copy(alpha = 0.9f),
-                        shape = RoundedCornerShape(16.dp),
-                        border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.35f)),
+                        color = QuantumGlassCard,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.35f)),
                         modifier = Modifier.clickable { onSendPrompt(chipText) }
                     ) {
                         Text(
                             text = chipText,
-                            fontSize = 10.sp,
+                            fontSize = 11.sp,
+                            fontFamily = PlusJakartaSansFontFamily,
                             fontWeight = FontWeight.SemiBold,
-                            color = StarkCyan,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            color = QuantumCyan,
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
                         )
                     }
                 }
             }
 
-            // Direct Gemini / ChatGPT Prompt Bar in Stage C Live View
+            // Prompt Input + Mic + Send Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1511,7 +1882,7 @@ private fun JarvisStageCCornerOrbView(
                     placeholder = {
                         Text(
                             text = "Speak or type any command / question...",
-                            fontSize = 11.sp,
+                            fontSize = 12.sp,
                             color = TextSecondary
                         )
                     },
@@ -1519,28 +1890,28 @@ private fun JarvisStageCCornerOrbView(
                         .weight(1f)
                         .testTag("stage_c_agi_input"),
                     singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = StarkCyan,
-                        unfocusedBorderColor = DarkSurfaceBorder,
+                        focusedBorderColor = QuantumCyan,
+                        unfocusedBorderColor = QuantumBorder,
                         focusedTextColor = TextPrimary,
                         unfocusedTextColor = TextPrimary,
-                        focusedContainerColor = StarkCardBg,
-                        unfocusedContainerColor = StarkCardBg
+                        focusedContainerColor = QuantumGlassCard,
+                        unfocusedContainerColor = QuantumGlassCard
                     )
                 )
                 IconButton(
                     onClick = onTriggerVoiceListen,
                     modifier = Modifier
                         .size(48.dp)
-                        .background(EmeraldTertiary.copy(alpha = 0.18f), RoundedCornerShape(12.dp))
-                        .border(1.dp, EmeraldTertiary, RoundedCornerShape(12.dp))
+                        .background(QuantumMint.copy(alpha = 0.16f), RoundedCornerShape(14.dp))
+                        .border(1.dp, QuantumMint, RoundedCornerShape(14.dp))
                         .testTag("stage_c_mic_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Mic,
                         contentDescription = "Voice Input",
-                        tint = EmeraldTertiary
+                        tint = QuantumMint
                     )
                 }
                 Button(
@@ -1554,34 +1925,43 @@ private fun JarvisStageCCornerOrbView(
                     modifier = Modifier
                         .height(48.dp)
                         .testTag("stage_c_agi_send_btn"),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = StarkCyan)
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = QuantumCyan)
                 ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Send",
+                        tint = QuantumVoid,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "SEND",
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF030712)
+                        fontFamily = SpaceGroteskFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = QuantumVoid
                     )
                 }
             }
 
+            // Bottom Tactical Action Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    color = StarkCardBg.copy(alpha = 0.9f),
+                    color = QuantumGlassCard,
                     shape = RoundedCornerShape(20.dp),
-                    border = BorderStroke(1.dp, DarkSurfaceBorder)
+                    border = BorderStroke(1.dp, QuantumBorder)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Surface(
-                            color = StarkCyan,
+                            color = QuantumMint,
                             shape = CircleShape,
                             modifier = Modifier.size(8.dp)
                         ) {}
@@ -1589,73 +1969,70 @@ private fun JarvisStageCCornerOrbView(
                         Text(
                             text = actionState.label,
                             fontSize = 11.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.Bold,
-                            color = StarkCyan
+                            color = QuantumCyan
                         )
                     }
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // PiP Button
                     IconButton(
                         onClick = { onEnterPip() },
                         modifier = Modifier
-                            .size(38.dp)
-                            .background(StarkCardBg, CircleShape)
-                            .border(1.dp, DarkSurfaceBorder, CircleShape)
+                            .size(40.dp)
+                            .background(QuantumGlassCard, CircleShape)
+                            .border(1.dp, QuantumBorder, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.PictureInPicture,
                             contentDescription = "Picture in Picture",
-                            tint = StarkCyan,
+                            tint = QuantumCyan,
                             modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    // Settings Button
                     IconButton(
                         onClick = onOpenSettings,
                         modifier = Modifier
-                            .size(38.dp)
-                            .background(StarkCardBg, CircleShape)
-                            .border(1.dp, StarkCyan.copy(alpha = 0.5f), CircleShape)
+                            .size(40.dp)
+                            .background(QuantumGlassCard, CircleShape)
+                            .border(1.dp, QuantumCyan.copy(alpha = 0.5f), CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Tune,
                             contentDescription = "Orb Sensitivity & Vault Settings",
-                            tint = StarkCyan,
+                            tint = QuantumCyan,
                             modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    // Expand Neural Status Console
                     IconButton(
                         onClick = onExpandHud,
                         modifier = Modifier
-                            .size(38.dp)
-                            .background(StarkCardBg, CircleShape)
-                            .border(1.dp, DarkSurfaceBorder, CircleShape)
+                            .size(40.dp)
+                            .background(QuantumGlassCard, CircleShape)
+                            .border(1.dp, QuantumBorder, CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.OpenInFull,
                             contentDescription = "Expand Neural Console",
-                            tint = StarkCyan,
+                            tint = QuantumCyan,
                             modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    // Stop
                     IconButton(
                         onClick = onStop,
                         modifier = Modifier
-                            .size(38.dp)
-                            .background(StarkCardBg, CircleShape)
-                            .border(1.dp, StarkRed.copy(alpha = 0.5f), CircleShape)
+                            .size(40.dp)
+                            .background(QuantumCrimson.copy(alpha = 0.14f), CircleShape)
+                            .border(1.dp, QuantumCrimson.copy(alpha = 0.6f), CircleShape)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Stop Jarvis",
-                            tint = StarkRed,
+                            tint = QuantumCrimson,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -1663,7 +2040,9 @@ private fun JarvisStageCCornerOrbView(
             }
         }
 
-        // 3. Draggable 92.dp Glowing Arc-Reactor Orb with Magnetic Edge Snap
+        // -----------------------------------------------------------------
+        // 3. DRAGGABLE 92.DP QUANTUM PLASMA ORB WITH MAGNETIC EDGE SNAP
+        // -----------------------------------------------------------------
         Box(
             modifier = Modifier
                 .offset { IntOffset(animatedOffsetX.roundToInt(), animatedOffsetY.roundToInt()) }
@@ -1736,23 +2115,23 @@ private fun JarvisStageCCornerOrbView(
         ) {
             if (isDraggingState) {
                 Surface(
-                    color = StarkCardBg.copy(alpha = 0.95f),
+                    color = QuantumGlassCard.copy(alpha = 0.95f),
                     shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, if (snappedEdgeLabel != "NONE") EmeraldTertiary else StarkCyan),
+                    border = BorderStroke(1.dp, if (snappedEdgeLabel != "NONE") QuantumMint else QuantumCyan),
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .offset(y = (-28).dp)
                 ) {
                     val statusTag = if (snappedEdgeLabel != "NONE") {
-                        "MAGNETIC SNAP [$snappedEdgeLabel]"
+                        "SNAP [$snappedEdgeLabel]"
                     } else {
-                        "MOVING (${offsetX.roundToInt()}, ${offsetY.roundToInt()})"
+                        "POS (${offsetX.roundToInt()}, ${offsetY.roundToInt()})"
                     }
                     Text(
                         text = statusTag,
                         fontSize = 9.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = if (snappedEdgeLabel != "NONE") EmeraldTertiary else StarkCyan,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = if (snappedEdgeLabel != "NONE") QuantumMint else QuantumCyan,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
@@ -1766,33 +2145,35 @@ private fun JarvisStageCCornerOrbView(
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            StarkCyan.copy(alpha = (0.45f * audioGlowFactor).coerceIn(0.15f, 0.9f)),
+                            QuantumCyan.copy(alpha = (0.48f * audioGlowFactor).coerceIn(0.18f, 0.92f)),
+                            QuantumMint.copy(alpha = 0.16f),
                             Color.Transparent
                         ),
                         center = center,
-                        radius = radius * (1.1f + audioGlowFactor * 0.25f)
+                        radius = radius * (1.12f + audioGlowFactor * 0.25f)
                     ),
-                    radius = radius * (1.1f + audioGlowFactor * 0.25f),
+                    radius = radius * (1.12f + audioGlowFactor * 0.25f),
                     center = center
                 )
 
                 rotate(spinAngle, pivot = center) {
-                    for (i in 0 until 8) {
-                        val angle = (i * 45f) * (PI / 180f)
+                    for (i in 0 until 12) {
+                        val angle = (i * 30f) * (PI / 180f)
                         val startX = center.x + cos(angle).toFloat() * (radius * 0.72f)
                         val startY = center.y + sin(angle).toFloat() * (radius * 0.72f)
-                        val endX = center.x + cos(angle).toFloat() * (radius * 0.95f)
-                        val endY = center.y + sin(angle).toFloat() * (radius * 0.95f)
+                        val endX = center.x + cos(angle).toFloat() * (radius * 0.94f)
+                        val endY = center.y + sin(angle).toFloat() * (radius * 0.94f)
                         drawLine(
-                            color = StarkCyan,
+                            color = if (i % 2 == 0) QuantumCyan else QuantumMint,
                             start = Offset(startX, startY),
                             end = Offset(endX, endY),
-                            strokeWidth = 2.5f
+                            strokeWidth = 2.5f,
+                            cap = StrokeCap.Round
                         )
                     }
                     drawCircle(
-                        color = StarkCyan.copy(alpha = 0.75f),
-                        radius = radius * 0.70f,
+                        color = QuantumCyan.copy(alpha = 0.8f),
+                        radius = radius * 0.68f,
                         center = center,
                         style = Stroke(width = 2f)
                     )
@@ -1802,13 +2183,13 @@ private fun JarvisStageCCornerOrbView(
                     brush = Brush.radialGradient(
                         colors = listOf(
                             Color.White,
-                            StarkCyan,
-                            Color(0xFF0C4A6E)
+                            QuantumCyan,
+                            Color(0xFF073B5A)
                         ),
                         center = center,
-                        radius = radius * 0.44f
+                        radius = radius * 0.45f
                     ),
-                    radius = radius * 0.44f,
+                    radius = radius * 0.45f,
                     center = center
                 )
             }
@@ -1822,15 +2203,33 @@ private fun JarvisStageCCornerOrbView(
                     else -> Icons.Default.GraphicEq
                 },
                 contentDescription = actionState.label,
-                tint = Color(0xFF030712),
+                tint = QuantumVoid,
                 modifier = Modifier.size(20.dp)
             )
         }
     }
 }
 
+@Composable
+private fun HudCapabilityBadge(label: String, color: Color) {
+    Surface(
+        color = color.copy(alpha = 0.14f),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.45f))
+    ) {
+        Text(
+            text = label,
+            fontSize = 9.sp,
+            fontFamily = JetBrainsMonoFontFamily,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+        )
+    }
+}
+
 // =========================================================================
-// QUICK SETTINGS & VAULT MODAL (TINY GEAR ICON)
+// QUICK SETTINGS & VAULT MODAL
 // =========================================================================
 @Composable
 private fun JarvisSettingsAndVaultModal(
@@ -1851,38 +2250,48 @@ private fun JarvisSettingsAndVaultModal(
             modifier = Modifier
                 .fillMaxWidth(0.92f)
                 .padding(16.dp),
-            colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-            border = BorderStroke(1.dp, StarkCyan.copy(alpha = 0.45f)),
-            shape = RoundedCornerShape(18.dp)
+            colors = CardDefaults.cardColors(containerColor = QuantumGlassCard),
+            border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(22.dp)
         ) {
-            Column(modifier = Modifier.padding(18.dp)) {
+            Column(modifier = Modifier.padding(20.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "JARVIS VAULT & ORB CONTROLS",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = StarkCyan,
-                        letterSpacing = 1.sp
-                    )
+                    Column {
+                        Text(
+                            text = "AETHER-X // QUICK VAULT",
+                            fontSize = 10.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumMint
+                        )
+                        Text(
+                            text = "Vault & Orb Calibration",
+                            fontSize = 17.sp,
+                            fontFamily = SpaceGroteskFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 OutlinedTextField(
                     value = pinEdit,
                     onValueChange = { pinEdit = it },
                     label = { Text("Device Master PIN") },
                     modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = StarkCyan,
-                        unfocusedBorderColor = DarkSurfaceBorder,
+                        focusedBorderColor = QuantumCyan,
+                        unfocusedBorderColor = QuantumBorder,
                         focusedTextColor = TextPrimary,
                         unfocusedTextColor = TextPrimary
                     ),
@@ -1896,9 +2305,10 @@ private fun JarvisSettingsAndVaultModal(
                     onValueChange = { voiceEdit = it },
                     label = { Text("Voice Unlock Phrase") },
                     modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = StarkCyan,
-                        unfocusedBorderColor = DarkSurfaceBorder,
+                        focusedBorderColor = QuantumCyan,
+                        unfocusedBorderColor = QuantumBorder,
                         focusedTextColor = TextPrimary,
                         unfocusedTextColor = TextPrimary
                     ),
@@ -1906,7 +2316,7 @@ private fun JarvisSettingsAndVaultModal(
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
-                HorizontalDivider(color = DarkSurfaceBorder, thickness = 1.dp)
+                HorizontalDivider(color = QuantumBorder, thickness = 1.dp)
                 Spacer(modifier = Modifier.height(12.dp))
 
                 Row(
@@ -1915,20 +2325,20 @@ private fun JarvisSettingsAndVaultModal(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Tune, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.Tune, contentDescription = null, tint = QuantumCyan, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "ORB DRAG SENSITIVITY",
                             fontSize = 11.sp,
+                            fontFamily = SpaceGroteskFontFamily,
                             fontWeight = FontWeight.Bold,
-                            color = StarkCyan,
-                            letterSpacing = 1.sp
+                            color = QuantumCyan
                         )
                     }
                     Text(
                         text = "${(orbSensitivityEdit * 100).roundToInt()}% (${vaultManager.calculateSlopThresholdDp(orbSensitivityEdit).roundToInt()}dp slop)",
                         fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = JetBrainsMonoFontFamily,
                         color = TextSecondary
                     )
                 }
@@ -1945,21 +2355,27 @@ private fun JarvisSettingsAndVaultModal(
                         "Ultra-Responsive" to 0.85f
                     )
                     presets.forEach { (label, value) ->
-                        val isSelected = kotlin.math.abs(orbSensitivityEdit - value) < 0.15f
+                        val isSelected = abs(orbSensitivityEdit - value) < 0.15f
                         FilterChip(
                             selected = isSelected,
                             onClick = { orbSensitivityEdit = value },
-                            label = { Text(label, fontSize = 10.sp, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal) },
+                            label = {
+                                Text(
+                                    text = label,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                            },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = StarkCyan.copy(alpha = 0.25f),
-                                selectedLabelColor = StarkCyan,
-                                containerColor = StarkDeepBlack,
+                                selectedContainerColor = QuantumCyan.copy(alpha = 0.25f),
+                                selectedLabelColor = QuantumCyan,
+                                containerColor = QuantumVoid,
                                 labelColor = TextSecondary
                             ),
                             border = FilterChipDefaults.filterChipBorder(
                                 enabled = true,
                                 selected = isSelected,
-                                borderColor = if (isSelected) StarkCyan else DarkSurfaceBorder
+                                borderColor = if (isSelected) QuantumCyan else QuantumBorder
                             ),
                             modifier = Modifier.weight(1f)
                         )
@@ -1971,27 +2387,16 @@ private fun JarvisSettingsAndVaultModal(
                     onValueChange = { orbSensitivityEdit = it },
                     valueRange = 0.10f..1.0f,
                     colors = SliderDefaults.colors(
-                        thumbColor = StarkCyan,
-                        activeTrackColor = StarkCyan,
-                        inactiveTrackColor = DarkSurfaceBorder
+                        thumbColor = QuantumCyan,
+                        activeTrackColor = QuantumCyan,
+                        inactiveTrackColor = QuantumBorder
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("slider_orb_drag_sensitivity")
                 )
 
-                Text(
-                    text = when {
-                        orbSensitivityEdit < 0.35f -> "Low sensitivity: Requires a firm, intentional drag before moving. Prevents accidental displacement during screen taps."
-                        orbSensitivityEdit <= 0.70f -> "Balanced: Optimal balance between tap responsiveness and smooth gliding movement."
-                        else -> "High sensitivity: Immediate drag detection. Moves with the slightest finger displacement."
-                    },
-                    fontSize = 10.sp,
-                    color = TextSecondary,
-                    lineHeight = 14.sp
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2000,10 +2405,16 @@ private fun JarvisSettingsAndVaultModal(
                     OutlinedButton(
                         onClick = onOpenAdvancedSettingsHub,
                         modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(1.dp, StarkCyan)
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, QuantumCyan)
                     ) {
-                        Text("SYSTEM HUB", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = StarkCyan)
+                        Text(
+                            text = "SYSTEM HUB",
+                            fontSize = 11.sp,
+                            fontFamily = SpaceGroteskFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumCyan
+                        )
                     }
 
                     Button(
@@ -2018,10 +2429,16 @@ private fun JarvisSettingsAndVaultModal(
                             onDismiss()
                         },
                         modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = StarkCyan),
-                        shape = RoundedCornerShape(10.dp)
+                        colors = ButtonDefaults.buttonColors(containerColor = QuantumCyan),
+                        shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("SAVE VAULT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF030712))
+                        Text(
+                            text = "SAVE VAULT",
+                            fontSize = 11.sp,
+                            fontFamily = SpaceGroteskFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumVoid
+                        )
                     }
                 }
             }
@@ -2030,7 +2447,7 @@ private fun JarvisSettingsAndVaultModal(
 }
 
 // =========================================================================
-// REVAMPED NEURAL STATUS CONSOLE (ZERO HISTORY / ROUTINES / MEMORY UI LISTS)
+// REVAMPED NEURAL STATUS CONSOLE MODAL
 // =========================================================================
 @Composable
 private fun JarvisExpandedHudDrawer(
@@ -2048,14 +2465,14 @@ private fun JarvisExpandedHudDrawer(
             modifier = Modifier
                 .fillMaxWidth(0.94f)
                 .padding(14.dp),
-            colors = CardDefaults.cardColors(containerColor = StarkDeepBlack),
-            border = BorderStroke(1.5.dp, StarkCyan.copy(alpha = 0.55f)),
-            shape = RoundedCornerShape(18.dp)
+            colors = CardDefaults.cardColors(containerColor = QuantumGlassCard),
+            border = BorderStroke(1.5.dp, QuantumCyan.copy(alpha = 0.55f)),
+            shape = RoundedCornerShape(22.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(18.dp)
+                    .padding(20.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -2063,13 +2480,14 @@ private fun JarvisExpandedHudDrawer(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Security, contentDescription = null, tint = StarkCyan, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.Security, contentDescription = null, tint = QuantumCyan, modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "JARVIS NEURAL CORE & BACKEND ENGINE",
+                            text = "AETHER-X // NEURAL TELEMETRY",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = StarkCyan,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumCyan,
                             letterSpacing = 1.sp
                         )
                     }
@@ -2080,24 +2498,23 @@ private fun JarvisExpandedHudDrawer(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Live Dialogue Stream Card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, DarkSurfaceBorder)
+                    colors = CardDefaults.cardColors(containerColor = QuantumVoid),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, QuantumBorder)
                 ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
+                    Column(modifier = Modifier.padding(14.dp)) {
                         Text(
-                            text = "You: ${userTranscript.ifBlank { "Listening for your voice..." }}",
+                            text = "YOU // ${userTranscript.ifBlank { "Listening for voice command..." }}",
                             fontSize = 12.sp,
                             color = TextSecondary
                         )
                         Text(
-                            text = "Jarvis: ${aiTranscript.ifBlank { "Ready for autonomous execution." }}",
+                            text = "JARVIS // ${aiTranscript.ifBlank { "Ready for autonomous execution." }}",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
-                            color = StarkCyan,
+                            color = QuantumCyan,
                             modifier = Modifier.padding(top = 6.dp)
                         )
                     }
@@ -2105,31 +2522,36 @@ private fun JarvisExpandedHudDrawer(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Silent Backend Systems Summary (No visible History, Routines, or Memory lists)
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = StarkCardBg),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, EmeraldTertiary.copy(alpha = 0.4f))
+                    colors = CardDefaults.cardColors(containerColor = QuantumVoid),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, QuantumMint.copy(alpha = 0.45f))
                 ) {
                     Column(
-                        modifier = Modifier.padding(12.dp),
+                        modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "SILENT BACKEND INTELLIGENCE (AUTO-MANAGED)",
+                            text = "AUTONOMOUS CAPABILITIES ONLINE",
                             fontSize = 10.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = EmeraldTertiary,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = QuantumMint,
                             letterSpacing = 1.sp
                         )
                         Text(
-                            text = "• Super-AGI Model: ${SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS.first().uppercase()}",
+                            text = "• Model: ${SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS.first().uppercase()}",
                             fontSize = 11.sp,
                             color = TextPrimary
                         )
                         Text(
-                            text = "• Standing Rules, Routines, Memory & Command Processing: Running 100% silently in backend",
+                            text = "• WhatsApp Voice/Video Call + Auto Message Delete ('Delete for everyone')",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                        Text(
+                            text = "• Full Screen Icon & UI Node Semantic Awareness Across Windows",
                             fontSize = 11.sp,
                             color = TextSecondary
                         )

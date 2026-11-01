@@ -798,20 +798,105 @@ object SmartContactAndAppRegistry {
         query: String,
         bridge: AndroidBridge? = null
     ): DirectSearchResult {
-        val uri = buildDirectSearchUri(app, query)
+        val cleanQuery = query.trim().ifBlank { "trending videos" }
+        val uri = buildDirectSearchUri(app, cleanQuery)
         val pkg = resolveAndroidPackage(app)
         val launched = launchUniversalDeepLink(context, uri, pkg)
         var injected = false
         if (bridge != null) {
-            injected = bridge.injectTextAndSubmitSearch(query)
+            injected = bridge.injectTextAndSubmitSearch(cleanQuery)
+        }
+        if (app.contains("youtube", ignoreCase = true) || app.contains("tiktok", ignoreCase = true)) {
+            com.example.service.OmniAccessibilityService.armAutoPlayFirstVideo(cleanQuery)
         }
         return DirectSearchResult(
             app = app,
-            query = query,
+            query = cleanQuery,
             uri = uri,
             launched = launched,
             injectedText = injected,
-            message = "Executed direct query-embedded search for \"$query\" in $app via $uri"
+            message = "Executed direct query-embedded search for \"$cleanQuery\" in $app via $uri"
+        )
+    }
+
+    /**
+     * Plays any requested video on YouTube/TikTok/Web or clicks a playable video already visible on screen.
+     */
+    fun executePlayAnyVideo(
+        context: Context,
+        rawQuery: String,
+        targetApp: String = "youtube"
+    ): DirectSearchResult {
+        val trimmed = rawQuery.trim()
+        val qLower = trimmed.lowercase()
+
+        // Direct video URL support
+        if (qLower.startsWith("http://") || qLower.startsWith("https://") || qLower.startsWith("vnd.youtube:")) {
+            val pkg = resolveAndroidPackage(targetApp.ifBlank { "youtube" })
+            val launched = launchUniversalDeepLink(context, trimmed, pkg)
+            return DirectSearchResult(
+                app = targetApp.ifBlank { "youtube" },
+                query = trimmed,
+                uri = trimmed,
+                launched = launched,
+                injectedText = false,
+                message = "Playing video URL directly."
+            )
+        }
+
+        val fgPkg = com.example.service.OmniAccessibilityService.getForegroundPackageName()?.lowercase().orEmpty()
+        val isAlreadyInVideoApp = fgPkg.contains("youtube") || fgPkg.contains("musically") ||
+            fgPkg.contains("trill") || fgPkg.contains("instagram") || fgPkg.contains("facebook") || fgPkg.contains("chrome")
+
+        val isOnScreenSelection = trimmed.isEmpty() ||
+            qLower == "video" ||
+            qLower == "any video" ||
+            qLower == "any" ||
+            qLower == "koi bhi video" ||
+            qLower == "koi bhi" ||
+            qLower.contains("pehle wali") ||
+            qLower.contains("pehli video") ||
+            qLower.contains("first video") ||
+            qLower.contains("second video") ||
+            qLower.contains("doosri video") ||
+            qLower.contains("ye wali") ||
+            qLower.contains("this video")
+
+        if (isAlreadyInVideoApp && isOnScreenSelection) {
+            val clicked = com.example.service.OmniAccessibilityService.clickPlayableVideoOnScreen(trimmed)
+            if (clicked) {
+                return DirectSearchResult(
+                    app = targetApp,
+                    query = trimmed.ifBlank { "first video" },
+                    uri = "accessibility://click_video",
+                    launched = true,
+                    injectedText = false,
+                    message = "Playing video on screen."
+                )
+            }
+        }
+
+        val effectiveQuery = if (isOnScreenSelection) "trending viral videos" else trimmed
+        val appToUse = when {
+            qLower.contains("tiktok") -> "tiktok"
+            qLower.contains("instagram") || qLower.contains("reel") -> "instagram"
+            qLower.contains("facebook") -> "facebook"
+            else -> targetApp.ifBlank { "youtube" }
+        }
+        val uri = buildDirectSearchUri(appToUse, effectiveQuery)
+        val pkg = resolveAndroidPackage(appToUse)
+
+        // Arm automatic video card clicker so as soon as YouTube/TikTok search results appear, the first video plays!
+        com.example.service.OmniAccessibilityService.armAutoPlayFirstVideo(effectiveQuery)
+
+        val launched = launchUniversalDeepLink(context, uri, pkg)
+        return DirectSearchResult(
+            app = appToUse,
+            query = effectiveQuery,
+            uri = uri,
+            launched = launched,
+            injectedText = true,
+            message = "Playing \"$effectiveQuery\" on $appToUse."
         )
     }
 

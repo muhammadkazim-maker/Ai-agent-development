@@ -80,6 +80,30 @@ class ToolDispatcher(context: Context) {
                     UiTools.clickTextOnScreen(targetText = text, exact = exact)
                 }
 
+                "search_anything" -> {
+                    val query = rawArgs.optString(
+                        "query",
+                        rawArgs.optString("text", rawArgs.optString("search_query", rawArgs.optString("target", "")))
+                    )
+                    val app = rawArgs.optString(
+                        "app",
+                        rawArgs.optString("platform", rawArgs.optString("app_name", ""))
+                    )
+                    UiTools.searchAnything(context = appContext, query = query, app = app)
+                }
+
+                "play_video" -> {
+                    val query = rawArgs.optString(
+                        "query",
+                        rawArgs.optString("video", rawArgs.optString("title", rawArgs.optString("target", "")))
+                    )
+                    val app = rawArgs.optString(
+                        "app",
+                        rawArgs.optString("platform", "youtube")
+                    )
+                    UiTools.playVideo(context = appContext, query = query, app = app)
+                }
+
                 "whatsapp_send_message" -> {
                     val contact = rawArgs.optString(
                         "contact",
@@ -108,6 +132,29 @@ class ToolDispatcher(context: Context) {
                     )
                     val scope = rawArgs.optString("scope", "everyone")
                     WhatsAppController.deleteMessage(messageText = messageText, scope = scope)
+                }
+
+                "whatsapp_call" -> {
+                    val rawLower = toolName.trim().lowercase(Locale.ROOT)
+                    val defaultCallType = if (rawLower.contains("video")) "video" else "voice"
+                    val contact = rawArgs.optString(
+                        "contact",
+                        rawArgs.optString("contactName", rawArgs.optString("recipientName", rawArgs.optString("target", "")))
+                    )
+                    val callType = rawArgs.optString(
+                        "call_type",
+                        rawArgs.optString("callType", defaultCallType)
+                    )
+                    val phone = rawArgs.optString(
+                        "phone",
+                        rawArgs.optString("phoneNumber", "")
+                    )
+                    WhatsAppController.placeCall(
+                        context = appContext,
+                        contact = contact,
+                        callType = callType,
+                        explicitPhone = phone
+                    )
                 }
 
                 "close_app" -> {
@@ -277,8 +324,11 @@ class ToolDispatcher(context: Context) {
             "open_app",
             "type_in_field",
             "ui_click_text",
+            "search_anything",
+            "play_video",
             "whatsapp_send_message",
             "whatsapp_delete_message",
+            "whatsapp_call",
             "close_app",
             "whatsapp_send_voice_note",
             "perform_gesture",
@@ -292,6 +342,13 @@ class ToolDispatcher(context: Context) {
             "inspect_current_live_screen" to "describe_screen",
             "read_screen" to "describe_screen",
             "get_mobile_hardware_telemetry" to "get_device_info",
+            "execute_direct_search" to "search_anything",
+            "search_web" to "search_anything",
+            "google_search" to "search_anything",
+            "inject_search" to "search_anything",
+            "search_input" to "search_anything",
+            "youtube_search" to "play_video",
+            "play_youtube" to "play_video",
             "send_whatsapp_isolated" to "whatsapp_send_message",
             "send_whatsapp_message" to "whatsapp_send_message",
             "send_whatsapp_or_social_message" to "whatsapp_send_message",
@@ -300,6 +357,9 @@ class ToolDispatcher(context: Context) {
             "jarvis_send_message" to "whatsapp_send_message",
             "send_autonomous_message" to "whatsapp_send_message",
             "delete_whatsapp_message" to "whatsapp_delete_message",
+            "whatsapp_voice_call" to "whatsapp_call",
+            "whatsapp_video_call" to "whatsapp_call",
+            "call_on_whatsapp" to "whatsapp_call",
             "close_target_app" to "close_app",
             "press_send_or_confirm_on_screen" to "ui_click_text",
             "click_or_send_current_screen" to "ui_click_text",
@@ -328,7 +388,7 @@ class ToolDispatcher(context: Context) {
                 put("name", "describe_screen")
                 put(
                     "description",
-                    "Captures a fresh live snapshot of the foreground application window (ignoring the soft keyboard) and returns the active package, app name, header title, visible texts, clickable buttons, and editable text fields. ALWAYS call this before answering any question about what is on the screen right now."
+                    "Captures a fresh live snapshot of all active windows (foreground app + any open dialog/popup, ignoring the soft keyboard) and returns the active package, app name, header title, visible texts, clickable buttons, every visible icon with its semantic meaning and screen zone, and editable text fields. ALWAYS call this before answering any question about what is on the screen right now."
                 )
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
@@ -407,7 +467,7 @@ class ToolDispatcher(context: Context) {
                 put("name", "ui_click_text")
                 put(
                     "description",
-                    "Finds a visible UI element or button in the active application window by its text or content description and clicks it."
+                    "Finds and clicks any visible UI element, button, dialog option, or icon across all active windows by its visible label, content description, resource ID, or semantic icon name (e.g. 'Delete', 'Delete for everyone', 'Voice call', 'Video call', 'Send', 'Search', 'More options', 'Attach', 'Back', 'Like', 'Share')."
                 )
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
@@ -416,13 +476,13 @@ class ToolDispatcher(context: Context) {
                             "text",
                             JSONObject()
                                 .put("type", "STRING")
-                                .put("description", "Visible label or content description of the button/element to click")
+                                .put("description", "Visible label, content description, or icon name of the element to click")
                         )
                         put(
                             "exact",
                             JSONObject()
                                 .put("type", "BOOLEAN")
-                                .put("description", "True for exact match only, false to allow substring match")
+                                .put("description", "True for exact match only, false to allow substring/semantic icon match")
                         )
                     })
                     put("required", JSONArray(listOf("text")))
@@ -463,7 +523,7 @@ class ToolDispatcher(context: Context) {
                 put("name", "whatsapp_delete_message")
                 put(
                     "description",
-                    "Deletes a message in the currently open WhatsApp chat (long-press message bubble -> tap Delete trash icon -> tap 'Delete for everyone' or 'Delete for me') and verifies that the message bubble disappears."
+                    "Deletes a message in the currently open WhatsApp chat (handles already-selected messages, long-presses the message bubble if needed, taps the top Delete trash icon, and taps 'Delete for everyone' or 'Delete for me' in the confirmation dialog)."
                 )
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
@@ -479,6 +539,36 @@ class ToolDispatcher(context: Context) {
                             JSONObject()
                                 .put("type", "STRING")
                                 .put("description", "'everyone' (default) or 'me'")
+                        )
+                    })
+                })
+            }
+            val whatsappCall = JSONObject().apply {
+                put("name", "whatsapp_call")
+                put(
+                    "description",
+                    "Places a WhatsApp Voice Call or WhatsApp Video Call to a contact or phone number (or the currently open WhatsApp chat if contact is omitted). ALWAYS use this tool instead of handle_phone_call whenever the user mentions 'WhatsApp call', 'WhatsApp se call', 'voice call', or 'video call'."
+                )
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put(
+                            "contact",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "Contact name or phone number to call on WhatsApp (or empty to call the currently open WhatsApp chat)")
+                        )
+                        put(
+                            "call_type",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "'voice' (default for WhatsApp audio/voice call) or 'video' (for WhatsApp video call)")
+                        )
+                        put(
+                            "phone",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "Optional explicit phone number")
                         )
                     })
                 })
@@ -507,14 +597,67 @@ class ToolDispatcher(context: Context) {
                     })
                 })
             }
+            val searchAnything = JSONObject().apply {
+                put("name", "search_anything")
+                put(
+                    "description",
+                    "Searches for any query directly inside Google, YouTube, TikTok, Instagram, Facebook, Play Store, Maps, Spotify, or the active app using query-embedded deep links without needing to locate or click a search icon."
+                )
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put(
+                            "query",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "Search query to look up")
+                        )
+                        put(
+                            "app",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "Target app: google, youtube, tiktok, instagram, facebook, playstore, maps, spotify (optional)")
+                        )
+                    })
+                    put("required", JSONArray(listOf("query")))
+                })
+            }
+            val playVideo = JSONObject().apply {
+                put("name", "play_video")
+                put(
+                    "description",
+                    "Plays any video requested by the user (by topic, song name, channel, or 'first video' / 'any video') on YouTube, TikTok, Instagram, Facebook, or the current screen automatically."
+                )
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject().apply {
+                        put(
+                            "query",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "Video title, topic, song name, or 'first video' / 'any video' to play")
+                        )
+                        put(
+                            "app",
+                            JSONObject()
+                                .put("type", "STRING")
+                                .put("description", "Platform to play on: youtube (default), tiktok, instagram, facebook")
+                        )
+                    })
+                    put("required", JSONArray(listOf("query")))
+                })
+            }
             return listOf(
                 describeScreen,
                 getDeviceInfo,
                 openApp,
                 typeInField,
                 uiClickText,
+                searchAnything,
+                playVideo,
                 whatsappSendMessage,
                 whatsappDeleteMessage,
+                whatsappCall,
                 closeApp
             )
         }
@@ -571,7 +714,7 @@ class ToolDispatcher(context: Context) {
                 put("name", "handle_phone_call")
                 put(
                     "description",
-                    "Places a verified phone call, answers a ringing call, ends/declines a call, or toggles call speakerphone."
+                    "Places a normal cellular SIM phone call, answers a ringing call, ends/declines a call, or toggles call speakerphone. Do NOT use this for WhatsApp calls or voice/video calls on WhatsApp — use whatsapp_call for those."
                 )
                 put("parameters", JSONObject().apply {
                     put("type", "OBJECT")
@@ -630,15 +773,18 @@ class ToolDispatcher(context: Context) {
    - NEVER claim an action succeeded unless `ok == true` AND `verified == true`.
    - If `ok == false`, `verified == false`, `status == "NEEDS_PERMISSION"`, `status == "AMBIGUOUS_CONTACT"`, `status == "NOT_FOUND"`, or `status == "OS_RESTRICTED"`, report the exact reason from `message` honestly to the user.
 2. NO DUPLICATE CALLS:
-   - Call a mutating tool (`whatsapp_send_message`, `whatsapp_send_voice_note`, `whatsapp_delete_message`, `close_app`, `type_in_field`, `ui_click_text`, `open_app`, `perform_gesture`, `handle_phone_call`) AT MOST ONCE per user request. Never call `ui_click_text("Send")` after `whatsapp_send_message` because `whatsapp_send_message` already clicks Send and verifies it.
-3. FRESH SCREEN OBSERVATION & VISUAL LAYOUT:
-   - Never rely on memory of a previous screen. Whenever the user asks what is on the screen or after manual navigation, ALWAYS call `describe_screen` or `analyze_screen_visual` first.
-4. LIVE DEVICE TELEMETRY:
-   - Whenever the user asks about battery level, battery temperature (°C), CPU speed/cores, RAM/memory, storage space, or network status, ALWAYS call `get_device_info` first and report the real numbers from `data`.
-5. TYPING, GESTURES, CALLS & TEACHABLE STANDING RULES:
-   - To type into a search bar or text box, use `type_in_field(text, field_hint, submit=true)` (after `open_app` if needed). Never use clipboard copy tricks.
+   - Call a mutating tool (`whatsapp_send_message`, `whatsapp_send_voice_note`, `whatsapp_delete_message`, `whatsapp_call`, `close_app`, `type_in_field`, `ui_click_text`, `open_app`, `perform_gesture`, `handle_phone_call`) AT MOST ONCE per user request. Never call `ui_click_text("Send")` after `whatsapp_send_message` because `whatsapp_send_message` already clicks Send and verifies it.
+3. WHATSAPP MESSAGE DELETION & FULL SCREEN ICON AWARENESS:
+   - Whenever the user asks to delete a WhatsApp message ("iss message ko delete karo", "delete this message", "message mita do", "delete for everyone"), ALWAYS call `whatsapp_delete_message(message_text="last", scope="everyone")`. It automatically handles already-selected messages, clicks the top Delete trash icon, and confirms 'Delete for everyone' in the popup dialog.
+   - `describe_screen` returns `visibleIcons` with semantic meanings and screen zones for every icon on screen. Use `ui_click_text` to click any icon, toolbar button, or dialog button by its label or semantic meaning.
+4. WHATSAPP CALL vs. SIM CELLULAR CALL (CRITICAL DISTINCTION):
+   - If the user says "WhatsApp se call karo", "WhatsApp call", "voice call karo", or "video call karo", ALWAYS call `whatsapp_call(contact, call_type="voice"|"video")` and NEVER place a normal SIM call (`handle_phone_call`).
+   - Only use `handle_phone_call(action="call", contact_or_number=...)` when the user asks for a regular phone/SIM call without mentioning WhatsApp, voice call, or video call.
+5. DIRECT SEARCH, VIDEO PLAYBACK, TYPING, GESTURES & STANDING RULES:
+   - Whenever the user asks to search for anything (e.g. "search X", "YouTube par X search karo", "Google par X dhoondo"), ALWAYS call `search_anything(query, app)` directly. NEVER say "search icon not found" or "search ka icon nahi mil raha".
+   - Whenever the user asks to play any video (e.g. "play X video", "koi bhi video play karo", "X video chalao", "first video play karo"), ALWAYS call `play_video(query, app)` directly.
+   - To type into a non-search form or chat box, use `type_in_field(text, field_hint, submit=true)`.
    - For swipes, scrolls, coordinate taps, or Home/Back/Recents/Notifications, use `perform_gesture`.
-   - For placing, answering, or ending calls, use `handle_phone_call`.
    - When the user teaches a standing rule ("ab se jab bhi...", "from now on whenever..."), call `teach_standing_rule` to persist and verify it.
 """
     }

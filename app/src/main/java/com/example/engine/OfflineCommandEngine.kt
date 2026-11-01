@@ -190,6 +190,94 @@ class OfflineCommandEngine {
         val trimmed = clause.trim()
         val lower = trimmed.lowercase()
 
+        // 1A. WhatsApp Message Delete ("iss message ko delete karo", "delete this message", "message mita do", "delete for everyone")
+        val isDeleteMsgCmd =
+            (Regex("\\b(delete|mitao|mita do|mita dein|hatao|hata do|remove|unsend)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                originalRaw.contains("ڈلیٹ") || originalRaw.contains("حذف") || originalRaw.contains("مٹا")) &&
+                (Regex("\\b(message|msg|messages|chat|iss|is|ye|yeh|this|last|pichla|akhri|for everyone|for me|sab ke liye|mere liye)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                    originalRaw.contains("میسج") || originalRaw.contains("پیغام")) &&
+                !lower.contains("rule") && !lower.contains("alarm")
+
+        if (isDeleteMsgCmd) {
+            val scope = if (lower.contains("for me") || lower.contains("mere liye") || originalRaw.contains("میرے لیے")) "me" else "everyone"
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Deleting the WhatsApp message.",
+                "WhatsApp message delete kiya ja raha hai.",
+                "واٹس ایپ میسج حذف کیا جا رہا ہے۔",
+                lang
+            )
+            return VoiceAction(
+                action = "whatsapp_delete_message",
+                target = "last",
+                parameters = mapOf("message_text" to "last", "scope" to scope),
+                confirmationRequired = false,
+                spokenResponse = reply
+            )
+        }
+
+        // 1B. WhatsApp Voice Call / Video Call (MUST run before WhatsApp message and before SIM Phone Call)
+        val isWhatsAppOrVoipCall =
+            ((lower.contains("whatsapp") || originalRaw.contains("واٹس ایپ")) &&
+                (Regex("\\b(call|phone|milao|mila do|laga|lagao|laga do|dial)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                    originalRaw.contains("کال") || originalRaw.contains("فون") || originalRaw.contains("ملاؤ"))) ||
+                Regex("\\b(voice\\s*call|video\\s*call|audio\\s*call)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                originalRaw.contains("وائس کال") || originalRaw.contains("ویڈیو کال") || originalRaw.contains("آڈیو کال")
+
+        if (isWhatsAppOrVoipCall && !lower.contains("call history")) {
+            val callType = if (lower.contains("video") || originalRaw.contains("ویڈیو")) "video" else "voice"
+            val rawRecipient = trimmed
+                .replace(
+                    Regex(
+                        "\\b(whatsapp|par|pe|se|say|sy|on|via|through|in|ke zariye|voice|video|audio|call|phone|milao|mila do|mila|lagao|laga do|laga|karo|kar do|kar dein|kro|dial|make|a|to|ko|please|zara|abhi|now|واٹس ایپ|پر|سے|وائس|ویڈیو|آڈیو|کال|فون|ملاؤ|کرو|لگاؤ|کو)\\b",
+                        RegexOption.IGNORE_CASE
+                    ),
+                    " "
+                )
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            val resolvedName = if (rawRecipient.isNotBlank()) LanguageProcessor.canonicalizeEntityName(rawRecipient) else ""
+            val targetLabel = resolvedName.ifBlank { "current chat" }
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Placing WhatsApp $callType call to $targetLabel.",
+                "$targetLabel ko WhatsApp $callType call milayi ja rahi hai.",
+                "$targetLabel کو واٹس ایپ کال ملائی جا رہی ہے۔",
+                lang
+            )
+            return VoiceAction(
+                action = "whatsapp_call",
+                target = resolvedName,
+                parameters = mapOf("contact" to resolvedName, "call_type" to callType),
+                confirmationRequired = false,
+                spokenResponse = reply
+            )
+        }
+
+        // 1C. Screen Icon / Button Click ("X icon par click karo", "click on X", "X button dabao")
+        val clickIconMatch = Regex("^(?:please\\s+)?(?:click|tap|press|dabao|daba do)\\s+(?:on\\s+|the\\s+)?(.+?)(?:\\s+(?:icon|button|option))?$", RegexOption.IGNORE_CASE).find(trimmed)
+            ?: Regex("^(.+?)\\s+(?:ka\\s+|ke\\s+|ki\\s+|wale\\s+|wala\\s+)?(?:icon|button|option)\\s*(?:par\\s+|pe\\s+)?(?:click|tap|press|dabao|daba do)(?:\\s+karo|\\s+kar do)?$", RegexOption.IGNORE_CASE).find(trimmed)
+            ?: Regex("^(.+?)\\s+(?:par|pe)\\s+(?:click|tap)\\s*(?:karo|kar do|karein)?$", RegexOption.IGNORE_CASE).find(trimmed)
+        if (clickIconMatch != null) {
+            val targetLabel = clickIconMatch.groupValues[1]
+                .replace(Regex("\\b(icon|button|option|par|pe|ko|on|the|please|zara|abhi)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (targetLabel.isNotBlank()) {
+                val reply = LanguageProcessor.formatReplyInLanguage(
+                    "Clicking '$targetLabel' on screen.",
+                    "Screen par '$targetLabel' par click kiya ja raha hai.",
+                    "اسکرین پر '$targetLabel' پر کلک کیا جا رہا ہے۔",
+                    lang
+                )
+                return VoiceAction(
+                    action = "ui_click_text",
+                    target = targetLabel,
+                    parameters = mapOf("text" to targetLabel),
+                    confirmationRequired = false,
+                    spokenResponse = reply
+                )
+            }
+        }
+
         // 1. WhatsApp (English, Roman Urdu, Urdu Nastaliq, Mixed)
         // E.g. "WhatsApp khol kar Ahmed ko message send karo ke I'll be late", "send whatsapp to Ahmed saying Hello", "واٹس ایپ پر احمد کو میسج کرو"
         if (lower.contains("whatsapp") || originalRaw.contains("واٹس ایپ")) {
@@ -197,16 +285,16 @@ class OfflineCommandEngine {
                 val (recipient, msg) = extractRecipientAndMessage(trimmed, originalRaw, isWhatsApp = true)
                 if (recipient.isNotBlank()) {
                     val reply = LanguageProcessor.formatReplyInLanguage(
-                        "Do you want me to send this WhatsApp message to $recipient: '$msg'?",
-                        "Kya main $recipient ko WhatsApp message send karoon: '$msg'?",
-                        "کیا میں $recipient کو واٹس ایپ میسج بھیج دوں: '$msg'؟",
+                        "Sending WhatsApp message to $recipient: '$msg'.",
+                        "$recipient ko WhatsApp message bheja ja raha hai: '$msg'.",
+                        "$recipient کو واٹس ایپ میسج بھیجا جا رہا ہے: '$msg'۔",
                         lang
                     )
                     return VoiceAction(
                         action = "send_whatsapp",
                         target = recipient,
                         parameters = mapOf("target" to recipient, "message" to msg),
-                        confirmationRequired = true,
+                        confirmationRequired = false,
                         spokenResponse = reply
                     )
                 }
@@ -279,9 +367,9 @@ class OfflineCommandEngine {
             val simSuffixRoman = if (requestedSimSlot != null) " SIM $requestedSimSlot se" else ""
             val simSuffixUrdu = if (requestedSimSlot != null) " سم $requestedSimSlot سے" else ""
             val reply = LanguageProcessor.formatReplyInLanguage(
-                "Do you want me to call $resolvedName$simSuffixEn?",
-                "Kya aap$simSuffixRoman $resolvedName ko call karna chahte hain?",
-                "کیا آپ$simSuffixUrdu $resolvedName کو کال کرنا چاہتے ہیں؟",
+                "Calling $resolvedName$simSuffixEn.",
+                "$resolvedName ko$simSuffixRoman call milayi ja rahi hai.",
+                "$resolvedName کو$simSuffixUrdu کال ملائی جا رہی ہے۔",
                 lang
             )
             val params = mutableMapOf("target" to resolvedName)
@@ -292,7 +380,7 @@ class OfflineCommandEngine {
                 action = "call",
                 target = resolvedName,
                 parameters = params,
-                confirmationRequired = true,
+                confirmationRequired = false,
                 spokenResponse = reply
             )
         }
@@ -676,6 +764,78 @@ class OfflineCommandEngine {
                 lang
             )
             return VoiceAction(action = "lock_device", target = "screen", spokenResponse = reply)
+        }
+
+        // 14B. Play Any Video (YouTube / Media / On-Screen Video)
+        val isVideoPlayCmd =
+            (lower.contains("youtube") && (lower.contains("play") || lower.contains("chala") || lower.contains("lagao") || lower.contains("video") || lower.contains("search"))) ||
+                (Regex("\\b(video|videos|naat|tilawat|qawali|qawwali|song|gana|gaana|movie|film|drama|episode|cartoon|lecture|trailer|shorts|reels)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) &&
+                    Regex("\\b(play|chala|chalao|chala do|lagao|laga do|sunao|suna do|dikhao|dikha do|watch|dekho)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) ||
+                (Regex("^(?:please\\s+)?(?:play|chala do|chalao|lagao|laga do)\\s+(.+)$", RegexOption.IGNORE_CASE).containsMatchIn(lower) &&
+                    !Regex("^(?:play|resume|chalao)\\s*(?:music|audio)?$", RegexOption.IGNORE_CASE).containsMatchIn(lower)) ||
+                originalRaw.contains("ویڈیو چلا") || originalRaw.contains("ویڈیو لگا")
+
+        if (isVideoPlayCmd) {
+            val rawVideoQuery = trimmed
+                .replace(Regex("\\b(youtube|par|pe|on|in|search|play|karo|kar do|kar dein|chala do|chalao|chala|lagao|laga do|kholo|open|please|zara|abhi|mujhe|mere liye|koi bhi|any|ek|aik|video|videos|dikhao|dikha do|sunao|suna do|ویڈیو|چلاؤ|چلا|لگاؤ)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            val finalVideoQuery = when {
+                lower.contains("pehle wali") || lower.contains("pehli video") || lower.contains("first video") -> "first video"
+                lower.contains("doosri video") || lower.contains("second video") -> "second video"
+                rawVideoQuery.isBlank() -> "trending videos"
+                else -> rawVideoQuery
+            }
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Playing '$finalVideoQuery' on YouTube.",
+                "YouTube par '$finalVideoQuery' video chala raha hoon.",
+                "یوٹیوب پر '$finalVideoQuery' ویڈیو چلا رہا ہوں۔",
+                lang
+            )
+            return VoiceAction(
+                action = "play_video",
+                target = finalVideoQuery,
+                parameters = mapOf("query" to finalVideoQuery, "platform" to "youtube", "autoPlay" to "true"),
+                spokenResponse = reply
+            )
+        }
+
+        // 14C. Universal Search (Google / YouTube / TikTok / Play Store / Any App)
+        val isSearchCmd = Regex(
+            "\\b(google par|search on|google search|web search|search web|search for|search karo|search kar do|search karein|talaash karo|talash karo|dhoondo|dhoond do)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(lower) ||
+            Regex("^(?:please\\s+)?search\\s+(.+)$", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            originalRaw.contains("سرچ") || originalRaw.contains("تلاش")
+
+        if (isSearchCmd && !lower.contains("phone dhoondo") && !lower.contains("find my phone")) {
+            val platform = when {
+                lower.contains("youtube") -> "youtube"
+                lower.contains("tiktok") || lower.contains("tik tok") -> "tiktok"
+                lower.contains("instagram") || lower.contains("insta") -> "instagram"
+                lower.contains("facebook") || lower.contains("fb") -> "facebook"
+                lower.contains("play store") || lower.contains("playstore") -> "playstore"
+                lower.contains("spotify") -> "spotify"
+                lower.contains("map") || lower.contains("maps") -> "maps"
+                else -> "google"
+            }
+            val searchQuery = trimmed
+                .replace(Regex("\\b(google|youtube|tiktok|instagram|facebook|play store|playstore|spotify|maps|par|pe|mein|main|on|in|search|web|for|karo|kar do|kar dein|karein|kholo|talaash|talash|dhoondo|dhoond|please|zara|abhi|سرچ|تلاش|کرو)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .ifBlank { trimmed }
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Searching for '$searchQuery' on $platform.",
+                "$platform par '$searchQuery' search kar raha hoon.",
+                "$platform پر '$searchQuery' تلاش کر رہا ہوں۔",
+                lang
+            )
+            return VoiceAction(
+                action = if (platform == "youtube") "play_video" else "search_web",
+                target = searchQuery,
+                parameters = mapOf("query" to searchQuery, "platform" to platform),
+                spokenResponse = reply
+            )
         }
 
         // 15. Open Application (English, Roman Urdu, Urdu Nastaliq)

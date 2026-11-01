@@ -83,7 +83,7 @@ object SuperAgiBrainEngine {
      * Parses any single or multi-step command string into a list of DeterministicNluTask items
      * so that every hardware/app/communication/system action works reliably and fast.
      */
-    fun extractAllDeviceTasks(context: Context, rawText: String): List<DeterministicNluTask> {
+    fun extractAllDeviceTasks(context: Context?, rawText: String): List<DeterministicNluTask> {
         val trimmed = rawText.trim()
         if (trimmed.isEmpty()) return emptyList()
         val lower = trimmed.lowercase(Locale.ROOT)
@@ -139,7 +139,7 @@ object SuperAgiBrainEngine {
     }
 
     private fun extractTasksFromSingleClause(
-        context: Context,
+        context: Context?,
         clause: String,
         startStep: Int
     ): List<DeterministicNluTask> {
@@ -295,49 +295,148 @@ object SuperAgiBrainEngine {
             }
         }
 
-        // 8. YouTube Search / Play
-        if ((lower.contains("youtube") && (lower.contains("search") || lower.contains("play") || lower.contains("chala") || lower.contains("lagao") || lower.contains("par "))) ||
-            Regex("^(?:play|chala do|lagao)\\s+(.+)\\s+(?:on youtube|youtube par)$", RegexOption.IGNORE_CASE).containsMatchIn(lower)
-        ) {
-            val query = clause
-                .replace(Regex("\\b(youtube|par|on|search|play|karo|kar do|chala do|chala|lagao|laga do|video|kholo|open)\\b", RegexOption.IGNORE_CASE), " ")
+        // 8. YouTube / Universal Video Play & Video Search
+        val hasVideoPlayIntent =
+            (lower.contains("youtube") && (lower.contains("search") || lower.contains("play") || lower.contains("chala") || lower.contains("lagao") || lower.contains("laga do") || lower.contains("par ") || lower.contains("pe ") || lower.contains("video"))) ||
+                Regex("\\b(video|videos|naat|tilawat|qawali|qawwali|song|gana|gaana|movie|film|drama|episode|cartoon|lecture|podcast|trailer|shorts|reel|reels)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) &&
+                Regex("\\b(play|chala|chalao|chala do|lagao|laga do|sunao|suna do|dikhao|dikha do|open|kholo|watch|dekho)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                Regex("^(?:please\\s+)?(?:play|chala do|chalao|lagao|laga do)\\s+(.+)$", RegexOption.IGNORE_CASE).containsMatchIn(lower) &&
+                !Regex("^(?:play|resume|chalao)\\s*(?:music|audio)?$", RegexOption.IGNORE_CASE).containsMatchIn(lower)
+
+        if (hasVideoPlayIntent) {
+            val rawQuery = clause
+                .replace(Regex("\\b(youtube|par|pe|on|in|search|play|karo|kar do|kar dein|chala do|chalao|chala|lagao|laga do|kholo|open|please|zara|abhi|mujhe|mere liye|koi bhi|any|ek|aik|video|videos|dikhao|dikha do|sunao|suna do)\\b", RegexOption.IGNORE_CASE), " ")
                 .replace(Regex("\\s+"), " ")
                 .trim()
-            if (query.isNotBlank()) {
+            val finalVideoQuery = when {
+                lower.contains("pehle wali") || lower.contains("pehli video") || lower.contains("first video") -> "first video"
+                lower.contains("doosri video") || lower.contains("second video") -> "second video"
+                rawQuery.isBlank() -> "trending videos"
+                else -> rawQuery
+            }
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = NluTaskType.YOUTUBE_SEARCH,
+                    target = "youtube",
+                    actionValue = finalVideoQuery
+                )
+            )
+            return tasks
+        }
+
+        // 9. Universal Search (Google / Web / App Search — e.g. "search X", "X search karo", "Google par X search karo")
+        val hasSearchIntent = Regex(
+            "\\b(google par|search on google|google search|web search|search web|search for|search karo|search kar do|search karein|talaash karo|talash karo|dhoondo|dhoond do)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(lower) ||
+            Regex("^(?:please\\s+)?search\\s+(.+)$", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            clause.contains("سرچ") || clause.contains("تلاش")
+
+        if (hasSearchIntent && !lower.contains("phone dhoondo") && !lower.contains("find my phone")) {
+            val targetPlatform = when {
+                lower.contains("youtube") -> "youtube"
+                lower.contains("tiktok") || lower.contains("tik tok") -> "tiktok"
+                lower.contains("instagram") || lower.contains("insta") -> "instagram"
+                lower.contains("facebook") || lower.contains("fb") -> "facebook"
+                lower.contains("play store") || lower.contains("playstore") -> "playstore"
+                lower.contains("spotify") -> "spotify"
+                lower.contains("map") || lower.contains("maps") -> "maps"
+                else -> "google"
+            }
+            val query = clause
+                .replace(Regex("\\b(google|youtube|tiktok|instagram|facebook|play store|playstore|spotify|maps|par|pe|mein|main|on|in|search|web|for|karo|kar do|kar dein|karein|kholo|talaash|talash|dhoondo|dhoond|please|zara|abhi|سرچ|تلاش|کرو)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .ifBlank { clause.trim() }
+
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = if (targetPlatform == "youtube") NluTaskType.YOUTUBE_SEARCH else NluTaskType.GOOGLE_SEARCH,
+                    target = targetPlatform,
+                    actionValue = query
+                )
+            )
+            return tasks
+        }
+
+        // 9C. WhatsApp Message Delete ("iss message ko delete karo", "delete this message", "message mita do", "delete for everyone")
+        val hasDeleteKeyword = Regex("\\b(delete|mitao|mita do|mita dein|hatao|hata do|remove|unsend)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            clause.contains("ڈلیٹ") || clause.contains("حذف") || clause.contains("مٹا")
+        val hasMessageOrDeleteScopeKeyword = Regex("\\b(message|msg|messages|chat|iss|is|ye|yeh|this|last|pichla|akhri|for everyone|for me|sab ke liye|mere liye)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            clause.contains("میسج") || clause.contains("پیغام")
+        if (hasDeleteKeyword && hasMessageOrDeleteScopeKeyword && !lower.contains("rule") && !lower.contains("alarm")) {
+            val scope = if (lower.contains("for me") || lower.contains("mere liye") || clause.contains("میرے لیے")) "me" else "everyone"
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = NluTaskType.WHATSAPP_DELETE_MESSAGE,
+                    target = "last",
+                    actionValue = scope
+                )
+            )
+            return tasks
+        }
+
+        // 9D. WhatsApp Call / Voice Call / Video Call (MUST run before generic WhatsApp message and before generic SIM Phone Call!)
+        val isWhatsAppOrVoipCall =
+            ((lower.contains("whatsapp") || clause.contains("واٹس ایپ")) &&
+                (Regex("\\b(call|phone|milao|mila do|laga|lagao|laga do|karo|kar do|dial)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                    clause.contains("کال") || clause.contains("فون") || clause.contains("ملاؤ"))) ||
+                Regex("\\b(voice\\s*call|video\\s*call|audio\\s*call)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+                clause.contains("وائس کال") || clause.contains("ویڈیو کال") || clause.contains("آڈیو کال")
+
+        if (isWhatsAppOrVoipCall && !lower.contains("call history")) {
+            val callType = if (lower.contains("video") || clause.contains("ویڈیو")) "video" else "voice"
+            val contactCandidate = clause
+                .replace(
+                    Regex(
+                        "\\b(whatsapp|par|pe|se|say|sy|on|via|through|in|ke zariye|voice|video|audio|call|phone|milao|mila do|mila|lagao|laga do|laga|karo|kar do|kar dein|kro|dial|make|a|to|ko|please|zara|abhi|now|واٹس ایپ|پر|سے|وائس|ویڈیو|آڈیو|کال|فون|ملاؤ|کرو|لگاؤ|کو)\\b",
+                        RegexOption.IGNORE_CASE
+                    ),
+                    " "
+                )
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = NluTaskType.WHATSAPP_CALL,
+                    target = contactCandidate,
+                    actionValue = callType
+                )
+            )
+            return tasks
+        }
+
+        // 9E. Explicit Screen Icon / Button Click ("click on X", "X icon par click karo", "X button dabao")
+        val clickIconMatch = Regex("^(?:please\\s+)?(?:click|tap|press|dabao|daba do)\\s+(?:on\\s+|the\\s+)?(.+?)(?:\\s+(?:icon|button|option))?$", RegexOption.IGNORE_CASE).find(clause)
+            ?: Regex("^(.+?)\\s+(?:ka\\s+|ke\\s+|ki\\s+|wale\\s+|wala\\s+)?(?:icon|button|option)\\s*(?:par\\s+|pe\\s+)?(?:click|tap|press|dabao|daba do)(?:\\s+karo|\\s+kar do)?$", RegexOption.IGNORE_CASE).find(clause)
+            ?: Regex("^(.+?)\\s+(?:par|pe)\\s+(?:click|tap)\\s*(?:karo|kar do|karein)?$", RegexOption.IGNORE_CASE).find(clause)
+        if (clickIconMatch != null) {
+            val targetLabel = clickIconMatch.groupValues[1]
+                .replace(Regex("\\b(icon|button|option|par|pe|ko|on|the|please|zara|abhi)\\b", RegexOption.IGNORE_CASE), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (targetLabel.isNotBlank()) {
                 tasks.add(
                     DeterministicNluTask(
                         stepNumber = step++,
-                        taskType = NluTaskType.YOUTUBE_SEARCH,
-                        target = "youtube",
-                        actionValue = query
+                        taskType = NluTaskType.UI_CLICK,
+                        target = targetLabel,
+                        actionValue = "CLICK"
                     )
                 )
                 return tasks
             }
         }
 
-        // 9. Google / Web Search
-        if (Regex("\\b(google par|search on google|google search|web search|search web for)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
-            val query = clause
-                .replace(Regex("\\b(google|par|on|search|web|for|karo|kar do|kholo)\\b", RegexOption.IGNORE_CASE), " ")
-                .replace(Regex("\\s+"), " ")
-                .trim()
-            if (query.isNotBlank()) {
-                tasks.add(
-                    DeterministicNluTask(
-                        stepNumber = step++,
-                        taskType = NluTaskType.GOOGLE_SEARCH,
-                        target = "google",
-                        actionValue = query
-                    )
-                )
-                return tasks
-            }
-        }
-
-        // 10. WhatsApp Message (when sending a message, not just "open whatsapp")
+        // 10. WhatsApp Message (when sending a message, not just "open whatsapp" and not a call or delete)
         if ((lower.contains("whatsapp") || lower.contains("message") || lower.contains("msg")) &&
             (lower.contains("bhejo") || lower.contains("send") || lower.contains("karo") || lower.contains("likho") || lower.contains("bol")) &&
+            !hasDeleteKeyword &&
+            !isWhatsAppOrVoipCall &&
             !Regex("^(?:open|kholo|launch|start)\\s+whatsapp$", RegexOption.IGNORE_CASE).containsMatchIn(lower)
         ) {
             var targetContact = "Contact"
@@ -370,8 +469,9 @@ object SuperAgiBrainEngine {
             }
         }
 
-        // 11. Phone Call
+        // 11. Phone Call (Regular SIM Cellular Call)
         if (Regex("\\b(call|phone milao|number milao|dial)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) &&
+            !isWhatsAppOrVoipCall &&
             !lower.contains("call history") && !lower.contains("what is called")
         ) {
             val koCallMatch = Regex("^(.+?)\\s+ko\\s+(?:call|phone)\\s*(?:milao|karo|laga|lagao|kar do)?", RegexOption.IGNORE_CASE).find(clause)
@@ -379,9 +479,9 @@ object SuperAgiBrainEngine {
             val contactTarget = when {
                 koCallMatch != null -> koCallMatch.groupValues[1].trim()
                 engCallMatch != null -> engCallMatch.groupValues[1]
-                    .replace(Regex("\\b(ko|par|on|now|abhi|karo|milao)\\b", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("\\b(ko|par|on|now|abhi|karo|milao|sim|se|say)\\b", RegexOption.IGNORE_CASE), "")
                     .trim()
-                else -> clause.replace(Regex("\\b(call|phone|milao|karo|lagao|dial|to|ko)\\b", RegexOption.IGNORE_CASE), "").trim()
+                else -> clause.replace(Regex("\\b(call|phone|milao|karo|lagao|dial|to|ko|sim|se|say)\\b", RegexOption.IGNORE_CASE), "").trim()
             }
             if (contactTarget.isNotBlank()) {
                 tasks.add(
@@ -516,6 +616,24 @@ object SuperAgiBrainEngine {
                 target = voiceAction.target.ifBlank { params["contact_name"] ?: params["phone_number"] ?: "" },
                 actionValue = "DIRECT_CALL"
             )
+            "whatsapp_call" -> DeterministicNluTask(
+                stepNumber = step,
+                taskType = NluTaskType.WHATSAPP_CALL,
+                target = voiceAction.target.ifBlank { params["contact"] ?: params["contact_name"] ?: "" },
+                actionValue = params["call_type"] ?: "voice"
+            )
+            "whatsapp_delete_message", "delete_whatsapp_message" -> DeterministicNluTask(
+                stepNumber = step,
+                taskType = NluTaskType.WHATSAPP_DELETE_MESSAGE,
+                target = voiceAction.target.ifBlank { params["message_text"] ?: "last" },
+                actionValue = params["scope"] ?: "everyone"
+            )
+            "ui_click_text" -> DeterministicNluTask(
+                stepNumber = step,
+                taskType = NluTaskType.UI_CLICK,
+                target = voiceAction.target.ifBlank { params["text"] ?: "" },
+                actionValue = "CLICK"
+            )
             "send_whatsapp" -> DeterministicNluTask(
                 stepNumber = step,
                 taskType = NluTaskType.WHATSAPP_MESSAGE,
@@ -528,13 +646,17 @@ object SuperAgiBrainEngine {
                 target = voiceAction.target.ifBlank { params["contact_name"] ?: params["phone_number"] ?: "Contact" },
                 actionValue = params["message"] ?: "Hello"
             )
+            "play_video", "youtube_search", "play_youtube" -> {
+                val query = params["query"] ?: voiceAction.target.ifBlank { "trending videos" }
+                DeterministicNluTask(step, NluTaskType.YOUTUBE_SEARCH, "youtube", query)
+            }
             "search_web" -> {
                 val platform = params["platform"]?.lowercase() ?: "google"
                 val query = params["query"] ?: voiceAction.target
                 if (platform.contains("youtube")) {
                     DeterministicNluTask(step, NluTaskType.YOUTUBE_SEARCH, "youtube", query)
                 } else {
-                    DeterministicNluTask(step, NluTaskType.GOOGLE_SEARCH, "google", query)
+                    DeterministicNluTask(step, NluTaskType.GOOGLE_SEARCH, platform, query)
                 }
             }
             "take_screenshot" -> DeterministicNluTask(
@@ -609,10 +731,21 @@ object SuperAgiBrainEngine {
                     }
                 }
                 NluTaskType.PHONE_CALL -> {
-                    if (isEnglish) "calling ${task.target}" else "${task.target} ko call mila raha hoon"
+                    if (isEnglish) "calling ${task.target} via SIM" else "${task.target} ko SIM se call mila raha hoon"
+                }
+                NluTaskType.WHATSAPP_CALL -> {
+                    val kind = if (task.actionValue.equals("video", ignoreCase = true)) "video call" else "voice call"
+                    val targetDesc = task.target.ifBlank { "chat" }
+                    if (isEnglish) "placing WhatsApp $kind to $targetDesc" else "$targetDesc ko WhatsApp $kind mila raha hoon"
                 }
                 NluTaskType.WHATSAPP_MESSAGE -> {
                     if (isEnglish) "sending WhatsApp message to ${task.target}" else "${task.target} ko WhatsApp message bhej raha hoon"
+                }
+                NluTaskType.WHATSAPP_DELETE_MESSAGE -> {
+                    if (isEnglish) "deleted the WhatsApp message" else "WhatsApp message delete kar diya hai"
+                }
+                NluTaskType.UI_CLICK -> {
+                    if (isEnglish) "clicked '${task.target}' on screen" else "screen par '${task.target}' par click kar diya hai"
                 }
                 NluTaskType.SMS -> {
                     if (isEnglish) "sending SMS to ${task.target}" else "${task.target} ko SMS bhej raha hoon"
@@ -762,10 +895,12 @@ object SuperAgiBrainEngine {
             }
         }
 
+        val fastLiveModels = listOf("gemini-2.5-flash")
+
         // Path A: Direct REST API if BuildConfig.GEMINI_ARGON_API_KEY or BuildConfig.GEMINI_API_KEY is configured
         val apiKey = resolveActiveGeminiApiKey()
         if (apiKey.isNotBlank()) {
-            for (modelName in PREFERRED_GEMINI_MODELS) {
+            for (modelName in fastLiveModels) {
                 try {
                     val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
                     val payload = JSONObject().apply {
@@ -780,13 +915,13 @@ object SuperAgiBrainEngine {
                         ))
                         put("generationConfig", JSONObject().apply {
                             put("temperature", 0.35)
-                            put("maxOutputTokens", 1024)
+                            put("maxOutputTokens", 512)
                         })
                     }
                     val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                         requestMethod = "POST"
-                        connectTimeout = 7000
-                        readTimeout = 10000
+                        connectTimeout = 2200
+                        readTimeout = 3500
                         doOutput = true
                         setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     }
@@ -813,19 +948,21 @@ object SuperAgiBrainEngine {
             }
         }
 
-        // Path B: Firebase AI Logic SDK
-        for (modelName in PREFERRED_GEMINI_MODELS) {
+        // Path B: Firebase AI Logic SDK (single fast model call with timeout guard)
+        for (modelName in fastLiveModels) {
             try {
                 val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
                     modelName = modelName,
                     generationConfig = generationConfig {
                         temperature = 0.35f
-                        maxOutputTokens = 1024
+                        maxOutputTokens = 512
                     },
                     systemInstruction = content { text(systemPrompt) }
                 )
-                val response = model.generateContent(userPrompt)
-                val text = response.text?.trim()
+                val response = kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                    model.generateContent(userPrompt)
+                }
+                val text = response?.text?.trim()
                 if (!text.isNullOrBlank()) {
                     return text
                 }

@@ -1,7 +1,7 @@
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
-  alias(libs.plugins.google.devtools.ksp)
+  // alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
 }
 
@@ -70,11 +70,11 @@ android {
     includeInBundle = true
   }
 
-  ksp {
-    arg("room.schemaLocation", "$projectDir/schemas")
-    arg("room.incremental", "true")
-    arg("room.generateKotlin", "true")
-  }
+  // ksp {
+  //   arg("room.schemaLocation", "$projectDir/schemas")
+  //   arg("room.incremental", "true")
+  //   arg("room.generateKotlin", "true")
+  // }
 }
 
 System.setProperty("java.awt.headless", "true")
@@ -146,6 +146,6 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  ksp(libs.androidx.room.compiler)
+  // ksp(libs.androidx.room.compiler)
   // ksp(libs.moshi.kotlin.codegen)
 }

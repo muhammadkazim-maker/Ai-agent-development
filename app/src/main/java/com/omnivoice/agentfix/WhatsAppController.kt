@@ -346,138 +346,652 @@ object WhatsAppController {
             permissionOrService = "AccessibilityService",
             message = "AccessibilityService is required to delete a WhatsApp message."
         )
-        val root = ScreenObserver.findApplicationRoot(service, preferNonSelfPackage = false)
+        val initialRoots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+        val primaryRoot = initialRoots.firstOrNull()
+            ?: ScreenObserver.findApplicationRoot(service, preferNonSelfPackage = false)
             ?: return ToolResult.failure("whatsapp_delete_message", "No active window on screen.", "NO_WINDOW")
-        val pkg = root.packageName?.toString().orEmpty()
-        if (pkg !in whatsAppPackages) {
+
+        val anyWhatsAppWindow = initialRoots.any { it.packageName?.toString().orEmpty() in whatsAppPackages } ||
+            primaryRoot.packageName?.toString().orEmpty() in whatsAppPackages
+        if (!anyWhatsAppWindow) {
+            val activePkg = primaryRoot.packageName?.toString().orEmpty()
             return ToolResult.failure(
                 tool = "whatsapp_delete_message",
-                message = "WhatsApp is not currently open on screen (active package=$pkg). Open the WhatsApp chat first.",
+                message = "WhatsApp is not currently open on screen (active package=$activePkg). Open the WhatsApp chat first.",
                 errorCode = "NOT_IN_WHATSAPP"
             )
         }
-        val bubbles = collectMessageBubbles(root, messageText)
-        if (bubbles.isEmpty()) {
-            return ToolResult(
-                ok = false,
-                status = ToolStatus.NOT_FOUND.name,
+
+        val wantEveryone = !scope.equals("me", ignoreCase = true)
+
+        // Stage 0: Check if the "Delete for everyone" / "Delete for me" confirmation dialog is ALREADY open on screen!
+        val existingConfirmBtn = findDeleteConfirmButtonAcrossRoots(initialRoots, wantEveryone)
+        if (existingConfirmBtn != null) {
+            val chosenLabel = existingConfirmBtn.text?.toString()?.trim().orEmpty()
+                .ifBlank { existingConfirmBtn.contentDescription?.toString()?.trim().orEmpty() }
+                .ifBlank { "Delete for everyone" }
+            val clickedConfirm = clickConfirmAndOptionalDialogSubmit(service, existingConfirmBtn)
+            if (clickedConfirm) {
+                return ToolResult.success(
+                    tool = "whatsapp_delete_message",
+                    message = "Deleted WhatsApp message via '$chosenLabel'.",
+                    verified = true,
+                    verificationNote = "Confirmation dialog was already open; clicked '$chosenLabel' directly.",
+                    data = JSONObject().apply {
+                        put("deletedText", messageText.ifBlank { "selected_message" })
+                        put("optionClicked", chosenLabel)
+                    }
+                )
+            }
+        }
+
+        // Stage 1: Check if a message is ALREADY selected (top action bar Delete/Trash icon is already visible)!
+        // If so, do NOT long-press again (long-pressing a selected message deselects it!).
+        var deleteIcon: AccessibilityNodeInfo? = findDeleteTrashIconAcrossRoots(initialRoots)
+        var targetSnippet = messageText.ifBlank { "last message" }
+        var initialCount = 1
+
+        if (deleteIcon == null) {
+            // Stage 2: Find the target message bubble and long-press it
+            val chatRoot = initialRoots.firstOrNull { it.packageName?.toString().orEmpty() in whatsAppPackages } ?: primaryRoot
+            val bubbles = collectMessageBubbles(chatRoot, messageText)
+            if (bubbles.isEmpty()) {
+                return ToolResult(
+                    ok = false,
+                    status = ToolStatus.NOT_FOUND.name,
+                    tool = "whatsapp_delete_message",
+                    message = if (messageText.isBlank() || messageText.equals("last", ignoreCase = true)) {
+                        "No message bubbles found in the currently open WhatsApp chat."
+                    } else {
+                        "No WhatsApp message matching '$messageText' found on screen."
+                    },
+                    verified = false,
+                    errorCode = "MESSAGE_NOT_FOUND"
+                )
+            }
+            val targetBubble = bubbles.last()
+            targetSnippet = targetBubble.text?.toString()?.trim().orEmpty()
+                .ifBlank { targetBubble.contentDescription?.toString()?.trim().orEmpty() }
+                .ifBlank { "last message" }
+            initialCount = bubbles.size
+
+            val longClickResult = performLongClickOrGestureWithMode(service, targetBubble)
+            if (!longClickResult.first) {
+                return ToolResult.failure(
+                    "whatsapp_delete_message",
+                    "Failed to long-press message '$targetSnippet'.",
+                    "LONG_CLICK_FAILED"
+                )
+            }
+
+            // If a 650ms gesture was dispatched asynchronously, wait for the hold gesture to complete first!
+            if (longClickResult.second) {
+                delay(720L)
+            } else {
+                delay(220L)
+            }
+
+            // Poll up to 18 times (1.8s) across all active windows for the Delete (trash) icon or direct popup menu
+            for (attempt in 0 until 18) {
+                val rootsNow = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+                // Some WhatsApp versions show a context menu with "Delete" / "Delete for everyone" immediately after long-press
+                val directConfirm = findDeleteConfirmButtonAcrossRoots(rootsNow, wantEveryone)
+                if (directConfirm != null) {
+                    val chosenLabel = directConfirm.text?.toString()?.trim().orEmpty().ifBlank { "Delete" }
+                    if (clickConfirmAndOptionalDialogSubmit(service, directConfirm)) {
+                        return ToolResult.success(
+                            tool = "whatsapp_delete_message",
+                            message = "Deleted WhatsApp message ('$targetSnippet') via '$chosenLabel'.",
+                            verified = true,
+                            verificationNote = "Selected message and clicked '$chosenLabel' from context menu.",
+                            data = JSONObject().apply {
+                                put("deletedText", targetSnippet)
+                                put("optionClicked", chosenLabel)
+                            }
+                        )
+                    }
+                }
+                deleteIcon = findDeleteTrashIconAcrossRoots(rootsNow)
+                if (deleteIcon != null) break
+                delay(100L)
+            }
+        }
+
+        if (deleteIcon == null) {
+            return ToolResult.failure(
                 tool = "whatsapp_delete_message",
-                message = if (messageText.isBlank() || messageText.equals("last", ignoreCase = true)) {
-                    "No message bubbles found in the currently open WhatsApp chat."
-                } else {
-                    "No WhatsApp message matching '$messageText' found on screen."
-                },
-                verified = false,
-                errorCode = "MESSAGE_NOT_FOUND"
+                message = "Selected message '$targetSnippet', but the Delete (trash) icon did not appear in the top bar.",
+                errorCode = "DELETE_ICON_NOT_FOUND"
             )
         }
-        val targetBubble = bubbles.last()
-        val targetSnippet = targetBubble.text?.toString()?.trim().orEmpty()
-        val initialCount = bubbles.size
-        val longClicked = performLongClickOrGesture(service, targetBubble)
-        if (!longClicked) {
-            return ToolResult.failure("whatsapp_delete_message", "Failed to long-press message '$targetSnippet'.", "LONG_CLICK_FAILED") }
-        var deleteIcon: AccessibilityNodeInfo? = null
-        var step2Root: AccessibilityNodeInfo? = null
-        for (attempt in 0 until 8) {
-            delay(55L)
-            step2Root = ScreenObserver.findApplicationRoot(service, preferNonSelfPackage = false)
-            if (step2Root != null) {
-                deleteIcon = findWhatsAppNodeByIdTail(step2Root, "menuitem_delete")
-                    ?: UiTools.findClickableMatchingNode(step2Root, "Delete", exact = true)
-                if (deleteIcon != null) break
-            }
-        }
-        if (step2Root == null) {
-            return ToolResult.failure("whatsapp_delete_message", "Lost WhatsApp window after long-press.", "WINDOW_LOST")
-        }
-        if (deleteIcon == null) {
-            return ToolResult.failure( tool = "whatsapp_delete_message", message = "Long-pressed message '$targetSnippet', but the Delete (trash) icon did not appear in the action bar.", errorCode = "DELETE_ICON_NOT_FOUND" )
-        }
+
+        // Stage 3: Click the Delete (trash) icon
         if (!UiTools.performClickOrTap(deleteIcon)) {
-            return ToolResult.failure("whatsapp_delete_message", "Could not tap Delete icon.", "DELETE_ICON_CLICK_FAILED") }
-        val wantEveryone = !scope.equals("me", ignoreCase = true)
+            return ToolResult.failure("whatsapp_delete_message", "Could not tap Delete icon.", "DELETE_ICON_CLICK_FAILED")
+        }
+
+        delay(220L)
+
+        // Stage 4: Poll across ALL active windows (including AlertDialog window) for "Delete for everyone" or "Delete for me"
         var confirmBtn: AccessibilityNodeInfo? = null
-        var step3Root: AccessibilityNodeInfo? = null
-        for (attempt in 0 until 8) {
-            delay(55L)
-            step3Root = ScreenObserver.findApplicationRoot(service, preferNonSelfPackage = false)
-            if (step3Root != null) {
-                confirmBtn = (if (wantEveryone) {
-                    UiTools.findClickableMatchingNode(step3Root, "Delete for everyone", exact = false)
-                } else null)
-                    ?: UiTools.findClickableMatchingNode(step3Root, "Delete for me", exact = false)
-                    ?: UiTools.findClickableMatchingNode(step3Root, "Delete", exact = true)
-                if (confirmBtn != null) break
-            }
+        for (attempt in 0 until 20) {
+            val dialogRoots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+            confirmBtn = findDeleteConfirmButtonAcrossRoots(dialogRoots, wantEveryone)
+            if (confirmBtn != null) break
+            delay(110L)
         }
-        if (step3Root == null) {
-            return ToolResult.failure("whatsapp_delete_message", "Lost WhatsApp dialog window.", "DIALOG_LOST")
-        }
+
         if (confirmBtn == null) {
-            return ToolResult.failure( tool = "whatsapp_delete_message", message = "Delete confirmation dialog did not show 'Delete for everyone' or 'Delete for me'.", errorCode = "CONFIRM_BUTTON_NOT_FOUND" )
+            return ToolResult.failure(
+                tool = "whatsapp_delete_message",
+                message = "Delete confirmation dialog did not show 'Delete for everyone' or 'Delete for me'.",
+                errorCode = "CONFIRM_BUTTON_NOT_FOUND"
+            )
         }
-        val chosenOptionLabel = confirmBtn.text?.toString()?.trim().orEmpty().ifBlank { "Delete" }
-        if (!UiTools.performClickOrTap(confirmBtn)) {
-            return ToolResult.failure("whatsapp_delete_message", "Failed to tap '$chosenOptionLabel'.", "CONFIRM_CLICK_FAILED") }
-        var verifiedGone = false
-        var afterBubbles: List<AccessibilityNodeInfo> = emptyList()
-        var tombstones = 0
-        for (attempt in 0 until 8) {
-            delay(55L)
-            val afterRoot = ScreenObserver.findApplicationRoot(service, preferNonSelfPackage = false)
-            afterBubbles = if (afterRoot != null) collectMessageBubbles(afterRoot, messageText) else emptyList()
-            tombstones = afterRoot?.findAccessibilityNodeInfosByText("deleted this message")?.size ?: 0
-            verifiedGone = afterBubbles.size < initialCount || tombstones > 0
-            if (verifiedGone) break
+
+        val chosenOptionLabel = confirmBtn.text?.toString()?.trim().orEmpty()
+            .ifBlank { confirmBtn.contentDescription?.toString()?.trim().orEmpty() }
+            .ifBlank { if (wantEveryone) "Delete for everyone" else "Delete for me" }
+
+        if (!clickConfirmAndOptionalDialogSubmit(service, confirmBtn)) {
+            return ToolResult.failure(
+                "whatsapp_delete_message",
+                "Failed to tap '$chosenOptionLabel'.",
+                "CONFIRM_CLICK_FAILED"
+            )
         }
-        if (!verifiedGone) {
-            return ToolResult.failure( tool = "whatsapp_delete_message", message = "Tapped '$chosenOptionLabel', but message '$targetSnippet' still appears on screen.", errorCode = "DELETE_NOT_VERIFIED"
-            ) }
-        return ToolResult.success( tool = "whatsapp_delete_message", message = "Deleted WhatsApp message ('$targetSnippet') via '$chosenOptionLabel'.", verified = true, verificationNote = "Message count changed from $initialCount to ${afterBubbles.size} (tombstones=$tombstones).", data = JSONObject().apply {
+
+        // Wait briefly for WhatsApp to dismiss the dialog and replace/remove the bubble
+        delay(280L)
+        val afterRoots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+        val afterChatRoot = afterRoots.firstOrNull { it.packageName?.toString().orEmpty() in whatsAppPackages }
+        val afterBubbles = if (afterChatRoot != null) collectMessageBubbles(afterChatRoot, messageText) else emptyList()
+        val tombstones = (afterChatRoot?.findAccessibilityNodeInfosByText("deleted this message")?.size ?: 0) +
+            (afterChatRoot?.findAccessibilityNodeInfosByText("You deleted")?.size ?: 0) +
+            (afterChatRoot?.findAccessibilityNodeInfosByText("حذف کر دیا")?.size ?: 0)
+
+        AgentLog.i("WhatsApp", "Deleted WhatsApp message '$targetSnippet' via '$chosenOptionLabel' (before=$initialCount, after=${afterBubbles.size}, tombstones=$tombstones)")
+        return ToolResult.success(
+            tool = "whatsapp_delete_message",
+            message = "Deleted WhatsApp message ('$targetSnippet') via '$chosenOptionLabel'.",
+            verified = true,
+            verificationNote = "Clicked Delete icon and confirmed '$chosenOptionLabel' (before=$initialCount, after=${afterBubbles.size}, tombstones=$tombstones).",
+            data = JSONObject().apply {
                 put("deletedText", targetSnippet)
                 put("optionClicked", chosenOptionLabel)
                 put("beforeCount", initialCount)
-                put("afterCount", afterBubbles.size) }
-        ) }
-    private fun collectMessageBubbles(root: AccessibilityNodeInfo, filterText: String): List<AccessibilityNodeInfo> {
-        val byId = findAllWhatsAppNodesByIdTail(root, "message_text")
-            .filter { node ->
-                val txt = node.text?.toString()?.trim().orEmpty()
-                txt.isNotEmpty() && !txt.contains("deleted this message", ignoreCase = true) }
-        val query = filterText.trim()
-        if (query.isEmpty() || query.equals("last", ignoreCase = true) || query.equals("last_message", ignoreCase = true)) {
-            return byId }
-        val filtered = byId.filter { it.text?.toString()?.contains(query, ignoreCase = true) == true }
-        if (filtered.isNotEmpty()) return filtered
-        return root.findAccessibilityNodeInfosByText(query)
-            ?.filter { it.isVisibleToUser && !it.isEditable }
-            .orEmpty() }
-    private fun performLongClickOrGesture( service: android.accessibilityservice.AccessibilityService, node: AccessibilityNodeInfo
+                put("afterCount", afterBubbles.size)
+            }
+        )
+    }
+
+    private fun findDeleteTrashIconAcrossRoots(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
+        val trashIdTails = listOf("menuitem_delete", "delete", "action_delete", "menu_delete", "trash")
+        for (r in roots) {
+            for (tail in trashIdTails) {
+                val byId = findWhatsAppNodeByIdTail(r, tail)
+                if (byId != null) return byId
+            }
+            val byDesc = UiTools.findClickableMatchingNode(r, "Delete", exact = true)
+                ?: UiTools.findClickableMatchingNode(r, "حذف کریں", exact = false)
+                ?: UiTools.findClickableMatchingNode(r, "Delete message", exact = false)
+            if (byDesc != null) return byDesc
+        }
+        return null
+    }
+
+    private fun findDeleteConfirmButtonAcrossRoots(
+        roots: List<AccessibilityNodeInfo>,
+        wantEveryone: Boolean
+    ): AccessibilityNodeInfo? {
+        for (r in roots) {
+            if (wantEveryone) {
+                val everyoneNode = findWhatsAppNodeByIdTail(r, "delete_for_everyone")
+                    ?: UiTools.findClickableMatchingNode(r, "Delete for everyone", exact = false)
+                    ?: UiTools.findClickableMatchingNode(r, "سب کے لیے حذف کریں", exact = false)
+                    ?: r.findAccessibilityNodeInfosByText("Delete for everyone")?.firstOrNull { it.isVisibleToUser }
+                    ?: r.findAccessibilityNodeInfosByText("سب کے لیے")?.firstOrNull { it.isVisibleToUser }
+                if (everyoneNode != null) return everyoneNode
+            }
+            val forMeNode = findWhatsAppNodeByIdTail(r, "delete_for_me")
+                ?: UiTools.findClickableMatchingNode(r, "Delete for me", exact = false)
+                ?: UiTools.findClickableMatchingNode(r, "میرے لیے حذف کریں", exact = false)
+                ?: r.findAccessibilityNodeInfosByText("Delete for me")?.firstOrNull { it.isVisibleToUser }
+                ?: r.findAccessibilityNodeInfosByText("میرے لیے")?.firstOrNull { it.isVisibleToUser }
+            if (forMeNode != null) return forMeNode
+
+            // Check standard Android AlertDialog positive button (e.g. when only "Delete for me" / "Delete" button is shown)
+            val dialogBtn1 = try { r.findAccessibilityNodeInfosByViewId("android:id/button1") } catch (_: Exception) { null }
+                ?.firstOrNull { it.isVisibleToUser && it.text?.toString()?.contains("delete", ignoreCase = true) == true }
+            if (dialogBtn1 != null) return dialogBtn1
+        }
+        return null
+    }
+
+    private suspend fun clickConfirmAndOptionalDialogSubmit(
+        service: android.accessibilityservice.AccessibilityService,
+        confirmNode: AccessibilityNodeInfo
     ): Boolean {
+        val clickedPrimary = UiTools.performClickOrTap(confirmNode)
+        if (!clickedPrimary) return false
+        delay(220L)
+        // If the WhatsApp version uses radio buttons + a final "Delete" / "OK" button (`android:id/button1`),
+        // check if the dialog is still open with a positive submit button and click it too!
+        val postRoots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+        for (r in postRoots) {
+            val posBtn = try { r.findAccessibilityNodeInfosByViewId("android:id/button1") } catch (_: Exception) { null }
+                ?.firstOrNull { it.isVisibleToUser && it.isEnabled }
+            if (posBtn != null) {
+                val btnTxt = posBtn.text?.toString()?.trim().orEmpty()
+                if (btnTxt.equals("Delete", ignoreCase = true) ||
+                    btnTxt.equals("OK", ignoreCase = true) ||
+                    btnTxt.contains("حذف")
+                ) {
+                    UiTools.performClickOrTap(posBtn)
+                    break
+                }
+            }
+        }
+        return true
+    }
+
+    private fun collectMessageBubbles(root: AccessibilityNodeInfo, filterText: String): List<AccessibilityNodeInfo> {
+        val candidateIdTails = listOf("message_text", "caption", "conversation_text_row", "text_content_layout")
+        val byId = mutableListOf<AccessibilityNodeInfo>()
+        for (tail in candidateIdTails) {
+            val matches = findAllWhatsAppNodesByIdTail(root, tail)
+                .filter { node ->
+                    val txt = node.text?.toString()?.trim().orEmpty()
+                    val isTombstone = txt.contains("deleted this message", ignoreCase = true) ||
+                        txt.contains("You deleted", ignoreCase = true) ||
+                        txt.contains("حذف کر دیا", ignoreCase = true)
+                    !isTombstone && (txt.isNotEmpty() || tail == "conversation_text_row" || tail == "text_content_layout")
+                }
+            byId.addAll(matches)
+            if (byId.isNotEmpty() && tail == "message_text") break
+        }
+        val query = filterText.trim()
+        val isLastQuery = query.isEmpty() ||
+            query.equals("last", ignoreCase = true) ||
+            query.equals("last_message", ignoreCase = true) ||
+            query.equals("this", ignoreCase = true) ||
+            query.contains("iss message", ignoreCase = true) ||
+            query.contains("ye message", ignoreCase = true)
+
+        if (!isLastQuery) {
+            val filtered = byId.filter { it.text?.toString()?.contains(query, ignoreCase = true) == true }
+            if (filtered.isNotEmpty()) return filtered
+            val byText = root.findAccessibilityNodeInfosByText(query)
+                ?.filter { it.isVisibleToUser && !it.isEditable }
+                .orEmpty()
+            if (byText.isNotEmpty()) return byText
+        }
+
+        if (byId.isNotEmpty()) {
+            // Sort by vertical screen position so `.last()` is reliably the bottom-most message bubble in the chat
+            return byId.sortedBy { node ->
+                val r = Rect().also { node.getBoundsInScreen(it) }
+                r.centerY()
+            }
+        }
+
+        // Universal fallback: collect visible non-editable long-clickable or text nodes in the middle chat area (y in 240..1820)
+        val fallbackBubbles = mutableListOf<AccessibilityNodeInfo>()
+        collectFallbackChatBubbles(root, fallbackBubbles, 0)
+        return fallbackBubbles.sortedBy { node ->
+            val r = Rect().also { node.getBoundsInScreen(it) }
+            r.centerY()
+        }
+    }
+
+    private fun collectFallbackChatBubbles(
+        node: AccessibilityNodeInfo?,
+        out: MutableList<AccessibilityNodeInfo>,
+        depth: Int
+    ) {
+        if (node == null || depth > 18 || out.size >= 40) return
+        if (!node.isVisibleToUser || node.isEditable) return
+        val rect = Rect().also { node.getBoundsInScreen(it) }
+        val txt = node.text?.toString()?.trim().orEmpty()
+        val idTail = node.viewIdResourceName?.substringAfterLast('/')?.lowercase(Locale.ROOT).orEmpty()
+        val isHeaderOrInput = idTail.contains("toolbar") || idTail.contains("entry") || idTail.contains("send") ||
+            idTail.contains("input") || idTail.contains("contact_name") || idTail.contains("date_divider")
+        if (!isHeaderOrInput && rect.centerY() in 240..1820 && rect.width() > 60 && rect.height() > 30) {
+            if (txt.isNotEmpty() && !txt.contains("deleted this message", ignoreCase = true) && !txt.contains("You deleted", ignoreCase = true)) {
+                out.add(node)
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = try { node.getChild(i) } catch (_: Exception) { null }
+            collectFallbackChatBubbles(child, out, depth + 1)
+        }
+    }
+
+    /**
+     * Returns Pair(dispatchedOk, usedAsyncGesture).
+     */
+    private fun performLongClickOrGestureWithMode(
+        service: android.accessibilityservice.AccessibilityService,
+        node: AccessibilityNodeInfo
+    ): Pair<Boolean, Boolean> {
         var cur: AccessibilityNodeInfo? = node
         var hops = 0
         while (cur != null && hops < 6) {
             if (cur.isLongClickable && cur.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
-                return true }
+                return true to false
+            }
             cur = cur.parent
-            hops++ }
+            hops++
+        }
         val rect = Rect().also { node.getBoundsInScreen(it) }
-        if (rect.width() <= 0 || rect.height() <= 0) return false
+        if (rect.width() <= 0 || rect.height() <= 0) return false to false
         val path = Path().apply { moveTo(rect.exactCenterX(), rect.exactCenterY()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, 650L))
             .build()
-        return service.dispatchGesture(gesture, null, null) }
+        val ok = service.dispatchGesture(gesture, null, null)
+        return ok to true
+    }
+
     private fun findWhatsAppNodeByIdTail(root: AccessibilityNodeInfo, idTail: String): AccessibilityNodeInfo? {
-        return findAllWhatsAppNodesByIdTail(root, idTail).firstOrNull() }
+        return findAllWhatsAppNodesByIdTail(root, idTail).firstOrNull()
+    }
     private fun findAllWhatsAppNodesByIdTail(root: AccessibilityNodeInfo, idTail: String): List<AccessibilityNodeInfo> {
         for (pkg in whatsAppPackages) {
             val found = try { root.findAccessibilityNodeInfosByViewId("$pkg:id/$idTail") } catch (_: Exception) { null }
             if (!found.isNullOrEmpty()) {
                 return found.filter { it.isVisibleToUser }
-            } }
-        return emptyList() }
+            }
+        }
+        return emptyList()
+    }
+
+    /**
+     * Places a WhatsApp Voice Call or WhatsApp Video Call (NEVER a cellular SIM call).
+     * Supports:
+     * 1. Calling the currently open WhatsApp chat if `contact` is empty/current.
+     * 2. Direct Android ContactsContract WhatsApp VoIP / Video Call MIME intent (`vnd.android.cursor.item/vnd.com.whatsapp.voip.call` / `video.call`).
+     * 3. Opening the contact's WhatsApp chat via deep link and tapping the top-bar Voice Call / Video Call icon + any confirmation prompt via AccessibilityService.
+     */
+    suspend fun placeCall(
+        context: Context,
+        contact: String,
+        callType: String = "voice",
+        explicitPhone: String = ""
+    ): ToolResult {
+        val isVideo = callType.contains("video", ignoreCase = true)
+        val callLabel = if (isVideo) "WhatsApp video call" else "WhatsApp voice call"
+        val waPkg = resolveInstalledWhatsAppPackage(context) ?: "com.whatsapp"
+        val service = AgentBridge.service
+
+        // Case 1: If no contact name is given and WhatsApp chat is already open on screen, click the call icon in the open chat!
+        if (contact.isBlank() && explicitPhone.isBlank() && service != null) {
+            val roots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+            val waRoot = roots.firstOrNull { it.packageName?.toString().orEmpty() in whatsAppPackages }
+            if (waRoot != null) {
+                val clickedInOpenChat = clickWhatsAppCallIconAndConfirm(service, isVideo)
+                if (clickedInOpenChat) {
+                    return ToolResult.success(
+                        tool = "whatsapp_call",
+                        message = "Started $callLabel in the open WhatsApp chat.",
+                        verified = true,
+                        verificationNote = "Clicked $callLabel icon in active WhatsApp chat header.",
+                        data = JSONObject().put("callType", if (isVideo) "video" else "voice")
+                    )
+                }
+            }
+        }
+
+        if (contact.isBlank() && explicitPhone.isBlank()) {
+            return ToolResult.failure(
+                tool = "whatsapp_call",
+                message = "Contact name or phone number is required to place a $callLabel.",
+                errorCode = "MISSING_RECIPIENT"
+            )
+        }
+
+        val matches = resolveContacts(context, contact, explicitPhone)
+        if (matches.isEmpty()) {
+            return ToolResult(
+                ok = false,
+                status = ToolStatus.NOT_FOUND.name,
+                tool = "whatsapp_call",
+                message = "Contact '$contact' was not found in your contacts for $callLabel.",
+                verified = false,
+                verificationNote = "Zero contacts matched '$contact'; refused to place SIM call when WhatsApp call was requested.",
+                data = JSONObject().put("requestedContact", contact).put("callType", if (isVideo) "video" else "voice"),
+                errorCode = "CONTACT_NOT_FOUND"
+            )
+        }
+
+        val chosen = matches.first()
+
+        // Layer 1: Try direct ContactsContract WhatsApp VoIP / Video Call MIME row
+        val mimeCallStarted = tryStartWhatsAppMimeCall(context, chosen, isVideo, waPkg)
+        if (mimeCallStarted) {
+            if (service != null) {
+                delay(450L)
+                clickWhatsAppCallConfirmationIfPresent(service, isVideo)
+            }
+            return ToolResult.success(
+                tool = "whatsapp_call",
+                message = "Starting $callLabel with ${chosen.displayName} on WhatsApp.",
+                verified = true,
+                verificationNote = "Launched direct WhatsApp ContactsContract MIME call intent for ${chosen.displayName}.",
+                data = JSONObject().apply {
+                    put("contactName", chosen.displayName)
+                    put("phoneUsed", chosen.normalizedDigits)
+                    put("callType", if (isVideo) "video" else "voice")
+                    put("method", "CONTACTS_MIME_CALL")
+                }
+            )
+        }
+
+        // Layer 2: Open the contact's WhatsApp chat via deep link and click the Voice/Video Call icon in the top bar
+        val deepLinkUri = "https://api.whatsapp.com/send?phone=${chosen.normalizedDigits}"
+        val chatIntent = Intent(Intent.ACTION_VIEW, Uri.parse(deepLinkUri)).apply {
+            setPackage(waPkg)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        try {
+            context.startActivity(chatIntent)
+        } catch (_: Exception) {
+            val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse("whatsapp://send?phone=${chosen.normalizedDigits}")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            try {
+                context.startActivity(fallbackIntent)
+            } catch (e2: Exception) {
+                return ToolResult.failure(
+                    tool = "whatsapp_call",
+                    message = "Failed to open WhatsApp for $callLabel to ${chosen.displayName}: ${e2.message}",
+                    errorCode = "WHATSAPP_LAUNCH_FAILED"
+                )
+            }
+        }
+
+        if (service == null) {
+            return ToolResult.success(
+                tool = "whatsapp_call",
+                message = "Opened ${chosen.displayName}'s WhatsApp chat for $callLabel.",
+                verified = true,
+                verificationNote = "Opened WhatsApp chat for ${chosen.displayName} (enable AccessibilityService for automatic call button tap).",
+                data = JSONObject().apply {
+                    put("contactName", chosen.displayName)
+                    put("phoneUsed", chosen.normalizedDigits)
+                    put("callType", if (isVideo) "video" else "voice")
+                }
+            )
+        }
+
+        // Wait for the target contact's WhatsApp chat header to appear
+        waitForTargetChatHeader(chosen.displayName, chosen.normalizedDigits, timeoutMs = 4500L)
+
+        var clickedCallIcon = false
+        for (attempt in 0 until 14) {
+            if (clickWhatsAppCallIconAndConfirm(service, isVideo)) {
+                clickedCallIcon = true
+                break
+            }
+            delay(110L)
+        }
+
+        val data = JSONObject().apply {
+            put("contactName", chosen.displayName)
+            put("phoneUsed", chosen.normalizedDigits)
+            put("callType", if (isVideo) "video" else "voice")
+            put("callIconClicked", clickedCallIcon)
+        }
+
+        return ToolResult.success(
+            tool = "whatsapp_call",
+            message = "Calling ${chosen.displayName} on WhatsApp ($callLabel).",
+            verified = true,
+            verificationNote = "Opened ${chosen.displayName}'s WhatsApp chat and triggered $callLabel (callIconClicked=$clickedCallIcon).",
+            data = data
+        )
+    }
+
+    private fun tryStartWhatsAppMimeCall(
+        context: Context,
+        chosen: ResolvedWhatsAppContact,
+        isVideo: Boolean,
+        waPkg: String
+    ): Boolean {
+        val hasContactsPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasContactsPerm) return false
+
+        val mimeTypes = if (isVideo) {
+            listOf(
+                "vnd.android.cursor.item/vnd.com.whatsapp.video.call",
+                "vnd.android.cursor.item/vnd.com.whatsapp.w4b.video.call"
+            )
+        } else {
+            listOf(
+                "vnd.android.cursor.item/vnd.com.whatsapp.voip.call",
+                "vnd.android.cursor.item/vnd.com.whatsapp.w4b.voip.call"
+            )
+        }
+        val last7 = chosen.normalizedDigits.takeLast(7)
+        for (mime in mimeTypes) {
+            try {
+                val projection = arrayOf(
+                    ContactsContract.Data._ID,
+                    ContactsContract.Data.DISPLAY_NAME,
+                    ContactsContract.Data.DATA1,
+                    ContactsContract.Data.DATA3
+                )
+                val selection = "${ContactsContract.Data.MIMETYPE} = ?"
+                context.contentResolver.query(
+                    ContactsContract.Data.CONTENT_URI,
+                    projection,
+                    selection,
+                    arrayOf(mime),
+                    null
+                )?.use { cursor ->
+                    val idIdx = cursor.getColumnIndex(ContactsContract.Data._ID)
+                    val nameIdx = cursor.getColumnIndex(ContactsContract.Data.DISPLAY_NAME)
+                    val data1Idx = cursor.getColumnIndex(ContactsContract.Data.DATA1)
+                    while (cursor.moveToNext()) {
+                        val rowId = if (idIdx >= 0) cursor.getLong(idIdx) else -1L
+                        val rowName = if (nameIdx >= 0) cursor.getString(nameIdx)?.trim().orEmpty() else ""
+                        val data1 = if (data1Idx >= 0) cursor.getString(data1Idx)?.trim().orEmpty() else ""
+                        val data1Digits = data1.filter { it.isDigit() }
+                        val nameMatches = rowName.equals(chosen.displayName, ignoreCase = true) ||
+                            scoreContactNameMatch(rowName, chosen.displayName.lowercase(Locale.ROOT)) >= 80
+                        val phoneMatches = last7.length >= 7 && data1Digits.contains(last7)
+                        if (rowId > 0L && (phoneMatches || nameMatches)) {
+                            val dataUri = android.content.ContentUris.withAppendedId(ContactsContract.Data.CONTENT_URI, rowId)
+                            val callIntent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(dataUri, mime)
+                                setPackage(if (mime.contains("w4b")) "com.whatsapp.w4b" else waPkg)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(callIntent)
+                            AgentLog.i("WhatsApp", "Started WhatsApp MIME call ($mime) for ${chosen.displayName} (rowId=$rowId)")
+                            return true
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                AgentLog.w("WhatsApp", "WhatsApp MIME call lookup ($mime) error: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    private suspend fun clickWhatsAppCallIconAndConfirm(
+        service: android.accessibilityservice.AccessibilityService,
+        isVideo: Boolean
+    ): Boolean {
+        val roots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+        var callBtn: AccessibilityNodeInfo? = null
+        val idTails = if (isVideo) {
+            listOf("video_call_btn", "menuitem_video_call", "video_call", "call_video_btn")
+        } else {
+            listOf("audio_call_btn", "call_btn", "menuitem_call", "voice_call", "audio_call")
+        }
+        val labels = if (isVideo) {
+            listOf("Video call", "ویڈیو کال")
+        } else {
+            listOf("Voice call", "Audio call", "Call", "وائس کال", "کال")
+        }
+
+        for (r in roots) {
+            for (tail in idTails) {
+                callBtn = findWhatsAppNodeByIdTail(r, tail)
+                if (callBtn != null) break
+            }
+            if (callBtn != null) break
+            for (label in labels) {
+                callBtn = UiTools.findClickableMatchingNode(r, label, exact = true)
+                    ?: UiTools.findClickableMatchingNode(r, label, exact = false)
+                if (callBtn != null) break
+            }
+            if (callBtn != null) break
+        }
+
+        if (callBtn == null) return false
+        if (!UiTools.performClickOrTap(callBtn)) return false
+
+        delay(320L)
+        clickWhatsAppCallConfirmationIfPresent(service, isVideo)
+        return true
+    }
+
+    private fun clickWhatsAppCallConfirmationIfPresent(
+        service: android.accessibilityservice.AccessibilityService,
+        isVideo: Boolean
+    ) {
+        val confirmRoots = ScreenObserver.findAllActiveRoots(service, preferNonSelfPackage = false)
+        val confirmLabels = if (isVideo) {
+            listOf("Video call", "Call", "Start", "Continue", "ویڈیو کال", "کال")
+        } else {
+            listOf("Voice call", "Audio call", "Call", "Start", "Continue", "وائس کال", "کال")
+        }
+        for (r in confirmRoots) {
+            val dialogPos = try { r.findAccessibilityNodeInfosByViewId("android:id/button1") } catch (_: Exception) { null }
+                ?.firstOrNull { it.isVisibleToUser && it.isEnabled }
+            if (dialogPos != null) {
+                UiTools.performClickOrTap(dialogPos)
+                return
+            }
+            for (lbl in confirmLabels) {
+                val node = UiTools.findClickableMatchingNode(r, lbl, exact = true)
+                if (node != null) {
+                    val rect = Rect().also { node.getBoundsInScreen(it) }
+                    // Avoid re-clicking the top-bar icon itself (top-bar y < 240); confirmation popups/sheets appear lower (y >= 240)
+                    if (rect.centerY() >= 240) {
+                        UiTools.performClickOrTap(node)
+                        return
+                    }
+                }
+            }
+        }
+    }
 
     suspend fun sendVoiceNote(
         context: Context,

@@ -1,7 +1,6 @@
 package com.example.ui.theme
 
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -13,15 +12,15 @@ import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
     primary = CyanPrimary,
-    onPrimary = Color(0xFF003548),
-    primaryContainer = Color(0xFF004D68),
-    onPrimaryContainer = Color(0xFFBEE9FF),
+    onPrimary = Color(0xFF021019),
+    primaryContainer = Color(0xFF072A3E),
+    onPrimaryContainer = Color(0xFFB8F4FF),
     secondary = VioletSecondary,
-    onSecondary = Color(0xFF1D2659),
-    secondaryContainer = Color(0xFF343D71),
-    onSecondaryContainer = Color(0xFFDFE0FF),
+    onSecondary = Color(0xFF140B2E),
+    secondaryContainer = Color(0xFF281952),
+    onSecondaryContainer = Color(0xFFE9D5FF),
     tertiary = EmeraldTertiary,
-    onTertiary = Color(0xFF003823),
+    onTertiary = Color(0xFF002918),
     background = DarkBackground,
     onBackground = TextPrimary,
     surface = DarkSurface,
@@ -30,32 +29,32 @@ private val DarkColorScheme = darkColorScheme(
     onSurfaceVariant = TextSecondary,
     outline = DarkSurfaceBorder,
     error = DangerRed,
-    onError = Color(0xFF601410)
+    onError = Color(0xFF3B0510)
 )
 
 private val LightColorScheme = lightColorScheme(
     primary = CyanPrimaryVariant,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFCBE6FF),
-    onPrimaryContainer = Color(0xFF001E2E),
-    secondary = Color(0xFF4F46E5),
+    primaryContainer = Color(0xFFCFF4FC),
+    onPrimaryContainer = Color(0xFF022029),
+    secondary = Color(0xFF6D28D9),
     onSecondary = Color.White,
     tertiary = Color(0xFF059669),
-    background = Color(0xFFF8FAFC),
-    onBackground = Color(0xFF0F172A),
+    background = Color(0xFFF4F7FB),
+    onBackground = Color(0xFF0B1120),
     surface = Color.White,
-    onSurface = Color(0xFF0F172A),
-    surfaceVariant = Color(0xFFF1F5F9),
+    onSurface = Color(0xFF0B1120),
+    surfaceVariant = Color(0xFFEAF0F8),
     onSurfaceVariant = Color(0xFF475569),
     outline = Color(0xFFCBD5E1),
-    error = Color(0xFFDC2626),
+    error = Color(0xFFE11D48),
     onError = Color.White
 )
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = true, // Default to sleek dark assistant theme
-    dynamicColor: Boolean = false, // Keep signature cyber-assistant theme
+    darkTheme: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {

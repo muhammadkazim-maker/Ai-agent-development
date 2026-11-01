@@ -18,7 +18,10 @@ import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -66,16 +69,15 @@ import com.example.ui.screens.SettingsHubScreen
 import com.example.ui.theme.CyanPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkSurface
+import com.example.ui.theme.DarkSurfaceBorder
+import com.example.ui.theme.EmeraldTertiary
+import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.theme.SpaceGroteskFontFamily
 import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.VoiceAssistantViewModel
 
-/**
- * Revamped navigation destinations:
- * History, Routines, and Memory (Vocabulary) tabs have been completely removed from the UI.
- * Their engines (CommandHistoryRepository, RoutineRepository, MemoryBankRepository, StandingRulesEngine)
- * continue to run 100% silently in the backend.
- */
 enum class OmniMainDestination(
     val label: String,
     val icon: ImageVector,
@@ -94,7 +96,6 @@ class MainActivity : ComponentActivity() {
         com.omnivoice.agentfix.AgentBridge.appContext = applicationContext
         enableEdgeToEdge()
 
-        // Screen Wake-Lock persistence so OmniVoice stays awake during voice sessions
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         JarvisHandsFreeEngine.init(applicationContext)
 
@@ -202,15 +203,12 @@ fun MainScreen(
                 .padding(innerPadding)
                 .testTag("omnivoice_revamped_root")
         ) {
-            // Full-screen Revamped Jarvis Neural OS Interface (Zero Bottom-Bar Clutter;
-            // History, Routines & Memory run 100% silently in the backend)
             JarvisStageFlowScreen(
                 viewModel = viewModel,
                 onEnterPipMode = onEnterPipMode,
                 onOpenAdvancedSettingsHub = { showFullSettingsHub = true }
             )
 
-            // Optional Full System Configuration Overlay when user requests advanced settings
             AnimatedVisibility(
                 visible = showFullSettingsHub,
                 enter = fadeIn(),
@@ -225,41 +223,63 @@ fun MainScreen(
                 ) {
                     Surface(
                         color = DarkSurface,
+                        border = BorderStroke(1.dp, DarkSurfaceBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            IconButton(
-                                onClick = { showFullSettingsHub = false },
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .background(CyanPrimary.copy(alpha = 0.14f), CircleShape)
-                                    .testTag("btn_back_from_settings_hub")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Back to Neural Core",
-                                    tint = CyanPrimary
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { showFullSettingsHub = false },
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .background(CyanPrimary.copy(alpha = 0.12f), CircleShape)
+                                        .border(1.dp, CyanPrimary.copy(alpha = 0.35f), CircleShape)
+                                        .testTag("btn_back_from_settings_hub")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back to Neural Core",
+                                        tint = CyanPrimary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "AETHER-X // SYSTEM MATRIX",
+                                        color = EmeraldTertiary,
+                                        fontSize = 10.sp,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        letterSpacing = 1.4.sp
+                                    )
+                                    Text(
+                                        text = "Neural Core & OS Configuration",
+                                        color = TextPrimary,
+                                        fontSize = 16.sp,
+                                        fontFamily = SpaceGroteskFontFamily,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
+
+                            Surface(
+                                color = EmeraldTertiary.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(20.dp),
+                                border = BorderStroke(1.dp, EmeraldTertiary.copy(alpha = 0.45f))
+                            ) {
                                 Text(
-                                    text = "JARVIS NEURAL CONFIGURATION",
-                                    color = CyanPrimary,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    letterSpacing = 1.5.sp
-                                )
-                                Text(
-                                    text = "Voice, Gestures, Security Vault & Diagnostics",
-                                    color = TextPrimary,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Bold
+                                    text = "KERNEL v4.8",
+                                    color = EmeraldTertiary,
+                                    fontSize = 10.sp,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                 )
                             }
                         }

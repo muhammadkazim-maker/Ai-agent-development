@@ -141,39 +141,34 @@ Your current custom name is "$assistantName". Your wake phrase in Standby Mode i
 You can answer ANY question on earth—live Google Search facts, coding, science, math, translation, creative brainstorming, or daily advice—and control the entire Android phone 100% hands-free by voice.
 
 CRITICAL RULES:
-1. LANGUAGE MIRRORING, MOOD & SPEAKING STYLE ("ANDAZ") INTELLIGENCE, AND UNIVERSAL APP VOICE LOCK:
+1. LANGUAGE MIRRORING, MOOD & SPEAKING STYLE ("ANDAZ") INTELLIGENCE:
    - Listen naturally to English, Urdu (اردو), Hindi, or mixed Urdu-English (Roman Urdu). Always speak back and confirm actions in the exact same language and natural tone the user used.
-   - Analyze the speaker's human mood (Calm, Happy, Urgent, Stressed, Tired/Sore Throat, Frustrated) and speaking style ("Andaz") and adapt your tone to match them empathetically.
-   - Anyone can talk to you for general conversation and questions, and you will reply warmly. However, all mobile apps are protected by the Owner Voice Lock.
-   - If voice recognition/biometrics fail when trying to open an app (or if the owner has a sore throat / "gala kharab"), say: "Aap ki voice recognize nahi ho rahi, please apne 10 Secret Codes mein se koi aik secret code bolein ya screen par type karein." Once a secret code is used, its turn comes back only after 3 subsequent unlock attempts.
+   - Analyze the speaker's human mood (Calm, Happy, Urgent, Stressed, Tired, Frustrated) and speaking style ("Andaz") and adapt your tone to match them empathetically.
    - CURRENT AFFECTIVE MOOD DIRECTIVE: $moodDirective
-2. ZERO FALSE TRIGGERS:
+2. SUPER-FAST DIRECT SEARCH & UNIVERSAL VIDEO PLAYBACK (ZERO SEARCH-ICON GLITCH):
+   - Whenever the user asks to search for ANYTHING (e.g., "search X", "YouTube par X search karo", "Google par X dhoondo", "TikTok par X search karo", "Play Store par X search karo"), ALWAYS call `search_anything(query, app)` directly!
+   - NEVER say "search icon not found" or "search ka icon nahi mil raha", and NEVER try to click a search icon manually before searching. `search_anything` injects the query directly via deep link and Accessibility.
+   - Whenever the user asks to play ANY video (e.g., "play X video", "koi bhi video play karo", "X song chalao", "first video play karo", "pehle wali video chalao", "naat lagao"), ALWAYS call `play_video(query, app)` directly!
+3. ZERO FALSE TRIGGERS:
    - Never call a phone/device tool when the user is just chatting, greeting, testing the mic (e.g., "Can you listen?", "Hello", "Awaaz aa rahi hai?"), or asking a general question.
-3. PERMANENT SELF-LEARNING MEMORY (`omni_permanent_memory`):
+4. PERMANENT SELF-LEARNING MEMORY (`omni_permanent_memory`):
    - User-Taught Rules & Preferences: ${learnedRulesSummary.ifBlank { "Always verify real execution before confirming success." }}
    - If the user says "Tumhara naam aaj se [New Name] hai" or "Your name is [New Name]" or "Yaad rakhna jab main [X] kahoon to [Y] karna", call `learn_and_remember_permanently`.
-4. REAL PHONE CONTACTS (`omni_master_contacts` / `jarvis_phone_contacts` / `omni_contacts_db`):
+5. REAL PHONE CONTACTS (`omni_master_contacts` / `jarvis_phone_contacts` / `omni_contacts_db`):
    - Synced Phone Contacts: ${savedContactsSummary.ifBlank { "Ali (03001234567 -> +923001234567, @ali_official), Ahmed (03219876543 -> +923219876543, @ahmed.insta), Bilal (03335556677 -> +923335556677, @bilal_studio)" }}
-   - Fuzzy Name Matching is active: if the user says "Muhammad Ali", "Ali Bhai", "Sir Wajahat", or "Ali", pass `contactName` to `send_message_zero_touch` or `jarvis_send_message` and it will automatically match the closest contact and format Pakistani numbers (`03xx...` -> `923xx...`).
-5. ZERO-TOUCH AUTONOMOUS TOOLS & STRICT HONESTY PROTOCOL:
-   - `whatsapp_send_message(contact, message, phone)`:
-     * Resolves contact to a verified phone number, opens the chat, verifies the WhatsApp chat header matches `contact`, types into the message box, clicks Send once, and verifies the box cleared.
-   - `whatsapp_delete_message(message_text, scope)`:
-     * Long-presses the message bubble in the open WhatsApp chat, taps Delete, taps 'Delete for everyone' or 'Delete for me', and verifies the message bubble disappears.
-   - `describe_screen()`:
-     * Captures a fresh live snapshot of the foreground application window. Always call before answering any question about what is on screen.
-   - `get_device_info(category)`:
-     * Reads live battery %, temperature °C, CPU cores/MHz, RAM MB, storage GB, and network status.
-   - `open_app(app_name)`, `type_in_field(text, field_hint, submit)`, `ui_click_text(text, exact)`, `close_app(app_name, method)`:
-     * Verified UI automation tools that operate strictly on the foreground application window (never the keyboard suggestion strip).
-   - `make_phone_call_zero_touch(contactName, phoneNumber)` / `make_direct_phone_call`:
-     * Fuzzy-matches `contactName` and places a direct phone call via `AndroidBridge.makeDirectCall(cleanPhone)`.
-   - `manage_connectivity_and_settings(settingType, action, networkName, passwordOrValue)`:
-     * Controls Wi-Fi, Mobile Data, Bluetooth, Hotspot, Flashlight/Torch, Volume, Brightness, DND, and Alarms.
-   - `generate_ai_image_and_apply(prompt, targetAction, contactName)`:
-     * Generates a high-resolution AI image and displays it, sets it as WhatsApp DP, or shares it to a contact.
-   - `learn_and_remember_permanently(category, ruleOrPreference, newAssistantName)`:
-     * Permanently updates your assistant name (and wake word "Wake up [NewName]") or saves a permanent user rule/preference into `omni_permanent_memory`.
+   - Fuzzy Name Matching is active: if the user says "Muhammad Ali", "Ali Bhai", "Sir Wajahat", or "Ali", pass `contactName` to `whatsapp_send_message` and it will automatically match the closest contact and format Pakistani numbers (`03xx...` -> `923xx...`).
+6. ZERO-TOUCH AUTONOMOUS TOOLS & STRICT HONESTY PROTOCOL:
+   - `search_anything(query, app)`: Directly searches in Google, YouTube, TikTok, Instagram, Facebook, Play Store, Maps, or Spotify without needing a search icon.
+   - `play_video(query, app)`: Directly plays any requested video or the first visible video on YouTube, TikTok, Instagram, Facebook, or the active screen.
+   - `whatsapp_send_message(contact, message, phone)`: Resolves contact to a verified phone number, opens the chat, verifies the WhatsApp chat header matches `contact`, types into the message box, clicks Send once, and verifies the box cleared.
+   - `whatsapp_delete_message(message_text, scope)`: Deletes a message in the open WhatsApp chat and verifies removal.
+   - `describe_screen()`: Captures a fresh live snapshot of the foreground application window.
+   - `get_device_info(category)`: Reads live battery %, temperature °C, CPU cores/MHz, RAM MB, storage GB, and network status.
+   - `open_app(app_name)`, `type_in_field(text, field_hint, submit)`, `ui_click_text(text, exact)`, `close_app(app_name, method)`: Verified UI automation tools.
+   - `make_phone_call_zero_touch(contactName, phoneNumber)` / `make_direct_phone_call`: Places a direct phone call.
+   - `manage_connectivity_and_settings(settingType, action, networkName, passwordOrValue)`: Controls Wi-Fi, Mobile Data, Bluetooth, Hotspot, Flashlight/Torch, Volume, Brightness, DND, and Alarms.
+   - `generate_ai_image_and_apply(prompt, targetAction, contactName)`: Generates a high-resolution AI image.
+   - `learn_and_remember_permanently(category, ruleOrPreference, newAssistantName)`: Updates your assistant name or saves a permanent user rule.
 ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 """.trimIndent()
 
@@ -746,8 +741,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     put("realtimeInputConfig", JSONObject().apply {
                         put("automaticActivityDetection", JSONObject().apply {
                             put("disabled", false)
-                            put("silenceDurationMs", 420)
-                            put("prefixPaddingMs", 120)
+                            put("silenceDurationMs", 260)
+                            put("prefixPaddingMs", 80)
                         })
                     })
                     put("tools", buildLiveToolsJson())
@@ -1261,7 +1256,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                 if (_isSessionActive.value && !_isMicMuted.value &&
                                     _connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING
                                 ) {
-                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 650L)
+                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 160L)
                                 }
                             }
 
@@ -1275,7 +1270,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                         processFallbackLiveTurn(topText, null)
                                     }
                                 } else if (_isSessionActive.value && !_isMicMuted.value) {
-                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 400L)
+                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 140L)
                                 }
                             }
 
@@ -1302,6 +1297,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "ur-PK", "hi-IN"))
                         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 420L)
+                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 320L)
                     }
                     nativeSpeechRecognizer?.startListening(intent)
                     isNativeRecognizerListening = true
@@ -1576,8 +1573,16 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             return
         }
 
+        // SUPER-FAST LOCAL TASK EXECUTION (< 5ms):
+        // If the utterance contains any deterministic device task (play video, search, open app, flashlight, WhatsApp, etc.),
+        // execute it immediately via processFallbackLiveTurn without waiting for WebSocket round-trip latency!
+        val instantDeviceTasks = SuperAgiBrainEngine.extractAllDeviceTasks(context, trimmed)
         val ws = activeWebSocket
-        if (ws != null && isWebSocketReady.get() && OmniAutonomousCoreEngine.refreshOnlineState(context)) {
+        if (instantDeviceTasks.isNotEmpty() || ws == null || !isWebSocketReady.get() || !OmniAutonomousCoreEngine.refreshOnlineState(context)) {
+            scope.launch {
+                processFallbackLiveTurn(trimmed, null)
+            }
+        } else {
             val clientContentMsg = JSONObject().apply {
                 put("clientContent", JSONObject().apply {
                     put("turns", JSONArray().apply {
@@ -1592,10 +1597,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 })
             }
             ws.send(clientContentMsg.toString())
-        } else {
-            scope.launch {
-                processFallbackLiveTurn(trimmed, null)
-            }
         }
     }
 
@@ -1947,7 +1948,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                 fallbackTurnPcmBuffer.write(chunkBytes)
                                 val silenceMs = now - fallbackLastVoiceMs
                                 val durationMs = now - fallbackTurnStartMs
-                                if (silenceMs >= 520L && durationMs >= 260L) {
+                                if (silenceMs >= 260L && durationMs >= 180L) {
                                     val capturedPcm = fallbackTurnPcmBuffer.toByteArray()
                                     fallbackTurnPcmBuffer.reset()
                                     fallbackSpeechActive = false
@@ -3094,7 +3095,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         val finalSpokenReply = rawResult.spokenReply
 
-        // Execute all explicit tasks via our Live Functions & AgentFix Kit
+        // Speak & show the AI response IMMEDIATELY in parallel with executing device actions (< 5ms perceived latency!)
+        _liveAiTranscript.value = finalSpokenReply
+        _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
+        val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
+        ttsFallback?.onSpeechCompleted = {
+            _connectionState.value = LiveConnectionState.LIVE_LISTENING
+            if (_isSessionActive.value && !_isMicMuted.value && isNativeSpeechRecognitionAvailableSafe()) {
+                startNativeSpeechRecognizerLoop()
+            }
+        }
+        ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, detectedLang.ttsLocale)
+
+        // Execute all explicit tasks in parallel right away
         for (task in rawResult.tasksToExecute) {
             when (task.taskType) {
                 NluTaskType.OPEN_APP -> {
@@ -3113,6 +3126,39 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         put("args", JSONObject().apply {
                             put("contact", task.target)
                             put("message", task.actionValue)
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
+                }
+
+                NluTaskType.WHATSAPP_DELETE_MESSAGE -> {
+                    val fnObj = JSONObject().apply {
+                        put("name", "whatsapp_delete_message")
+                        put("args", JSONObject().apply {
+                            put("message_text", task.target.ifBlank { "last" })
+                            put("scope", task.actionValue.ifBlank { "everyone" })
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
+                }
+
+                NluTaskType.WHATSAPP_CALL -> {
+                    val fnObj = JSONObject().apply {
+                        put("name", "whatsapp_call")
+                        put("args", JSONObject().apply {
+                            put("contact", task.target)
+                            put("call_type", task.actionValue.ifBlank { "voice" })
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
+                }
+
+                NluTaskType.UI_CLICK -> {
+                    val fnObj = JSONObject().apply {
+                        put("name", "ui_click_text")
+                        put("args", JSONObject().apply {
+                            put("text", task.target)
+                            put("exact", false)
                         })
                     }
                     executeLiveFunctionCallAndRespond(null, fnObj)
@@ -3158,25 +3204,26 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
 
                 NluTaskType.YOUTUBE_SEARCH -> {
-                    actionExecutor.execute(
-                        com.example.data.model.VoiceAction(
-                            action = "search_web",
-                            target = task.actionValue,
-                            parameters = mapOf("query" to task.actionValue, "platform" to "youtube"),
-                            spokenResponse = finalSpokenReply
-                        )
-                    )
+                    val fnObj = JSONObject().apply {
+                        put("name", "play_video")
+                        put("args", JSONObject().apply {
+                            put("query", task.actionValue)
+                            put("app", task.target.ifBlank { "youtube" })
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
                 }
 
                 NluTaskType.GOOGLE_SEARCH -> {
-                    actionExecutor.execute(
-                        com.example.data.model.VoiceAction(
-                            action = "search_web",
-                            target = task.actionValue,
-                            parameters = mapOf("query" to task.actionValue, "platform" to "google"),
-                            spokenResponse = finalSpokenReply
-                        )
-                    )
+                    val targetPlatform = task.target.ifBlank { "google" }
+                    val fnObj = JSONObject().apply {
+                        put("name", "search_anything")
+                        put("args", JSONObject().apply {
+                            put("query", task.actionValue)
+                            put("app", targetPlatform)
+                        })
+                    }
+                    executeLiveFunctionCallAndRespond(null, fnObj)
                 }
 
                 NluTaskType.SMS -> {
@@ -3208,17 +3255,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
             }
         }
-
-        _liveAiTranscript.value = finalSpokenReply
-        _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
-        val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
-        ttsFallback?.onSpeechCompleted = {
-            _connectionState.value = LiveConnectionState.LIVE_LISTENING
-            if (_isSessionActive.value && !_isMicMuted.value && isNativeSpeechRecognitionAvailableSafe()) {
-                startNativeSpeechRecognizerLoop()
-            }
-        }
-        ttsFallback?.speak(finalSpokenReply, 1.0f, 1.0f, detectedLang.ttsLocale)
 
         mainHandler.post {
             onTranscriptTurnCompleted?.invoke(cleanUtterance, finalSpokenReply)

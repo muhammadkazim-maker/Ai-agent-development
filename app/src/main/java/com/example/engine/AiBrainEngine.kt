@@ -56,16 +56,22 @@ class AiBrainEngine(
         val importedModelPath: StateFlow<String?> = _importedModelPath.asStateFlow()
 
         val ALLOWED_TOOL_ACTIONS = setOf(
-            "general_chat", "call", "answer_call", "end_call", "toggle_speaker",
-            "send_sms", "send_whatsapp", "set_alarm", "set_timer", "toggle_flashlight",
+            "general_chat", "call", "make_call", "make_phone_call", "answer_call", "end_call", "toggle_speaker",
+            "send_sms", "send_whatsapp", "send_whatsapp_message", "set_alarm", "set_timer", "toggle_flashlight",
             "toggle_battery_saver", "adjust_volume", "toggle_wifi", "toggle_bluetooth",
             "toggle_hotspot", "toggle_mobile_data", "toggle_airplane_mode", "toggle_dnd",
-            "set_brightness", "read_screen", "take_screenshot", "take_photo", "navigate",
+            "set_brightness", "read_screen", "take_screenshot", "take_photo", "open_camera", "record_video", "navigate",
             "media_control", "read_notifications", "find_phone", "unlock_device",
-            "lock_device", "open_app", "search_web", "teach_word",
-            "save_conditional_rule", "execute_multi_step_plan",
+            "lock_device", "open_app", "open_and_navigate_app", "search_web", "google_search",
+            "execute_direct_search", "inject_search", "search_input", "search_anything",
+            "play_video", "youtube_search", "play_youtube",
+            "ui_click", "ui_scroll", "ui_input", "control_device_system",
+            "OpenApp", "SendWhatsApp", "MakeCall", "SystemControl", "WebSearch",
+            "teach_word", "save_conditional_rule", "execute_multi_step_plan",
             "describe_screen", "get_device_info", "type_in_field", "ui_click_text",
-            "whatsapp_send_message", "whatsapp_delete_message", "close_app"
+            "whatsapp_send_message", "whatsapp_delete_message", "close_app",
+            "whatsapp_send_voice_note", "perform_gesture", "analyze_screen_visual",
+            "handle_phone_call", "teach_standing_rule", "list_standing_rules", "remove_standing_rule"
         )
 
         /**
@@ -236,6 +242,113 @@ class AiBrainEngine(
             Log.d(TAG, "Fast-path deterministic engine resolved command in <1ms (${activeFastTier.displayName}): ${fastOfflineAction.action} -> ${fastOfflineAction.target}")
             return@withContext Pair(
                 validateToolActionSchema(fastOfflineAction, activeFastTier, moodEstimate),
+                detectedLang
+            )
+        }
+
+        // SUPER-AGI FAST PATH: Check SuperAgiBrainEngine colloquial Urdu/Roman Urdu/English task extractor (<2ms)
+        val superAgiTasks = SuperAgiBrainEngine.extractAllDeviceTasks(
+            context = com.omnivoice.agentfix.AgentBridge.appContext,
+            rawText = trimmed
+        )
+        if (superAgiTasks.isNotEmpty()) {
+            val nluLang = when (detectedLang) {
+                DetectedLanguage.URDU_NASTALIQ -> NluLanguageEnum.URDU_SCRIPT
+                DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED -> NluLanguageEnum.ROMAN_URDU_MIXED
+                DetectedLanguage.ENGLISH -> NluLanguageEnum.ENGLISH
+            }
+            val spokenSummary = SuperAgiBrainEngine.buildSpokenSummaryForTasks(superAgiTasks, nluLang)
+            val mappedAction = if (superAgiTasks.size > 1) {
+                VoiceAction(
+                    action = "multi_step",
+                    target = trimmed,
+                    spokenResponse = spokenSummary,
+                    confirmationRequired = false
+                )
+            } else {
+                val task = superAgiTasks.first()
+                when (task.taskType) {
+                    NluTaskType.YOUTUBE_SEARCH -> VoiceAction(
+                        action = "play_video",
+                        target = task.actionValue,
+                        parameters = mapOf("query" to task.actionValue, "platform" to task.target),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.GOOGLE_SEARCH -> VoiceAction(
+                        action = "search_web",
+                        target = task.actionValue,
+                        parameters = mapOf("query" to task.actionValue, "platform" to task.target),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.OPEN_APP -> VoiceAction(
+                        action = "open_app",
+                        target = task.target,
+                        parameters = mapOf("app_name" to task.target),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.FLASHLIGHT -> VoiceAction(
+                        action = "toggle_flashlight",
+                        target = task.actionValue.lowercase(),
+                        parameters = mapOf("state" to task.actionValue.lowercase()),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.WHATSAPP_MESSAGE -> VoiceAction(
+                        action = "send_whatsapp",
+                        target = task.target,
+                        parameters = mapOf("contact_name" to task.target, "message" to task.actionValue),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.WHATSAPP_DELETE_MESSAGE -> VoiceAction(
+                        action = "whatsapp_delete_message",
+                        target = task.target,
+                        parameters = mapOf("message_text" to task.target, "scope" to task.actionValue),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.WHATSAPP_CALL -> VoiceAction(
+                        action = "whatsapp_call",
+                        target = task.target,
+                        parameters = mapOf("contact" to task.target, "call_type" to task.actionValue),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.UI_CLICK -> VoiceAction(
+                        action = "ui_click_text",
+                        target = task.target,
+                        parameters = mapOf("text" to task.target),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.PHONE_CALL -> VoiceAction(
+                        action = "call",
+                        target = task.target,
+                        parameters = mapOf("contact_name" to task.target),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    NluTaskType.SMS -> VoiceAction(
+                        action = "send_sms",
+                        target = task.target,
+                        parameters = mapOf("contact_name" to task.target, "message" to task.actionValue),
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                    else -> VoiceAction(
+                        action = "multi_step",
+                        target = trimmed,
+                        spokenResponse = spokenSummary,
+                        confirmationRequired = false
+                    )
+                }
+            }
+            _lastUsedExecutionTier.value = BrainExecutionTier.TIER_3_DETERMINISTIC_OFFLINE_ENGINE
+            return@withContext Pair(
+                validateToolActionSchema(mappedAction, BrainExecutionTier.TIER_3_DETERMINISTIC_OFFLINE_ENGINE, moodEstimate),
                 detectedLang
             )
         }

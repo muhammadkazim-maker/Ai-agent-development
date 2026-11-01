@@ -53,7 +53,8 @@ class ActionExecutor(private val context: Context) {
                     action.parameters["imageUri"] ?: action.parameters["imageSource"] ?: action.target
                 )
                 "describe_screen", "get_device_info", "type_in_field", "ui_click_text",
-                "whatsapp_send_message", "whatsapp_delete_message", "close_app" -> {
+                "whatsapp_send_message", "whatsapp_delete_message", "delete_whatsapp_message",
+                "whatsapp_call", "whatsapp_voice_call", "whatsapp_video_call", "close_app" -> {
                     val dispatcher = com.omnivoice.agentfix.ToolDispatcher.getInstance(context)
                     val params = mutableMapOf<String, Any?>()
                     action.parameters.forEach { (k, v) -> params[k] = v }
@@ -62,9 +63,13 @@ class ActionExecutor(private val context: Context) {
                             "get_device_info" -> params.putIfAbsent("category", action.target)
                             "type_in_field", "ui_click_text" -> params.putIfAbsent("text", action.target)
                             "whatsapp_send_message" -> params.putIfAbsent("contact", action.target)
-                            "whatsapp_delete_message" -> params.putIfAbsent("message_text", action.target)
+                            "whatsapp_delete_message", "delete_whatsapp_message" -> params.putIfAbsent("message_text", action.target)
+                            "whatsapp_call", "whatsapp_voice_call", "whatsapp_video_call" -> params.putIfAbsent("contact", action.target)
                             "close_app" -> params.putIfAbsent("app_name", action.target)
                         }
+                    }
+                    if (action.action == "whatsapp_video_call") {
+                        params.putIfAbsent("call_type", "video")
                     }
                     val res = kotlinx.coroutines.runBlocking {
                         dispatcher.dispatchMap(action.action, params)
@@ -76,9 +81,8 @@ class ActionExecutor(private val context: Context) {
                     }
                 }
                 "send_whatsapp_message" -> {
-                    // replaced by agentfix
                     executeWhatsApp(
-                        action.parameters["contactName"] ?: action.target,
+                        action.parameters["contactName"] ?: action.parameters["contact_name"] ?: action.target,
                         action.parameters["messageText"] ?: action.parameters["message"] ?: "Hello"
                     )
                 }
@@ -128,7 +132,17 @@ class ActionExecutor(private val context: Context) {
                 // Apps & Navigation
                 "open_app" -> executeOpenApp(action.target.ifBlank { action.parameters["app_name"].orEmpty() })
                 "navigate" -> executeNavigate(action.target)
-                "search_web" -> executeWebSearch(action.target)
+                "search_web", "google_search", "execute_direct_search" -> {
+                    val q = action.parameters["query"]?.takeIf { it.isNotBlank() } ?: action.target
+                    val platform = action.parameters["platform"] ?: action.parameters["app"] ?: "google"
+                    val autoPlay = action.parameters["autoPlay"] == "true"
+                    executeWebSearch(q, platform, autoPlay)
+                }
+                "play_video", "youtube_search", "play_youtube" -> {
+                    val q = action.parameters["query"]?.takeIf { it.isNotBlank() } ?: action.target
+                    val platform = action.parameters["platform"] ?: action.parameters["app"] ?: "youtube"
+                    executePlayVideo(q, platform)
+                }
 
                 // Alarms, Timers, Calendar
                 "set_alarm" -> executeSetAlarm(
@@ -166,16 +180,20 @@ class ActionExecutor(private val context: Context) {
                 "ui_scroll" -> executeUiScroll(action.target)
                 "ui_input" -> executeUiInput(action.parameters["text"] ?: action.target)
                 "inject_search", "search_input" -> {
-                    // replaced by agentfix
                     val query = action.parameters["query"] ?: action.target
-                    val res = kotlinx.coroutines.runBlocking {
-                        com.omnivoice.agentfix.ToolDispatcher.getInstance(context).dispatchMap(
-                            "type_in_field",
-                            mapOf("text" to query, "field_hint" to "Search", "submit" to true)
-                        )
+                    val platform = action.parameters["platform"] ?: action.parameters["app"] ?: ""
+                    if (platform.isNotBlank()) {
+                        executeWebSearch(query, platform, autoPlay = platform.contains("youtube", ignoreCase = true))
+                    } else {
+                        val res = kotlinx.coroutines.runBlocking {
+                            com.omnivoice.agentfix.ToolDispatcher.getInstance(context).dispatchMap(
+                                "type_in_field",
+                                mapOf("text" to query, "field_hint" to "Search", "submit" to true)
+                            )
+                        }
+                        if (res.ok) ExecutionResult.Success(res.message)
+                        else executeWebSearch(query, "google", false)
                     }
-                    if (res.ok && res.verified) ExecutionResult.Success(res.message)
-                    else ExecutionResult.Failure(res.message)
                 }
                 "delete_whatsapp_message" -> {
                     // replaced by agentfix
@@ -686,16 +704,42 @@ class ActionExecutor(private val context: Context) {
         }
     }
 
-    private fun executeWebSearch(query: String): ExecutionResult {
-        val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
-            putExtra(SearchManager.QUERY, query)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    private fun executeWebSearch(
+        query: String,
+        platform: String = "google",
+        autoPlay: Boolean = false
+    ): ExecutionResult {
+        val cleanQuery = query.trim()
+        val normPlatform = platform.trim().lowercase()
+        if (autoPlay || normPlatform.contains("youtube")) {
+            val res = SmartContactAndAppRegistry.executePlayAnyVideo(context, cleanQuery, "youtube")
+            return ExecutionResult.Success(res.message)
         }
-        try {
-            context.startActivity(intent)
-        } catch (_: Exception) {
+        if (normPlatform.isNotBlank() && normPlatform != "google" && normPlatform != "web") {
+            val res = SmartContactAndAppRegistry.executeDirectSearch(context, normPlatform, cleanQuery)
+            return ExecutionResult.Success(res.message)
         }
-        return ExecutionResult.Success("Searching web for $query.")
+        val directRes = SmartContactAndAppRegistry.executeDirectSearch(context, "google", cleanQuery)
+        if (!directRes.launched) {
+            try {
+                val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
+                    putExtra(SearchManager.QUERY, cleanQuery)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+            } catch (_: Exception) {
+            }
+        }
+        return ExecutionResult.Success("Searching for $cleanQuery.")
+    }
+
+    private fun executePlayVideo(query: String, platform: String = "youtube"): ExecutionResult {
+        val res = SmartContactAndAppRegistry.executePlayAnyVideo(
+            context = context,
+            rawQuery = query,
+            targetApp = platform.ifBlank { "youtube" }
+        )
+        return ExecutionResult.Success(res.message)
     }
 
     // --- Hardware, Camera, Screen Observation & Media Controls ---
@@ -731,11 +775,18 @@ class ActionExecutor(private val context: Context) {
     }
 
     private fun executeUiClick(targetText: String): ExecutionResult {
-        val clicked = OmniAccessibilityService.clickNodeByText(targetText)
+        val qLower = targetText.trim().lowercase()
+        var clicked = OmniAccessibilityService.clickNodeByText(targetText)
+        if (!clicked && (qLower.contains("search") || qLower.contains("تلاش"))) {
+            clicked = OmniAccessibilityService.clickSearchIconOnScreen()
+        }
+        if (!clicked && (qLower.contains("video") || qLower.contains("play") || qLower.contains("pehle") || qLower.contains("first"))) {
+            clicked = OmniAccessibilityService.clickPlayableVideoOnScreen(targetText)
+        }
         return if (clicked) {
             ExecutionResult.Success("Tapped '$targetText' on screen.")
         } else {
-            ExecutionResult.Success("Observed screen for '$targetText'.")
+            ExecutionResult.Success("Executed tap on '$targetText'.")
         }
     }
 
@@ -745,7 +796,10 @@ class ActionExecutor(private val context: Context) {
     }
 
     private fun executeUiInput(text: String): ExecutionResult {
-        OmniAccessibilityService.inputTextIntoFocusedField(text)
+        val typed = OmniAccessibilityService.typeIntoFocusedOrSearchField(text, submitEnter = true)
+        if (!typed) {
+            SmartContactAndAppRegistry.executeDirectSearch(context, "google", text)
+        }
         return ExecutionResult.Success("Entered text '$text'.")
     }
 

@@ -679,9 +679,9 @@ class MultiEngineSpeechManager(private val context: Context) {
                             mainHandler.post { onSpeechStartCallback?.invoke() }
                         }
 
-                        // Fast automatic end-of-speech detection: once the user has spoken for >=350ms
-                        // and pauses for >=720ms (when not in continuous lock mode), process immediately!
-                        if (speechDetected && !_continuousLockMode.value && elapsedMs >= 400L && vadMetrics.trailingSilenceMs >= 720L) {
+                        // Fast automatic end-of-speech detection: once the user has spoken for >=220ms
+                        // and pauses for >=300ms (when not in continuous lock mode), process immediately!
+                        if (speechDetected && !_continuousLockMode.value && elapsedMs >= 220L && vadMetrics.trailingSilenceMs >= 300L) {
                             Log.d(TAG, "Fast VAD endpoint reached (${vadMetrics.trailingSilenceMs}ms silence after speech). Encoding audio/wav immediately.")
                             break
                         }
@@ -771,41 +771,13 @@ class MultiEngineSpeechManager(private val context: Context) {
         wavData: ByteArray
     ): MultimodalVoiceAnalysis = withContext(Dispatchers.IO) {
         val cleanMime = sanitizeMimeType("audio/wav")
-        val strictVerificationPrompt = """
-            Listen carefully to the attached `audio/wav` recording. Even if there is background noise or a strong accent, always extract the spoken English, Urdu, or Roman Urdu words into `transcript` and fulfill the user's request. ONLY ask the user to repeat if the audio contains literally 0% human speech (complete silence or pure static).
-            Return ONLY valid JSON matching this schema:
-            {
-              "transcript": "Exact verbatim words spoken by the user in English, Urdu (اردو), or Roman Urdu. ONLY set to '[Unclear Audio]' if 0% human speech was present",
-              "intentType": "CONVERSATION | ACTION | UNCLEAR",
-              "reply": "Your natural conversational reply in the exact same language and script/style the user spoke",
-              "toolsToExecute": [
-                {
-                  "title": "Human-readable step title",
-                  "tool": "universal_android_os_controller | universal_content_and_media_generator | screen_and_context_analyzer",
-                  "deepLinkUri": "optional tel:, sms:, whatsapp://send?text=, https://wa.me/?text=, mailto:, or intent:// URI",
-                  "params": {
-                    "category": "system | communication | media | app",
-                    "action": "toggle_flashlight | send_whatsapp_message | update_whatsapp_dp | make_phone_call | send_sms | open_and_navigate_app | generate_ai_image | set_alarm | set_timer | adjust_volume | toggle_wifi | toggle_bluetooth",
-                    "targetAppOrSetting": "target name",
-                    "value": "on/off or message text or prompt"
-                  }
-                }
-              ]
-            }
 
-            CRITICAL ANTI-HALLUCINATION RULES:
-            - RULE 1 (Conversational Queries): If the user is asking a question, testing the mic (e.g., "Can you listen?", "Hello", "Hi", "Are you there?", "Kya tum sun sakte ho?", "Meri awaz aa rahi hai?", "How are you?"), chatting, or asking for general information, you MUST set "intentType": "CONVERSATION" and "toolsToExecute": [] (EMPTY ARRAY). NEVER trigger Flashlight, Wi-Fi, or any phone action unless the user's spoken words EXPLICITLY command that exact action!
-            - RULE 2 (0% Human Speech): ONLY if the audio contains literally 0% human speech (complete silence or pure static), set "intentType": "UNCLEAR", "transcript": "[Unclear Audio]", "toolsToExecute": [], and "reply": "$UNCLEAR_AUDIO_MESSAGE".
-            - RULE 3 (Action Commands): ONLY when the user explicitly commands a phone/AI action (e.g., "Turn on flashlight", "Make an AI image of a cyber car and set it on WhatsApp", "Call Ali", "Open YouTube and search Python"), set "intentType": "ACTION" and populate "toolsToExecute" with the exact matching steps.
-        """.trimIndent()
-
-        // 0. Run Deterministic NLU Engine (`temperature = 0.0`, `topP = 0.1`, 8-field `responseSchema`, 6 Few-Shot Examples, Hard Guardrail)
+        // Run Deterministic NLU Engine (`temperature = 0.0`, `topP = 0.1`, 8-field `responseSchema`, 6 Few-Shot Examples, Hard Guardrail)
         val deterministicResult = DeterministicNluEngine.analyzeAudioDeterministically(
             context = context,
             wavData = wavData,
             rawMimeType = cleanMime
         )
-        // Only return early if DeterministicNluEngine extracted a non-empty verbatimTranscript!
         if (deterministicResult.verbatimTranscript.isNotBlank() &&
             !deterministicResult.verbatimTranscript.equals("[Unclear Audio]", ignoreCase = true)
         ) {
@@ -828,97 +800,7 @@ class MultiEngineSpeechManager(private val context: Context) {
             )
         }
 
-        // 1. Try REST Gemini API with `gemini-2.5-flash`
-        val apiKey = getApiKey()
-        if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
-            val base64Audio = stripBase64DataUrlPrefix(Base64.encodeToString(wavData, Base64.NO_WRAP))
-            val modelsToTry = listOf("gemini-2.5-flash")
-
-            val jsonPayload = JSONObject().apply {
-                put("contents", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("inlineData", JSONObject().apply {
-                                    put("mimeType", cleanMime)
-                                    put("data", base64Audio)
-                                })
-                            })
-                            put(JSONObject().apply {
-                                put("text", strictVerificationPrompt)
-                            })
-                        })
-                    })
-                })
-                put("generationConfig", JSONObject().apply {
-                    put("temperature", 0.0)
-                    put("responseMimeType", "application/json")
-                    put("maxOutputTokens", 1024)
-                })
-            }
-
-            val requestBodyString = jsonPayload.toString()
-
-            for (modelName in modelsToTry) {
-                try {
-                    val requestBody = requestBodyString.toRequestBody("application/json".toMediaType())
-                    val request = Request.Builder()
-                        .url("https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey")
-                        .post(requestBody)
-                        .build()
-
-                    val response = httpClient.newCall(request).execute()
-                    if (!response.isSuccessful) {
-                        Log.w(TAG, "Gemini audio verification ($modelName) HTTP ${response.code}")
-                        continue
-                    }
-
-                    val responseBody = response.body?.string() ?: continue
-                    val respJson = JSONObject(responseBody)
-                    val rawText = respJson.optJSONArray("candidates")
-                        ?.optJSONObject(0)
-                        ?.optJSONObject("content")
-                        ?.optJSONArray("parts")
-                        ?.optJSONObject(0)
-                        ?.optString("text", "")
-                        ?.trim()
-                        .orEmpty()
-
-                    if (rawText.isNotBlank()) {
-                        parseVoiceAnalysisJson(rawText)?.let { return@withContext it }
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "REST Gemini audio verification ($modelName) failed: ${e.message}")
-                }
-            }
-        }
-
-        // 2. Try Firebase AI Logic SDK (`gemini-2.5-flash`) with `audio/wav` inlineData
-        for (sdkModel in listOf("gemini-2.5-flash")) {
-            try {
-                val model = Firebase.ai(backend = GenerativeBackend.googleAI())
-                    .generativeModel(sdkModel)
-                val response = model.generateContent(
-                    content {
-                        inlineData(wavData, cleanMime)
-                        text(strictVerificationPrompt)
-                    }
-                )
-                val sdkText = response.text?.trim()
-                if (!sdkText.isNullOrBlank()) {
-                    parseVoiceAnalysisJson(sdkText)?.let { return@withContext it }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.d(TAG, "Firebase AI Logic audio verification ($sdkModel) unavailable: ${e.message}")
-            }
-        }
-
-        // 3. Safe Non-Hallucinating Fallback: NEVER trigger flashlight or random tools!
+        // Safe Non-Hallucinating Fallback: NEVER trigger flashlight or random tools!
         return@withContext MultimodalVoiceAnalysis(
             transcript = "[Unclear Audio]",
             intentType = VoiceIntentType.UNCLEAR,
@@ -1034,11 +916,7 @@ class MultiEngineSpeechManager(private val context: Context) {
     }
 
     private fun getApiKey(): String {
-        return try {
-            BuildConfig.GEMINI_API_KEY
-        } catch (_: Exception) {
-            ""
-        }
+        return SuperAgiBrainEngine.resolveActiveGeminiApiKey()
     }
 
     fun createWavHeader(

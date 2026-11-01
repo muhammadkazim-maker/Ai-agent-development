@@ -88,7 +88,10 @@ enum class NluTaskType {
     VOLUME,
     ALARM_TIMER,
     PHONE_CALL,
+    WHATSAPP_CALL,
     WHATSAPP_MESSAGE,
+    WHATSAPP_DELETE_MESSAGE,
+    UI_CLICK,
     WHATSAPP_DP_UPDATE,
     GENERATE_AI_IMAGE,
     OPEN_APP,
@@ -483,6 +486,36 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             )
         }
 
+        // Check if SuperAgiBrainEngine detects explicit device tasks (e.g. whatsapp_call, whatsapp_delete_message, ui_click, play_video, search, open_app) in the transcript
+        if (!MultiEngineSpeechManager.isConversationalQuery(cleanTranscript)) {
+            val localExtractedTasks = SuperAgiBrainEngine.extractAllDeviceTasks(
+                context = com.omnivoice.agentfix.AgentBridge.appContext,
+                rawText = cleanTranscript
+            )
+            val hasPriorityLocalTask = localExtractedTasks.any {
+                it.taskType == NluTaskType.WHATSAPP_CALL ||
+                    it.taskType == NluTaskType.WHATSAPP_DELETE_MESSAGE ||
+                    it.taskType == NluTaskType.UI_CLICK
+            }
+            if (localExtractedTasks.isNotEmpty() && (response.tasksToExecute.isEmpty() || hasPriorityLocalTask)) {
+                val reply = response.spokenReply.takeIf {
+                    it.isNotBlank() &&
+                        !hasPriorityLocalTask &&
+                        !it.contains("dobara boliye", ignoreCase = true) &&
+                        !it.contains("hukum karein", ignoreCase = true) &&
+                        !it.contains("search ka icon", ignoreCase = true) &&
+                        !it.contains("icon nahi mil", ignoreCase = true) &&
+                        !it.contains("delete nahi kar sakta", ignoreCase = true)
+                } ?: SuperAgiBrainEngine.buildSpokenSummaryForTasks(localExtractedTasks, response.detectedLanguage)
+                return response.copy(
+                    intentCategory = if (localExtractedTasks.size > 1) NluIntentCategory.MULTI_STEP_WORKFLOW else NluIntentCategory.SINGLE_DEVICE_TASK,
+                    confidenceScore = maxOf(response.confidenceScore, 98),
+                    tasksToExecute = localExtractedTasks,
+                    spokenReply = reply
+                )
+            }
+        }
+
         // If Gemini transcribed real words (`cleanTranscript.isNotEmpty()`) but conservatively labeled it CLARIFICATION_NEEDED,
         // upgrade it to PURE_CONVERSATION (or keep tasks if confidence >= 85) so human speech is NEVER falsely rejected!
         if (response.intentCategory == NluIntentCategory.PURE_CONVERSATION ||
@@ -492,10 +525,11 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
         ) {
             val nonRejectingReply = if (response.spokenReply.isBlank() ||
                 response.spokenReply.contains("dobara boliye", ignoreCase = true) ||
-                response.spokenReply.contains("hukum karein", ignoreCase = true)
+                response.spokenReply.contains("hukum karein", ignoreCase = true) ||
+                response.spokenReply.contains("search ka icon", ignoreCase = true)
             ) {
                 SuperAgiBrainEngine.generateLocalSuperAgiResponse(
-                    context = null,
+                    context = com.omnivoice.agentfix.AgentBridge.appContext,
                     rawText = cleanTranscript,
                     detectedLang = response.detectedLanguage
                 )
@@ -509,7 +543,16 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             )
         }
 
-        // Extra Flashlight Guardrail & Per-Task Verification
+        val isWhatsAppOrVoipCallTranscript =
+            (lowerTranscript.contains("whatsapp") && (lowerTranscript.contains("call") || cleanTranscript.contains("کال"))) ||
+                lowerTranscript.contains("voice call") ||
+                lowerTranscript.contains("video call") ||
+                lowerTranscript.contains("audio call") ||
+                cleanTranscript.contains("واٹس ایپ کال") ||
+                cleanTranscript.contains("وائس کال") ||
+                cleanTranscript.contains("ویڈیو کال")
+
+        // Extra Flashlight Guardrail, WhatsApp Call Upgrade & Per-Task Verification
         val verifiedTasks = response.tasksToExecute.filter { task ->
             when (task.taskType) {
                 NluTaskType.FLASHLIGHT -> {
@@ -524,7 +567,16 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
                 else -> true
             }
         }.mapIndexed { idx, task ->
-            task.copy(stepNumber = idx + 1)
+            if (task.taskType == NluTaskType.PHONE_CALL && isWhatsAppOrVoipCallTranscript) {
+                val callType = if (lowerTranscript.contains("video") || cleanTranscript.contains("ویڈیو")) "video" else "voice"
+                task.copy(
+                    stepNumber = idx + 1,
+                    taskType = NluTaskType.WHATSAPP_CALL,
+                    actionValue = callType
+                )
+            } else {
+                task.copy(stepNumber = idx + 1)
+            }
         }
 
         // If all tasks were filtered out by the guardrail, downgrade to PURE_CONVERSATION
@@ -575,11 +627,11 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             }
         """.trimIndent()
 
-        // 1. Try REST Gemini API with preferred models (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-2.5-flash`)
-        val apiKey = BuildConfig.GEMINI_API_KEY
+        // 1. Try REST Gemini API with fast model (`gemini-2.5-flash`)
+        val apiKey = SuperAgiBrainEngine.resolveActiveGeminiApiKey()
+        val fastModelsToTry = listOf("gemini-2.5-flash")
         if (apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY") {
             val base64Audio = Base64.encodeToString(wavData, Base64.NO_WRAP)
-            val modelsToTry = SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS
 
             for (useSchema in listOf(true)) {
                 val requestJson = JSONObject().apply {
@@ -613,7 +665,7 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
                 }
 
                 val bodyString = requestJson.toString()
-                for (modelName in modelsToTry) {
+                for (modelName in fastModelsToTry) {
                     try {
                         val req = Request.Builder()
                             .url("https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey")
@@ -651,8 +703,8 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             }
         }
 
-        // 2. Try Firebase AI Logic SDK (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-2.5-flash`) with `temperature = 0.0f`, `topP = 0.1f`
-        for (sdkModelName in SuperAgiBrainEngine.PREFERRED_GEMINI_MODELS) {
+        // 2. Try Firebase AI Logic SDK (`gemini-2.5-flash`) with `temperature = 0.0f`, `topP = 0.1f`
+        for (sdkModelName in fastModelsToTry) {
             for (useSchema in listOf(true)) {
                 try {
                     val config = generationConfig {
@@ -668,13 +720,15 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
                         generationConfig = config,
                         systemInstruction = content { text(systemInstruction) }
                     )
-                    val sdkResp = model.generateContent(
-                        content {
-                            inlineData(wavData, cleanMime)
-                            text(userPrompt)
-                        }
-                    )
-                    val sdkText = sdkResp.text?.trim()
+                    val sdkResp = kotlinx.coroutines.withTimeoutOrNull(2800L) {
+                        model.generateContent(
+                            content {
+                                inlineData(wavData, cleanMime)
+                                text(userPrompt)
+                            }
+                        )
+                    }
+                    val sdkText = sdkResp?.text?.trim()
                     if (!sdkText.isNullOrBlank()) {
                         parseDeterministicJson(sdkText)?.let { parsed ->
                             val validated = enforceHardGuardrailValidator(parsed)
