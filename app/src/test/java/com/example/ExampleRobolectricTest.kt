@@ -1516,8 +1516,8 @@ class ExampleRobolectricTest {
         // 2. Verify OmniAccessibilityService screen observation & sensitive data masking (R7, F-045..F-054)
         val defaultObservation = com.example.service.OmniAccessibilityService.observeCurrentScreen()
         assertNotNull(defaultObservation)
-        assertTrue(defaultObservation.activePackage.isNotBlank())
-        assertTrue(defaultObservation.summary.contains("Active"))
+        assertTrue(defaultObservation.activePackage.isBlank())
+        assertTrue(defaultObservation.summary.contains("No active accessibility window"))
 
         // Verify global navigation shortcuts mapping
         assertFalse(com.example.service.OmniAccessibilityService.performGlobalNav("unknown_action"))
@@ -2609,8 +2609,10 @@ class ExampleRobolectricTest {
         fun buildSnapshot(
             pkg: String,
             label: String,
-            taskId: Int = 100,
-            component: String = "$pkg/MainActivity",
+            taskId: Int = -1,
+            windowId: Int = 10,
+            component: String = "",
+            titleGuess: String = label,
             nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList(),
             drafts: Map<String, String> = emptyMap(),
             visiblePackages: Set<String> = setOf(pkg),
@@ -2621,13 +2623,13 @@ class ExampleRobolectricTest {
                 elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + elapsedOffsetMs,
                 packageName = pkg,
                 appLabel = label,
-                titleGuess = label,
+                titleGuess = titleGuess,
                 nodes = nodes,
                 editableFields = emptyList(),
                 clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
                 visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
                 visibleIcons = emptyList(),
-                windowId = taskId,
+                windowId = windowId,
                 taskId = taskId,
                 activityComponent = component,
                 visibleApplicationPackages = visiblePackages,
@@ -2980,7 +2982,7 @@ class ExampleRobolectricTest {
             packageName = "com.example.notes",
             appLabel = "Notes",
             taskId = 999,
-            windowId = 999,
+            windowId = 20,
             activityComponent = "com.example.notes/SettingsActivity",
             draftTexts = emptyMap(),
             capturedElapsedMs = android.os.SystemClock.elapsedRealtime()
@@ -3273,6 +3275,373 @@ class ExampleRobolectricTest {
         assertFalse(wrongWindowRes.verified)
         assertEquals("ORIGIN_WINDOW_MISMATCH", wrongWindowRes.reasonCode)
         assertTrue(wrongWindowRes.message.contains("NotesListActivity"))
+
+        // =========================================================================
+        // 8. PHASE 02 PHYSICAL-PHONE REPAIR REGRESSION (538aab3):
+        //    - ScreenObserver keeps windowId separate from taskId (-1) and activityComponent ("")
+        //    - OmniLiveSessionEngine routes plain app-open in communicate_or_open_app through
+        //      UiTools.openAppCanonical before any ACTION_VIEW, saving Notepad origin first,
+        //      while preserving messaging, calls, SMS, and search as separate actions
+        //    - Production bringSavedOriginTaskForward (NO testBackActionHandler / NO testReturnNavigationHandler)
+        //      waits > 450 ms (e.g. 580 ms delayed foreground event) for EXISTING_TASK_INTENT_RESUME,
+        //      accepts a changed windowId (101 -> 209) and changed titleGuess, and stops immediately
+        //      without sending the user to Recents or Home
+        //    - Production Recents fallback selects unique Notepad task or reports AMBIGUOUS_RECENTS_TASK
+        //    - Privacy-safe Phase 02 Journey Diagnostics copyable summary excludes "draft 42"
+        // =========================================================================
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        registerLaunchablePackage("com.whatsapp", "WhatsApp")
+        registerLaunchablePackage("com.example.notes", "Notepad")
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notes",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+
+        // 8a: Verify plain app-open vs messaging/calls/search classification in communicate_or_open_app
+        assertTrue(
+            com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                actionType = "open",
+                contactOrAppName = "WhatsApp",
+                messageOrQuery = ""
+            )
+        )
+        assertTrue(
+            com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                actionType = "whatsapp",
+                contactOrAppName = "WhatsApp",
+                messageOrQuery = ""
+            )
+        )
+        assertFalse(
+            "Outbound WhatsApp message must remain a separate messaging action",
+            com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                actionType = "whatsapp",
+                contactOrAppName = "Ali",
+                messageOrQuery = "Salam"
+            )
+        )
+        assertFalse(
+            "Phone call must remain a separate call action",
+            com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                actionType = "call",
+                contactOrAppName = "Ali",
+                messageOrQuery = ""
+            )
+        )
+        assertFalse(
+            "YouTube search must remain a separate search action",
+            com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                actionType = "youtube",
+                contactOrAppName = "YouTube",
+                messageOrQuery = "Coke Studio"
+            )
+        )
+
+        // 8b: Production voice route: Notepad (windowId=101, taskId=-1, component="", "draft 42")
+        // -> OmniLiveSessionEngine "communicate_or_open_app" for "WhatsApp kholo"
+        var prodScreenPhase = "NOTEPAD_INITIAL_WINDOW_101"
+        var delayedReturnDispatchNano = 0L
+        var prodRecentsOpenedCount = 0
+        var prodHomeOpenedCount = 0
+
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            // Detect when production EXISTING_TASK_INTENT_RESUME dispatches startActivity for com.example.notes
+            val nextStarted = shadowApp.peekNextStartedActivity()
+            val startedPkg = nextStarted?.component?.packageName ?: nextStarted?.`package`
+            if (prodScreenPhase == "WHATSAPP_ACTIVE" &&
+                startedPkg == "com.example.notes" &&
+                delayedReturnDispatchNano == 0L
+            ) {
+                shadowApp.nextStartedActivity // consume intent
+                delayedReturnDispatchNano = System.nanoTime()
+                prodScreenPhase = "RETURNING_TO_NOTEPAD_DELAYED"
+            }
+            if (prodScreenPhase == "RETURNING_TO_NOTEPAD_DELAYED") {
+                val waitedMs = (System.nanoTime() - delayedReturnDispatchNano) / 1_000_000L
+                // Simulate real-phone transition taking > 450 ms (550 ms) before Notepad window appears
+                if (waitedMs >= 550L) {
+                    prodScreenPhase = "NOTEPAD_RETURNED_WINDOW_209"
+                }
+            }
+            when (prodScreenPhase) {
+                "NOTEPAD_INITIAL_WINDOW_101" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = -1,
+                    windowId = 101,
+                    component = "",
+                    titleGuess = "Notepad - Editing",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                "WHATSAPP_ACTIVE" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = -1,
+                    windowId = 155,
+                    component = "",
+                    titleGuess = "WhatsApp Chats"
+                )
+                "RETURNING_TO_NOTEPAD_DELAYED" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = -1,
+                    windowId = 155,
+                    component = "",
+                    titleGuess = "WhatsApp Chats"
+                )
+                "NOTEPAD_RETURNED_WINDOW_209" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = -1,
+                    windowId = 209, // Changed Accessibility windowId on return!
+                    component = "",
+                    titleGuess = "Notepad - Draft 42 (Keyboard Hidden)", // Changed guessed title on return!
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                else -> null
+            }
+        }
+
+        // Capture initial Notepad snapshot before voice command
+        val preLiveSnap = com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)
+        assertNotNull(preLiveSnap)
+        assertEquals(101, preLiveSnap?.windowId)
+        assertEquals(-1, preLiveSnap?.taskId)
+        assertEquals("", preLiveSnap?.activityComponent)
+
+        val liveEngine = com.example.engine.OmniLiveSessionEngine(
+            context = app,
+            actionExecutor = executor,
+            androidBridge = com.example.engine.AndroidBridge(app, executor)
+        )
+        // When openAppCanonical launches WhatsApp via intent, transition prodScreenPhase to WHATSAPP_ACTIVE
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            prodScreenPhase = "WHATSAPP_ACTIVE"
+            false // force launcher intent path so we also verify no whatsapp:// ACTION_VIEW was used
+        }
+        com.omnivoice.agentfix.AgentSession.onUserUtterance("WhatsApp kholo")
+        val liveOpenCall = org.json.JSONObject().apply {
+            put("id", "call_wa_open_1")
+            put("name", "communicate_or_open_app")
+            put(
+                "args",
+                org.json.JSONObject()
+                    .put("actionType", "open")
+                    .put("contactOrAppName", "WhatsApp")
+                    .put("messageOrQuery", "")
+            )
+        }
+        val liveOpenResp = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(liveOpenCall)
+        }
+        val startedForWaOpen = shadowApp.nextStartedActivity
+        assertNotNull("communicate_or_open_app must launch WhatsApp via canonical launcher intent", startedForWaOpen)
+        assertFalse(
+            "Plain app-open in communicate_or_open_app must NOT use Intent.ACTION_VIEW deep link",
+            startedForWaOpen?.action == android.content.Intent.ACTION_VIEW
+        )
+        assertEquals("com.whatsapp", startedForWaOpen?.component?.packageName ?: startedForWaOpen?.`package`)
+        val openResultPayload = liveOpenResp.getJSONObject("response").getJSONObject("result")
+        assertTrue(openResultPayload.optBoolean("verified"))
+
+        // Verify savedOriginTask was captured BEFORE leaving Notepad, with windowId=101, taskId=-1, component=""
+        val savedNotepadOrigin = com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot
+        assertNotNull(savedNotepadOrigin)
+        assertEquals("com.example.notes", savedNotepadOrigin?.packageName)
+        assertEquals(101, savedNotepadOrigin?.windowId)
+        assertEquals(-1, savedNotepadOrigin?.taskId)
+        assertEquals("", savedNotepadOrigin?.activityComponent)
+        assertEquals("draft 42", savedNotepadOrigin?.draftTexts?.get("editor_body"))
+
+        // 8c: Now test production return ("wapas iss window par aao") WITHOUT testBackActionHandler or testReturnNavigationHandler!
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = null
+        com.omnivoice.agentfix.UiTools.testReturnNavigationHandler = null
+        com.omnivoice.agentfix.UiTools.testRecentsActionHandler = {
+            prodRecentsOpenedCount++
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            prodHomeOpenedCount++
+            true
+        }
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+
+        com.omnivoice.agentfix.AgentSession.onUserUtterance("wapas iss window par aao")
+        val liveReturnCall = org.json.JSONObject().apply {
+            put("id", "call_return_1")
+            put("name", "communicate_or_open_app")
+            put(
+                "args",
+                org.json.JSONObject()
+                    .put("actionType", "open")
+                    .put("contactOrAppName", "Notepad")
+                    .put("messageOrQuery", "")
+            )
+        }
+        val liveReturnResp = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(liveReturnCall)
+        }
+        assertEquals("return_to_origin", liveReturnResp.optString("name"))
+        val prodReturnRes = com.omnivoice.agentfix.UiTools.lastCanonicalResult
+        assertNotNull(prodReturnRes)
+        assertEquals(
+            "Production return with 550ms delayed foreground event (>450ms) and changed windowId (101->209) must succeed!",
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED,
+            prodReturnRes?.status
+        )
+        assertTrue(prodReturnRes!!.verified)
+        assertEquals("EXISTING_TASK_INTENT_RESUME", prodReturnRes.launchMethod)
+        assertEquals("com.example.notes", prodReturnRes.observedPackage)
+        assertTrue(prodReturnRes.draftPreserved)
+        assertEquals("draft 42", prodReturnRes.restoredDrafts["editor_body"])
+        assertEquals(
+            "Must stop immediately when Notepad returns after >450ms and NEVER open Recents",
+            0,
+            prodRecentsOpenedCount
+        )
+        assertEquals(
+            "Must stop immediately when Notepad returns after >450ms and NEVER go Home",
+            0,
+            prodHomeOpenedCount
+        )
+
+        // 8d: Verify Phase 02 Journey Diagnostics copyable summary contains the 7 required fields and excludes private text
+        val diagSummary = com.omnivoice.agentfix.UiTools.lastPhase02Diagnostics.toCopyableSummary()
+        assertTrue(diagSummary.contains("build_id=${com.omnivoice.agentfix.UiTools.PHASE_02_BUILD_ID}"))
+        assertTrue(diagSummary.contains("actual_open_tool=communicate_or_open_app"))
+        assertTrue(diagSummary.contains("saved_origin_package=com.example.notes"))
+        assertTrue(diagSummary.contains("actual_return_tool=communicate_or_open_app->return_to_origin"))
+        assertTrue(diagSummary.contains("navigation_method=EXISTING_TASK_INTENT_RESUME"))
+        assertTrue(diagSummary.contains("final_observed_package=com.example.notes"))
+        assertTrue(diagSummary.contains("reason_code=VERIFIED_ORIGIN_RESTORED"))
+        assertFalse(
+            "Diagnostics copyable summary must strictly exclude note contents ('draft 42')",
+            diagSummary.contains("draft 42", ignoreCase = true)
+        )
+
+        // 8e: Verify production Recents fallback:
+        //     (1) Unique Notepad task card in Recents is selected and restores Notepad
+        //     (2) Ambiguous multiple Notepad task cards in Recents reports AMBIGUOUS_RECENTS_TASK without guessing
+        val recentsNotepadCard1 = com.omnivoice.agentfix.UiNodeSummary(
+            index = 10,
+            viewId = "com.android.systemui:id/task_card_1",
+            className = "android.widget.FrameLayout",
+            packageName = "com.android.systemui",
+            text = "Notepad",
+            contentDescription = "Notepad",
+            hintText = "",
+            isClickable = true,
+            isLongClickable = false,
+            isEditable = false,
+            isScrollable = false,
+            isFocused = false,
+            isEnabled = true,
+            bounds = android.graphics.Rect(100, 300, 900, 1400)
+        )
+        val recentsNotepadCard2 = com.omnivoice.agentfix.UiNodeSummary(
+            index = 11,
+            viewId = "com.android.systemui:id/task_card_2",
+            className = "android.widget.FrameLayout",
+            packageName = "com.android.systemui",
+            text = "Notepad",
+            contentDescription = "Notepad (Second instance)",
+            hintText = "",
+            isClickable = true,
+            isLongClickable = false,
+            isEditable = false,
+            isScrollable = false,
+            isFocused = false,
+            isEnabled = true,
+            bounds = android.graphics.Rect(100, 1450, 900, 2100)
+        )
+
+        var recentsScenario = "UNIQUE_RECENTS_CARD"
+        prodScreenPhase = "WHATSAPP_ACTIVE"
+        com.omnivoice.agentfix.UiTools.testRecentsActionHandler = {
+            prodScreenPhase = "RECENTS_OVERVIEW"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            if (node.text.contains("Notepad")) {
+                prodScreenPhase = "NOTEPAD_RETURNED_WINDOW_209"
+                true
+            } else {
+                false
+            }
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (prodScreenPhase) {
+                "WHATSAPP_ACTIVE" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = -1,
+                    windowId = 155
+                )
+                "RECENTS_OVERVIEW" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Recents",
+                    taskId = -1,
+                    windowId = 301,
+                    nodes = if (recentsScenario == "UNIQUE_RECENTS_CARD") {
+                        listOf(recentsNotepadCard1)
+                    } else {
+                        listOf(recentsNotepadCard1, recentsNotepadCard2)
+                    }
+                )
+                "NOTEPAD_RETURNED_WINDOW_209" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = -1,
+                    windowId = 209,
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                else -> null
+            }
+        }
+
+        val uniqueRecentsRes = kotlinx.coroutines.runBlocking {
+            com.omnivoice.agentfix.UiTools.returnToOriginCanonical(
+                context = app,
+                coldStartTimeoutMs = 250L,
+                callerToolName = "return_to_origin"
+            )
+        }
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, uniqueRecentsRes.status)
+        assertEquals("RECENTS_TASK_SWITCH", uniqueRecentsRes.launchMethod)
+        assertEquals("com.example.notes", uniqueRecentsRes.observedPackage)
+        assertEquals("draft 42", uniqueRecentsRes.restoredDrafts["editor_body"])
+
+        // Now test ambiguous Recents tasks (two Notepad cards where neither uniquely disambiguates):
+        // clear draftTexts on savedOrigin so neither card can be disambiguated by draft text
+        com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = savedNotepadOrigin?.copy(draftTexts = emptyMap())
+        recentsScenario = "AMBIGUOUS_RECENTS_CARDS"
+        prodScreenPhase = "WHATSAPP_ACTIVE"
+        var tappedAmbiguousCard = false
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = {
+            tappedAmbiguousCard = true
+            true
+        }
+        val ambiguousRecentsRes = kotlinx.coroutines.runBlocking {
+            com.omnivoice.agentfix.UiTools.returnToOriginCanonical(
+                context = app,
+                coldStartTimeoutMs = 250L,
+                callerToolName = "return_to_origin"
+            )
+        }
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED, ambiguousRecentsRes.status)
+        assertEquals("AMBIGUOUS_RECENTS_TASK", ambiguousRecentsRes.reasonCode)
+        assertFalse("Must not guess or tap when multiple Notepad tasks in Recents are ambiguous", tappedAmbiguousCard)
 
         com.omnivoice.agentfix.UiTools.resetTestHooks()
     }

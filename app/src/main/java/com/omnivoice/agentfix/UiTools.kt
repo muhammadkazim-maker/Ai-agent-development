@@ -209,6 +209,44 @@ object UiTools {
 
     private val packageResolutionCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, String>>()
 
+    const val PHASE_02_BUILD_ID = "P02-R2-538aab3"
+
+    data class Phase02JourneyDiagnostics(
+        val buildId: String = PHASE_02_BUILD_ID,
+        val actualOpenTool: String = "none",
+        val savedOriginPackage: String = "none",
+        val actualReturnTool: String = "none",
+        val navigationMethod: String = "none",
+        val finalObservedPackage: String = "none",
+        val reasonCode: String = "NONE"
+    ) {
+        /**
+         * Short copyable result for the Phase 02 open/return journey only.
+         * Strictly excludes note contents, contact details, and private screen text.
+         */
+        fun toCopyableSummary(): String {
+            return "build_id=$buildId | " +
+                "actual_open_tool=$actualOpenTool | " +
+                "saved_origin_package=$savedOriginPackage | " +
+                "actual_return_tool=$actualReturnTool | " +
+                "navigation_method=$navigationMethod | " +
+                "final_observed_package=$finalObservedPackage | " +
+                "reason_code=$reasonCode"
+        }
+
+        fun toMultilineCardText(): String {
+            return buildString {
+                appendLine("Build ID: $buildId")
+                appendLine("Actual Open Tool: $actualOpenTool")
+                appendLine("Saved Origin Package: $savedOriginPackage")
+                appendLine("Actual Return Tool: $actualReturnTool")
+                appendLine("Navigation Method: $navigationMethod")
+                appendLine("Final Observed Package: $finalObservedPackage")
+                append("Reason Code: $reasonCode")
+            }
+        }
+    }
+
     @Volatile
     var defaultColdStartTimeoutMs: Long = 2500L
 
@@ -221,10 +259,17 @@ object UiTools {
         internal set
 
     @Volatile
+    var lastPhase02Diagnostics: Phase02JourneyDiagnostics = Phase02JourneyDiagnostics()
+        internal set
+
+    @Volatile
     var testInstalledVariantsOverride: List<InstalledAppVariant>? = null
 
     @Volatile
     var testHomeActionHandler: (() -> Boolean)? = null
+
+    @Volatile
+    var testRecentsActionHandler: (() -> Boolean)? = null
 
     @Volatile
     var testBackActionHandler: (() -> Boolean)? = null
@@ -242,8 +287,10 @@ object UiTools {
         defaultColdStartTimeoutMs = 2500L
         lastOriginTaskSnapshot = null
         lastCanonicalResult = null
+        lastPhase02Diagnostics = Phase02JourneyDiagnostics()
         testInstalledVariantsOverride = null
         testHomeActionHandler = null
+        testRecentsActionHandler = null
         testBackActionHandler = null
         testReturnNavigationHandler = null
         testIconTapHandler = null
@@ -251,6 +298,134 @@ object UiTools {
         packageResolutionCache.clear()
         ScreenObserver.testSnapshotSupplier = null
         ScreenObserver.resetCachedOriginStateForTest()
+        AgentSession.clearForTest()
+    }
+
+    /**
+     * Determines whether a `communicate_or_open_app` tool invocation is a plain app-open request
+     * (e.g., "WhatsApp kholo", `actionType="open"`, `contactOrAppName="WhatsApp"`, `messageOrQuery=""`)
+     * as opposed to an actual outbound message, phone call, SMS, or search query.
+     */
+    fun isPlainAppOpenInCommunicateOrOpenApp(
+        actionType: String,
+        contactOrAppName: String,
+        messageOrQuery: String
+    ): Boolean {
+        val normAction = actionType.trim().lowercase(Locale.ROOT)
+        val normTarget = contactOrAppName.trim().lowercase(Locale.ROOT)
+        val normMsg = messageOrQuery.trim()
+        val normMsgLower = normMsg.lowercase(Locale.ROOT)
+
+        // Preserve actual calls, SMS, search, and media playback as separate actions
+        if (normAction.contains("call") ||
+            normAction.contains("dial") ||
+            normAction.contains("sms") ||
+            normAction.contains("search") ||
+            normAction.contains("google") ||
+            normAction.contains("play") ||
+            normAction.contains("video")
+        ) {
+            return false
+        }
+
+        val trivialOpenQueries = setOf(
+            "",
+            "open",
+            "kholo",
+            "khol",
+            "kholen",
+            "launch",
+            "start",
+            "app",
+            "کھولو",
+            "کھولیں",
+            normTarget,
+            "$normTarget kholo",
+            "open $normTarget"
+        )
+        val hasRealMessageOrSearchPayload = normMsgLower !in trivialOpenQueries
+
+        // If there is a real message or search query, it is messaging/search, not a plain app open
+        if (hasRealMessageOrSearchPayload) {
+            return false
+        }
+
+        // If actionType explicitly requests message/send/chat and there's no plain-open cue, only treat as plain open when message is blank AND target is an app name
+        if (normAction in setOf("open", "open_app", "launch", "launch_app", "app", "start_app", "")) {
+            return normTarget.isNotBlank()
+        }
+
+        val candidateApp = normTarget.ifBlank { normAction }
+        if (candidateApp.isBlank()) return false
+        val cleanedCandidate = candidateApp
+            .replace(Regex("\\b(open|kholo|khol|launch|start|app|application)\\b", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .ifBlank { candidateApp }
+        if (knownAppPackages.containsKey(cleanedCandidate) ||
+            knownAppPackages.containsKey(normAction) ||
+            cleanedCandidate.contains("whatsapp") ||
+            cleanedCandidate.contains("youtube") ||
+            cleanedCandidate.contains("instagram") ||
+            cleanedCandidate.contains("facebook") ||
+            cleanedCandidate.contains("tiktok") ||
+            cleanedCandidate.contains("telegram") ||
+            cleanedCandidate.contains("chrome") ||
+            cleanedCandidate.contains("gmail") ||
+            cleanedCandidate.contains("maps") ||
+            cleanedCandidate.contains("settings") ||
+            cleanedCandidate.contains("camera") ||
+            cleanedCandidate.contains("calculator") ||
+            cleanedCandidate.contains("clock") ||
+            cleanedCandidate.contains("calendar") ||
+            cleanedCandidate.contains("gallery") ||
+            cleanedCandidate.contains("photos") ||
+            cleanedCandidate.contains("notes") ||
+            cleanedCandidate.contains("notepad")
+        ) {
+            return true
+        }
+        return false
+    }
+
+    private fun recordOpenDiagnostics(
+        callerToolName: String,
+        savedOrigin: OriginTaskSnapshot?,
+        result: CanonicalAppLaunchResult
+    ): CanonicalAppLaunchResult {
+        lastCanonicalResult = result
+        lastPhase02Diagnostics = Phase02JourneyDiagnostics(
+            buildId = PHASE_02_BUILD_ID,
+            actualOpenTool = callerToolName.ifBlank { "open_app" },
+            savedOriginPackage = savedOrigin?.packageName?.ifBlank { "none" } ?: "none",
+            actualReturnTool = "none",
+            navigationMethod = result.launchMethod.ifBlank { "NONE" },
+            finalObservedPackage = result.observedPackage?.ifBlank { "none" } ?: "none",
+            reasonCode = result.reasonCode.ifBlank { result.status.name }
+        )
+        return result
+    }
+
+    private fun recordReturnDiagnostics(
+        callerToolName: String,
+        savedOrigin: OriginTaskSnapshot?,
+        result: CanonicalAppLaunchResult
+    ): CanonicalAppLaunchResult {
+        lastCanonicalResult = result
+        val prevOpenTool = lastPhase02Diagnostics.actualOpenTool
+        val originPkg = savedOrigin?.packageName?.ifBlank { null }
+            ?: lastPhase02Diagnostics.savedOriginPackage.takeIf { it.isNotBlank() && it != "none" }
+            ?: "none"
+        lastPhase02Diagnostics = Phase02JourneyDiagnostics(
+            buildId = PHASE_02_BUILD_ID,
+            actualOpenTool = prevOpenTool,
+            savedOriginPackage = originPkg,
+            actualReturnTool = callerToolName.ifBlank { "return_to_origin" },
+            navigationMethod = result.launchMethod.ifBlank { "NONE" },
+            finalObservedPackage = result.observedPackage?.ifBlank { "none" } ?: "none",
+            reasonCode = result.reasonCode.ifBlank { result.status.name }
+        )
+        return result
     }
 
     /**
@@ -518,12 +693,18 @@ object UiTools {
         ) {
             return null
         }
+        val realTaskId = if (snap.taskId > 0 && snap.taskId != snap.windowId) snap.taskId else -1
+        val realComponent = snap.activityComponent.trim().takeIf {
+            it.isNotEmpty() &&
+                it != "$pkg/${snap.titleGuess}" &&
+                !it.endsWith("/MainActivity")
+        } ?: ""
         return OriginTaskSnapshot(
             packageName = pkg,
             appLabel = snap.appLabel.ifBlank { pkg },
-            taskId = snap.taskId,
+            taskId = realTaskId,
             windowId = snap.windowId,
-            activityComponent = snap.activityComponent.ifBlank { "$pkg/MainActivity" },
+            activityComponent = realComponent,
             draftTexts = snap.editableFieldDrafts,
             capturedElapsedMs = snap.elapsedRealtimeMs
         )
@@ -634,28 +815,37 @@ object UiTools {
         context: Context,
         appName: String,
         visibleHomeMode: Boolean = true,
-        coldStartTimeoutMs: Long = defaultColdStartTimeoutMs
+        coldStartTimeoutMs: Long = defaultColdStartTimeoutMs,
+        callerToolName: String = "open_app"
     ): CanonicalAppLaunchResult {
         val cleaned = appName.trim()
         if (cleaned.isEmpty()) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.NEEDS_SETUP,
-                requestedApp = appName,
-                reasonCode = "EMPTY_APP_NAME",
-                message = "NeedsSetup: App name is empty. Specify which app to open.",
-                verificationNote = "No app name supplied to openAppCanonical."
-            ).also { lastCanonicalResult = it }
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = lastOriginTaskSnapshot,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.NEEDS_SETUP,
+                    requestedApp = appName,
+                    reasonCode = "EMPTY_APP_NAME",
+                    message = "NeedsSetup: App name is empty. Specify which app to open.",
+                    verificationNote = "No app name supplied to openAppCanonical."
+                )
+            )
         }
 
         // 1. Keep the secure-device block from Phase 01
         if (com.example.engine.LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.BLOCKED,
-                requestedApp = cleaned,
-                reasonCode = "DEVICE_LOCKED",
-                message = "Blocked: Cannot open '$cleaned' while the phone is locked. Please unlock your phone using Android's standard lock screen.",
-                verificationNote = "Blocked by Phase 01 lock-screen gate before resolving or dispatching any intent."
-            ).also { lastCanonicalResult = it }
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = lastOriginTaskSnapshot,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.BLOCKED,
+                    requestedApp = cleaned,
+                    reasonCode = "DEVICE_LOCKED",
+                    message = "Blocked: Cannot open '$cleaned' while the phone is locked. Please unlock your phone using Android's standard lock screen.",
+                    verificationNote = "Blocked by Phase 01 lock-screen gate before resolving or dispatching any intent."
+                )
+            )
         }
 
         // 2. Capture the non-transient originating user app before any navigation
@@ -671,16 +861,20 @@ object UiTools {
         // 3. Resolve installed package variants and disambiguate personal vs. Business or work profile
         val variants = resolveInstalledVariantsForAppName(context, cleaned)
         if (variants.isEmpty()) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.MISSING_APP,
-                requestedApp = cleaned,
-                observedPackage = null,
-                verified = false,
-                preservedOriginTask = preservedOrigin,
-                reasonCode = "APP_NOT_INSTALLED",
-                message = "MissingApp: '$cleaned' is not installed on this device. Stopped without opening Play Store or web search.",
-                verificationNote = "No installed launchable package matched '$cleaned'; no fallback intent dispatched."
-            ).also { lastCanonicalResult = it }
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = preservedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.MISSING_APP,
+                    requestedApp = cleaned,
+                    observedPackage = null,
+                    verified = false,
+                    preservedOriginTask = preservedOrigin,
+                    reasonCode = "APP_NOT_INSTALLED",
+                    message = "MissingApp: '$cleaned' is not installed on this device. Stopped without opening Play Store or web search.",
+                    verificationNote = "No installed launchable package matched '$cleaned'; no fallback intent dispatched."
+                )
+            )
         }
 
         if (variants.size > 1) {
@@ -688,17 +882,21 @@ object UiTools {
                 val prof = if (v.profileType == "work") " (Work profile)" else " (Personal)"
                 "${v.label}$prof [${v.packageName}]"
             }
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.NEEDS_SETUP,
-                requestedApp = cleaned,
-                observedPackage = null,
-                verified = false,
-                preservedOriginTask = preservedOrigin,
-                candidateVariants = variants,
-                reasonCode = "AMBIGUOUS_APP_VARIANT",
-                message = "NeedsSetup: Multiple variants match '$cleaned': $optionsDesc. Please specify personal, business, or work profile.",
-                verificationNote = "Disambiguation required across ${variants.size} installed variants before launching."
-            ).also { lastCanonicalResult = it }
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = preservedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.NEEDS_SETUP,
+                    requestedApp = cleaned,
+                    observedPackage = null,
+                    verified = false,
+                    preservedOriginTask = preservedOrigin,
+                    candidateVariants = variants,
+                    reasonCode = "AMBIGUOUS_APP_VARIANT",
+                    message = "NeedsSetup: Multiple variants match '$cleaned': $optionsDesc. Please specify personal, business, or work profile.",
+                    verificationNote = "Disambiguation required across ${variants.size} installed variants before launching."
+                )
+            )
         }
 
         val targetVariant = variants.first()
@@ -749,20 +947,24 @@ object UiTools {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             if (launchIntent == null) {
-                return CanonicalAppLaunchResult(
-                    status = CanonicalAppLaunchStatus.MISSING_APP,
-                    requestedApp = cleaned,
-                    resolvedPackage = targetPkg,
-                    resolvedLabel = targetLabel,
-                    profileType = targetVariant.profileType,
-                    observedPackage = null,
-                    verified = false,
-                    homeNavigated = homeNavigated,
-                    preservedOriginTask = preservedOrigin,
-                    reasonCode = "NO_LAUNCH_INTENT",
-                    message = "MissingApp: Package $targetPkg ($targetLabel) has no launchable main activity.",
-                    verificationNote = "PackageManager.getLaunchIntentForPackage($targetPkg) returned null."
-                ).also { lastCanonicalResult = it }
+                return recordOpenDiagnostics(
+                    callerToolName = callerToolName,
+                    savedOrigin = preservedOrigin,
+                    result = CanonicalAppLaunchResult(
+                        status = CanonicalAppLaunchStatus.MISSING_APP,
+                        requestedApp = cleaned,
+                        resolvedPackage = targetPkg,
+                        resolvedLabel = targetLabel,
+                        profileType = targetVariant.profileType,
+                        observedPackage = null,
+                        verified = false,
+                        homeNavigated = homeNavigated,
+                        preservedOriginTask = preservedOrigin,
+                        reasonCode = "NO_LAUNCH_INTENT",
+                        message = "MissingApp: Package $targetPkg ($targetLabel) has no launchable main activity.",
+                        verificationNote = "PackageManager.getLaunchIntentForPackage($targetPkg) returned null."
+                    )
+                )
             }
             try {
                 dispatchElapsedMs = SystemClock.elapsedRealtime()
@@ -774,7 +976,34 @@ object UiTools {
                 }
             } catch (e: Exception) {
                 AgentLog.e("UiTools", "openAppCanonical startActivity failed for $targetPkg", e)
-                return CanonicalAppLaunchResult(
+                return recordOpenDiagnostics(
+                    callerToolName = callerToolName,
+                    savedOrigin = preservedOrigin,
+                    result = CanonicalAppLaunchResult(
+                        status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                        requestedApp = cleaned,
+                        resolvedPackage = targetPkg,
+                        resolvedLabel = targetLabel,
+                        profileType = targetVariant.profileType,
+                        observedPackage = null,
+                        verified = false,
+                        launchMethod = "LAUNCH_EXCEPTION",
+                        homeNavigated = homeNavigated,
+                        preservedOriginTask = preservedOrigin,
+                        reasonCode = "START_ACTIVITY_FAILED",
+                        message = "Requested/Unverified: Failed to dispatch launch for $targetLabel ($targetPkg): ${e.message}",
+                        verificationNote = "startActivity threw ${e.javaClass.simpleName}: ${e.message}"
+                    )
+                )
+            }
+        }
+
+        // 6. Fresh post-dispatch target-package observation with bounded cold-start timeout
+        if (!ScreenObserver.isObserverAvailable()) {
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = preservedOrigin,
+                result = CanonicalAppLaunchResult(
                     status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
                     requestedApp = cleaned,
                     resolvedPackage = targetPkg,
@@ -782,34 +1011,15 @@ object UiTools {
                     profileType = targetVariant.profileType,
                     observedPackage = null,
                     verified = false,
-                    launchMethod = "LAUNCH_EXCEPTION",
+                    launchMethod = launchMethod,
+                    iconTapCount = iconTapCount,
                     homeNavigated = homeNavigated,
                     preservedOriginTask = preservedOrigin,
-                    reasonCode = "START_ACTIVITY_FAILED",
-                    message = "Requested/Unverified: Failed to dispatch launch for $targetLabel ($targetPkg): ${e.message}",
-                    verificationNote = "startActivity threw ${e.javaClass.simpleName}: ${e.message}"
-                ).also { lastCanonicalResult = it }
-            }
-        }
-
-        // 6. Fresh post-dispatch target-package observation with bounded cold-start timeout
-        if (!ScreenObserver.isObserverAvailable()) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
-                requestedApp = cleaned,
-                resolvedPackage = targetPkg,
-                resolvedLabel = targetLabel,
-                profileType = targetVariant.profileType,
-                observedPackage = null,
-                verified = false,
-                launchMethod = launchMethod,
-                iconTapCount = iconTapCount,
-                homeNavigated = homeNavigated,
-                preservedOriginTask = preservedOrigin,
-                reasonCode = "OBSERVER_DISABLED",
-                message = "Requested/Unverified: Dispatched launch for $targetLabel ($targetPkg), but Accessibility screen observer is disabled so foreground package could not be verified.",
-                verificationNote = "startActivity succeeded via $launchMethod; observer unavailable (observedPackage=null)."
-            ).also { lastCanonicalResult = it }
+                    reasonCode = "OBSERVER_DISABLED",
+                    message = "Requested/Unverified: Dispatched launch for $targetLabel ($targetPkg), but Accessibility screen observer is disabled so foreground package could not be verified.",
+                    verificationNote = "startActivity succeeded via $launchMethod; observer unavailable (observedPackage=null)."
+                )
+            )
         }
 
         val freshObs = ScreenObserver.observeFreshTargetPackage(
@@ -820,7 +1030,58 @@ object UiTools {
         )
 
         if (freshObs.matched && freshObs.bothAppsVisibleTogether) {
-            return CanonicalAppLaunchResult(
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = preservedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    requestedApp = cleaned,
+                    resolvedPackage = targetPkg,
+                    resolvedLabel = targetLabel,
+                    profileType = targetVariant.profileType,
+                    observedPackage = freshObs.observedPackage,
+                    verified = false,
+                    launchMethod = launchMethod,
+                    iconTapCount = iconTapCount,
+                    homeNavigated = homeNavigated,
+                    preservedOriginTask = preservedOrigin,
+                    bothAppsVisibleTogether = true,
+                    reasonCode = "BOTH_APPS_VISIBLE_TOGETHER",
+                    message = "Requested/Unverified: $targetLabel ($targetPkg) is visible alongside ${preservedOrigin?.packageName} in multi-window/split-screen rather than a full task switch.",
+                    verificationNote = "Observed packages=${freshObs.snapshot?.visibleApplicationPackages}; both origin and target apps are simultaneously visible."
+                )
+            )
+        }
+
+        if (freshObs.matched && freshObs.observedPackage != null) {
+            return recordOpenDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = preservedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.VERIFIED,
+                    requestedApp = cleaned,
+                    resolvedPackage = targetPkg,
+                    resolvedLabel = targetLabel,
+                    profileType = targetVariant.profileType,
+                    observedPackage = freshObs.observedPackage,
+                    verified = true,
+                    launchMethod = launchMethod,
+                    iconTapCount = iconTapCount,
+                    homeNavigated = homeNavigated,
+                    preservedOriginTask = preservedOrigin,
+                    bothAppsVisibleTogether = false,
+                    reasonCode = "VERIFIED_FOREGROUND",
+                    message = "Verified: Opened $targetLabel (${freshObs.observedPackage}) via $launchMethod.",
+                    verificationNote = "Fresh post-dispatch snapshot confirmed foreground package=${freshObs.observedPackage} (elapsed>=${dispatchElapsedMs}ms)."
+                )
+            )
+        }
+
+        val unverifiedPkgNote = freshObs.observedPackage ?: "none"
+        return recordOpenDiagnostics(
+            callerToolName = callerToolName,
+            savedOrigin = preservedOrigin,
+            result = CanonicalAppLaunchResult(
                 status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
                 requestedApp = cleaned,
                 resolvedPackage = targetPkg,
@@ -832,89 +1093,161 @@ object UiTools {
                 iconTapCount = iconTapCount,
                 homeNavigated = homeNavigated,
                 preservedOriginTask = preservedOrigin,
-                bothAppsVisibleTogether = true,
-                reasonCode = "BOTH_APPS_VISIBLE_TOGETHER",
-                message = "Requested/Unverified: $targetLabel ($targetPkg) is visible alongside ${preservedOrigin?.packageName} in multi-window/split-screen rather than a full task switch.",
-                verificationNote = "Observed packages=${freshObs.snapshot?.visibleApplicationPackages}; both origin and target apps are simultaneously visible."
-            ).also { lastCanonicalResult = it }
+                bothAppsVisibleTogether = freshObs.bothAppsVisibleTogether,
+                reasonCode = "COLD_START_TIMEOUT_UNVERIFIED",
+                message = "Requested/Unverified: Dispatched $targetLabel ($targetPkg) via $launchMethod, but target package was not observed within ${coldStartTimeoutMs}ms (observed=$unverifiedPkgNote).",
+                verificationNote = "Timed out after ${coldStartTimeoutMs}ms waiting for fresh $targetPkg snapshot; observedPackage=${freshObs.observedPackage ?: "null"}."
+            )
+        )
+    }
+
+    private data class RecentsTaskMatchResult(
+        val outcome: HomeIconMatchOutcome,
+        val matchedNode: UiNodeSummary? = null,
+        val candidateLabels: List<String> = emptyList()
+    )
+
+    private data class OriginReturnNavigationOutcome(
+        val dispatched: Boolean,
+        val methodUsed: String,
+        val freshObservation: FreshPackageObservation? = null,
+        val ambiguousRecentsCandidates: List<String> = emptyList(),
+        val errorReasonCode: String = "",
+        val errorMessage: String = ""
+    )
+
+    private fun findMatchingTaskInRecents(
+        recentsSnapshot: ScreenSnapshot?,
+        savedOrigin: OriginTaskSnapshot
+    ): RecentsTaskMatchResult {
+        if (recentsSnapshot == null) {
+            return RecentsTaskMatchResult(HomeIconMatchOutcome.NOT_FOUND_ON_PAGE)
+        }
+        val targetLabelLower = savedOrigin.appLabel.trim().lowercase(Locale.ROOT)
+        val targetPkgLower = savedOrigin.packageName.trim().lowercase(Locale.ROOT)
+        val ignoredControlWords = setOf(
+            "clear all",
+            "close all",
+            "dismiss",
+            "screenshot",
+            "select",
+            "split screen",
+            "app info"
+        )
+
+        val candidates = recentsSnapshot.nodes.filter { node ->
+            if (!node.isClickable || !node.isEnabled) return@filter false
+            if (node.bounds.width() <= 0 || node.bounds.height() <= 0) return@filter false
+            val textLower = node.text.trim().lowercase(Locale.ROOT)
+            val descLower = node.contentDescription.trim().lowercase(Locale.ROOT)
+            val combined = "$textLower $descLower".trim()
+            if (combined.isEmpty() || combined in ignoredControlWords) return@filter false
+
+            val matchesLabel = targetLabelLower.isNotBlank() && (
+                textLower == targetLabelLower ||
+                    descLower == targetLabelLower ||
+                    textLower.contains(targetLabelLower) ||
+                    descLower.contains(targetLabelLower)
+                )
+            val matchesPkg = targetPkgLower.isNotBlank() && (
+                textLower.contains(targetPkgLower) ||
+                    descLower.contains(targetPkgLower)
+                )
+            matchesLabel || matchesPkg
         }
 
-        if (freshObs.matched && freshObs.observedPackage != null) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.VERIFIED,
-                requestedApp = cleaned,
-                resolvedPackage = targetPkg,
-                resolvedLabel = targetLabel,
-                profileType = targetVariant.profileType,
-                observedPackage = freshObs.observedPackage,
-                verified = true,
-                launchMethod = launchMethod,
-                iconTapCount = iconTapCount,
-                homeNavigated = homeNavigated,
-                preservedOriginTask = preservedOrigin,
-                bothAppsVisibleTogether = false,
-                reasonCode = "VERIFIED_FOREGROUND",
-                message = "Verified: Opened $targetLabel (${freshObs.observedPackage}) via $launchMethod.",
-                verificationNote = "Fresh post-dispatch snapshot confirmed foreground package=${freshObs.observedPackage} (elapsed>=${dispatchElapsedMs}ms)."
-            ).also { lastCanonicalResult = it }
+        if (candidates.isEmpty()) {
+            return RecentsTaskMatchResult(HomeIconMatchOutcome.NOT_FOUND_ON_PAGE)
+        }
+        if (candidates.size == 1) {
+            return RecentsTaskMatchResult(
+                outcome = HomeIconMatchOutcome.UNIQUE_ON_PAGE,
+                matchedNode = candidates.first()
+            )
         }
 
-        val unverifiedPkgNote = freshObs.observedPackage ?: "none"
-        return CanonicalAppLaunchResult(
-            status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
-            requestedApp = cleaned,
-            resolvedPackage = targetPkg,
-            resolvedLabel = targetLabel,
-            profileType = targetVariant.profileType,
-            observedPackage = freshObs.observedPackage,
-            verified = false,
-            launchMethod = launchMethod,
-            iconTapCount = iconTapCount,
-            homeNavigated = homeNavigated,
-            preservedOriginTask = preservedOrigin,
-            bothAppsVisibleTogether = freshObs.bothAppsVisibleTogether,
-            reasonCode = "COLD_START_TIMEOUT_UNVERIFIED",
-            message = "Requested/Unverified: Dispatched $targetLabel ($targetPkg) via $launchMethod, but target package was not observed within ${coldStartTimeoutMs}ms (observed=$unverifiedPkgNote).",
-            verificationNote = "Timed out after ${coldStartTimeoutMs}ms waiting for fresh $targetPkg snapshot; observedPackage=${freshObs.observedPackage ?: "null"}."
-        ).also { lastCanonicalResult = it }
+        // Multiple task cards for the same app exist in Recents: check if saved activityComponent or draft text uniquely disambiguates one card
+        val disambiguators = buildList {
+            if (savedOrigin.activityComponent.isNotBlank()) {
+                add(savedOrigin.activityComponent.substringAfterLast('/').lowercase(Locale.ROOT))
+            }
+            savedOrigin.draftTexts.values.forEach { draft ->
+                val trimmed = draft.trim().lowercase(Locale.ROOT)
+                if (trimmed.isNotBlank()) add(trimmed)
+            }
+        }.filter { it.isNotBlank() }
+
+        if (disambiguators.isNotEmpty()) {
+            val narrowed = candidates.filter { node ->
+                val combined = "${node.text} ${node.contentDescription}".lowercase(Locale.ROOT)
+                disambiguators.any { combined.contains(it) }
+            }
+            if (narrowed.size == 1) {
+                return RecentsTaskMatchResult(
+                    outcome = HomeIconMatchOutcome.UNIQUE_ON_PAGE,
+                    matchedNode = narrowed.first()
+                )
+            }
+        }
+
+        return RecentsTaskMatchResult(
+            outcome = HomeIconMatchOutcome.AMBIGUOUS_ON_PAGE,
+            candidateLabels = candidates.mapIndexed { idx, node ->
+                node.displayLabel().ifBlank { "${savedOrigin.appLabel} #${idx + 1}" }
+            }
+        )
     }
 
     /**
      * Brings the saved origin task ([savedOrigin]) to the foreground through supported Android navigation
      * without routing to `close_app`, killing processes, clearing task state, or blindly pressing Back/Home.
      *
-     * Supported navigation paths:
-     * 1. Test hooks ([testReturnNavigationHandler] / [testBackActionHandler]) when set in Robolectric tests,
-     *    with automatic continuation if [testBackActionHandler] stops on the Home Launcher when WhatsApp was
-     *    opened via Home.
-     * 2. Existing-task resume (`ActivityManager.moveTaskToFront` + `getLaunchIntentForPackage` with
-     *    `FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_SINGLE_TOP | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED`, never `CLEAR_TOP`).
-     * 3. Accessibility Recents task switch (`GLOBAL_ACTION_RECENTS` -> tap saved origin card) or Home launcher
-     *    icon tap (`findMatchingLauncherIconOnHome` -> `tapHomeLauncherIconOnce`) when background activity
-     *    starts are restricted by the OS.
+     * Rules enforced:
+     * 1. Tries one supported recovery method at a time.
+     * 2. After each dispatch, waits up to [coldStartTimeoutMs] for fresh foreground evidence before trying another method.
+     * 3. If the saved origin app (e.g. Notepad) has returned, stops immediately — never sends the user to Recents
+     *    or Home just because the switch took more than 450 ms.
+     * 4. Never passes an Accessibility windowId to `ActivityManager.moveTaskToFront`.
+     * 5. When Recents is needed, selects the existing Notepad task if uniquely identifiable, or reports
+     *    `AMBIGUOUS_RECENTS_TASK` when multiple matching tasks are ambiguous.
      */
     private suspend fun bringSavedOriginTaskForward(
         context: Context,
         savedOrigin: OriginTaskSnapshot,
         currentForegroundPkg: String?,
         coldStartTimeoutMs: Long
-    ): Pair<Boolean, String> {
+    ): OriginReturnNavigationOutcome {
         val originVariant = InstalledAppVariant(
             packageName = savedOrigin.packageName,
             label = savedOrigin.appLabel.ifBlank { savedOrigin.packageName }
         )
 
         testReturnNavigationHandler?.let { handler ->
+            val stepStartMs = SystemClock.elapsedRealtime()
             val ok = handler(savedOrigin)
-            return ok to "SUPPORTED_TASK_RETURN_HANDLER"
+            val obs = if (ok && ScreenObserver.isObserverAvailable()) {
+                ScreenObserver.observeFreshTargetPackage(
+                    expectedPackages = setOf(savedOrigin.packageName),
+                    afterElapsedRealtimeMs = stepStartMs,
+                    timeoutMs = coldStartTimeoutMs,
+                    originPackage = currentForegroundPkg
+                )
+            } else {
+                null
+            }
+            return OriginReturnNavigationOutcome(
+                dispatched = ok,
+                methodUsed = if (ok) "SUPPORTED_TASK_RETURN_HANDLER" else "NONE",
+                freshObservation = obs
+            )
         }
 
         testBackActionHandler?.let { backHandler ->
+            val stepStartMs = SystemClock.elapsedRealtime()
             val handled = backHandler.invoke()
-            if (!handled) return false to "NONE"
-            // If WhatsApp was opened from the Home screen ("Notepad -> Home -> WhatsApp"),
-            // a single back transition may expose the Home Launcher rather than Notepad.
-            // If so, complete the return to the saved origin task via Home icon tap or existing-task resume.
+            if (!handled) {
+                return OriginReturnNavigationOutcome(dispatched = false, methodUsed = "NONE")
+            }
             val intermediateSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)
             val intermediatePkg = intermediateSnap?.packageName.orEmpty()
             if (intermediateSnap != null &&
@@ -923,8 +1256,19 @@ object UiTools {
             ) {
                 val (matchOutcome, iconNode) = findMatchingLauncherIconOnHome(intermediateSnap, originVariant)
                 if (matchOutcome == HomeIconMatchOutcome.UNIQUE_ON_PAGE && iconNode != null) {
+                    val tapStartMs = SystemClock.elapsedRealtime()
                     if (tapHomeLauncherIconOnce(iconNode)) {
-                        return true to "HOME_LAUNCHER_TASK_RESUME"
+                        val obs = ScreenObserver.observeFreshTargetPackage(
+                            expectedPackages = setOf(savedOrigin.packageName),
+                            afterElapsedRealtimeMs = tapStartMs,
+                            timeoutMs = coldStartTimeoutMs,
+                            originPackage = currentForegroundPkg
+                        )
+                        return OriginReturnNavigationOutcome(
+                            dispatched = true,
+                            methodUsed = "HOME_LAUNCHER_TASK_RESUME",
+                            freshObservation = obs
+                        )
                     }
                 }
                 val resumeIntent = context.packageManager.getLaunchIntentForPackage(savedOrigin.packageName)?.apply {
@@ -936,32 +1280,45 @@ object UiTools {
                 }
                 if (resumeIntent != null) {
                     try {
+                        val intentStartMs = SystemClock.elapsedRealtime()
                         context.startActivity(resumeIntent)
-                        return true to "EXISTING_TASK_INTENT_RESUME"
+                        val obs = ScreenObserver.observeFreshTargetPackage(
+                            expectedPackages = setOf(savedOrigin.packageName),
+                            afterElapsedRealtimeMs = intentStartMs,
+                            timeoutMs = coldStartTimeoutMs,
+                            originPackage = currentForegroundPkg
+                        )
+                        return OriginReturnNavigationOutcome(
+                            dispatched = true,
+                            methodUsed = "EXISTING_TASK_INTENT_RESUME",
+                            freshObservation = obs
+                        )
                     } catch (_: Exception) {
                     }
                 }
             }
-            return true to "SUPPORTED_TASK_RETURN_HANDLER"
-        }
-
-        var dispatched = false
-        var methodUsed = "NONE"
-
-        // 1. Try moving the existing taskId to front via ActivityManager if taskId is known
-        if (savedOrigin.taskId > 0) {
-            try {
-                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-                if (am != null) {
-                    am.moveTaskToFront(savedOrigin.taskId, 0)
-                    dispatched = true
-                    methodUsed = "MOVE_TASK_TO_FRONT"
-                }
-            } catch (_: Exception) {
+            val obs = if (ScreenObserver.isObserverAvailable()) {
+                ScreenObserver.observeFreshTargetPackage(
+                    expectedPackages = setOf(savedOrigin.packageName),
+                    afterElapsedRealtimeMs = stepStartMs,
+                    timeoutMs = coldStartTimeoutMs,
+                    originPackage = currentForegroundPkg
+                )
+            } else {
+                null
             }
+            return OriginReturnNavigationOutcome(
+                dispatched = true,
+                methodUsed = "SUPPORTED_TASK_RETURN_HANDLER",
+                freshObservation = obs
+            )
         }
 
-        // 2. Bring the existing task stack forward via its root launcher intent with SINGLE_TOP | RESET_TASK_IF_NEEDED
+        var anyDispatched = false
+        var lastMethodUsed = "NONE"
+        var lastObservation: FreshPackageObservation? = null
+
+        // Method 1: Existing-task resume via root launcher intent with SINGLE_TOP | RESET_TASK_IF_NEEDED
         // (Preserves the open activity and its unsaved EditText draft; never uses CLEAR_TOP or CLEAR_TASK).
         val resumeIntent = context.packageManager.getLaunchIntentForPackage(savedOrigin.packageName)?.apply {
             addFlags(
@@ -973,63 +1330,160 @@ object UiTools {
         if (resumeIntent != null) {
             try {
                 val launchCtx = AgentBridge.service ?: context
+                val intentDispatchMs = SystemClock.elapsedRealtime()
                 launchCtx.startActivity(resumeIntent)
-                dispatched = true
-                methodUsed = "EXISTING_TASK_INTENT_RESUME"
+                anyDispatched = true
+                lastMethodUsed = "EXISTING_TASK_INTENT_RESUME"
+
+                if (!ScreenObserver.isObserverAvailable()) {
+                    return OriginReturnNavigationOutcome(
+                        dispatched = true,
+                        methodUsed = "EXISTING_TASK_INTENT_RESUME"
+                    )
+                }
+                val intentObs = ScreenObserver.observeFreshTargetPackage(
+                    expectedPackages = setOf(savedOrigin.packageName),
+                    afterElapsedRealtimeMs = intentDispatchMs,
+                    timeoutMs = coldStartTimeoutMs,
+                    originPackage = currentForegroundPkg
+                )
+                lastObservation = intentObs
+                if (intentObs.matched) {
+                    // Origin app returned to foreground: stop immediately! Never send user to Recents or Home.
+                    return OriginReturnNavigationOutcome(
+                        dispatched = true,
+                        methodUsed = "EXISTING_TASK_INTENT_RESUME",
+                        freshObservation = intentObs
+                    )
+                }
             } catch (e: Exception) {
                 AgentLog.w("UiTools", "Existing-task intent resume failed for ${savedOrigin.packageName}: ${e.message}")
             }
         }
 
-        val svc = AgentBridge.service
-        if (svc != null) {
-            val probeTimeout = (coldStartTimeoutMs / 3L).coerceIn(120L, 450L)
-            if (dispatched) {
-                val quickCheck = ScreenObserver.observeFreshTargetPackage(
-                    expectedPackages = setOf(savedOrigin.packageName),
-                    afterElapsedRealtimeMs = SystemClock.elapsedRealtime() - 50L,
-                    timeoutMs = probeTimeout,
-                    originPackage = currentForegroundPkg
-                )
-                if (quickCheck.matched) {
-                    return true to methodUsed
+        // Method 2: ActivityManager.moveTaskToFront ONLY when a real Android taskId is known (never a windowId)
+        val hasRealTaskId = savedOrigin.taskId > 0 && savedOrigin.taskId != savedOrigin.windowId
+        if (hasRealTaskId) {
+            try {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+                if (am != null) {
+                    val moveStartMs = SystemClock.elapsedRealtime()
+                    am.moveTaskToFront(savedOrigin.taskId, 0)
+                    anyDispatched = true
+                    lastMethodUsed = "MOVE_TASK_TO_FRONT"
+                    if (ScreenObserver.isObserverAvailable()) {
+                        val moveObs = ScreenObserver.observeFreshTargetPackage(
+                            expectedPackages = setOf(savedOrigin.packageName),
+                            afterElapsedRealtimeMs = moveStartMs,
+                            timeoutMs = coldStartTimeoutMs,
+                            originPackage = currentForegroundPkg
+                        )
+                        lastObservation = moveObs
+                        if (moveObs.matched) {
+                            return OriginReturnNavigationOutcome(
+                                dispatched = true,
+                                methodUsed = "MOVE_TASK_TO_FRONT",
+                                freshObservation = moveObs
+                            )
+                        }
+                    }
                 }
+            } catch (_: Exception) {
             }
+        }
 
-            // 3. Supported Accessibility navigation fallback: Recents card selection
+        // Method 3: Supported Accessibility navigation fallback: Recents card selection
+        val svc = AgentBridge.service
+        val recentsAvailable = svc != null || testRecentsActionHandler != null
+        if (recentsAvailable) {
             val openedRecents = try {
-                svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
+                testRecentsActionHandler?.invoke()
+                    ?: svc?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
+                    ?: false
             } catch (_: Exception) {
                 false
             }
             if (openedRecents) {
-                delay(180L)
-                val recentsRoot = ScreenObserver.findApplicationRoot(svc, preferNonSelfPackage = false)
-                    ?: svc.rootInActiveWindow
-                if (recentsRoot != null) {
-                    val labelQuery = savedOrigin.appLabel.ifBlank { savedOrigin.packageName }
-                    val cardNode = findClickableMatchingNode(recentsRoot, labelQuery, exact = true)
-                        ?: findClickableMatchingNode(recentsRoot, labelQuery, exact = false)
-                    if (cardNode != null && performClickOrTap(cardNode)) {
-                        dispatched = true
-                        methodUsed = "RECENTS_TASK_SWITCH"
-                        val afterRecents = ScreenObserver.observeFreshTargetPackage(
-                            expectedPackages = setOf(savedOrigin.packageName),
-                            afterElapsedRealtimeMs = SystemClock.elapsedRealtime() - 50L,
-                            timeoutMs = probeTimeout,
-                            originPackage = currentForegroundPkg
+                delay(150L)
+                val recentsSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+                val matchResult = findMatchingTaskInRecents(recentsSnap, savedOrigin)
+                when (matchResult.outcome) {
+                    HomeIconMatchOutcome.AMBIGUOUS_ON_PAGE -> {
+                        return OriginReturnNavigationOutcome(
+                            dispatched = false,
+                            methodUsed = "RECENTS_TASK_SWITCH",
+                            ambiguousRecentsCandidates = matchResult.candidateLabels,
+                            errorReasonCode = "AMBIGUOUS_RECENTS_TASK",
+                            errorMessage = "Requested/Unverified: Multiple ${savedOrigin.appLabel} tasks were found in Recents (${matchResult.candidateLabels.joinToString(", ")}); stopped without guessing which task contains your open window."
                         )
-                        if (afterRecents.matched) {
-                            return true to methodUsed
+                    }
+                    HomeIconMatchOutcome.UNIQUE_ON_PAGE -> {
+                        val targetNode = matchResult.matchedNode
+                        if (targetNode != null) {
+                            val recentsTapMs = SystemClock.elapsedRealtime()
+                            if (tapHomeLauncherIconOnce(targetNode)) {
+                                anyDispatched = true
+                                lastMethodUsed = "RECENTS_TASK_SWITCH"
+                                val recentsObs = ScreenObserver.observeFreshTargetPackage(
+                                    expectedPackages = setOf(savedOrigin.packageName),
+                                    afterElapsedRealtimeMs = recentsTapMs,
+                                    timeoutMs = coldStartTimeoutMs,
+                                    originPackage = currentForegroundPkg
+                                )
+                                lastObservation = recentsObs
+                                if (recentsObs.matched) {
+                                    return OriginReturnNavigationOutcome(
+                                        dispatched = true,
+                                        methodUsed = "RECENTS_TASK_SWITCH",
+                                        freshObservation = recentsObs
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    HomeIconMatchOutcome.NOT_FOUND_ON_PAGE -> {
+                        if (svc != null) {
+                            val recentsRoot = ScreenObserver.findApplicationRoot(svc, preferNonSelfPackage = false)
+                                ?: svc.rootInActiveWindow
+                            if (recentsRoot != null) {
+                                val labelQuery = savedOrigin.appLabel.ifBlank { savedOrigin.packageName }
+                                val cardNode = findClickableMatchingNode(recentsRoot, labelQuery, exact = true)
+                                    ?: findClickableMatchingNode(recentsRoot, labelQuery, exact = false)
+                                if (cardNode != null) {
+                                    val recentsTapMs = SystemClock.elapsedRealtime()
+                                    if (performClickOrTap(cardNode)) {
+                                        anyDispatched = true
+                                        lastMethodUsed = "RECENTS_TASK_SWITCH"
+                                        val recentsObs = ScreenObserver.observeFreshTargetPackage(
+                                            expectedPackages = setOf(savedOrigin.packageName),
+                                            afterElapsedRealtimeMs = recentsTapMs,
+                                            timeoutMs = coldStartTimeoutMs,
+                                            originPackage = currentForegroundPkg
+                                        )
+                                        lastObservation = recentsObs
+                                        if (recentsObs.matched) {
+                                            return OriginReturnNavigationOutcome(
+                                                dispatched = true,
+                                                methodUsed = "RECENTS_TASK_SWITCH",
+                                                freshObservation = recentsObs
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
 
-            // 4. Supported Accessibility navigation fallback: Home launcher icon tap for savedOrigin
+        // Method 4: Supported Accessibility navigation fallback: Home launcher icon tap for savedOrigin
+        val homeAvailable = svc != null || testHomeActionHandler != null
+        if (homeAvailable) {
             val wentHome = try {
                 testHomeActionHandler?.invoke()
-                    ?: svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                    ?: svc?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+                    ?: false
             } catch (_: Exception) {
                 false
             }
@@ -1038,14 +1492,34 @@ object UiTools {
                 val homeSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)
                 val (matchOutcome, iconNode) = findMatchingLauncherIconOnHome(homeSnap, originVariant)
                 if (matchOutcome == HomeIconMatchOutcome.UNIQUE_ON_PAGE && iconNode != null) {
+                    val homeTapMs = SystemClock.elapsedRealtime()
                     if (tapHomeLauncherIconOnce(iconNode)) {
-                        return true to "HOME_LAUNCHER_TASK_RESUME"
+                        anyDispatched = true
+                        lastMethodUsed = "HOME_LAUNCHER_TASK_RESUME"
+                        val homeObs = ScreenObserver.observeFreshTargetPackage(
+                            expectedPackages = setOf(savedOrigin.packageName),
+                            afterElapsedRealtimeMs = homeTapMs,
+                            timeoutMs = coldStartTimeoutMs,
+                            originPackage = currentForegroundPkg
+                        )
+                        lastObservation = homeObs
+                        if (homeObs.matched) {
+                            return OriginReturnNavigationOutcome(
+                                dispatched = true,
+                                methodUsed = "HOME_LAUNCHER_TASK_RESUME",
+                                freshObservation = homeObs
+                            )
+                        }
                     }
                 }
             }
         }
 
-        return dispatched to methodUsed
+        return OriginReturnNavigationOutcome(
+            dispatched = anyDispatched,
+            methodUsed = lastMethodUsed,
+            freshObservation = lastObservation
+        )
     }
 
     /**
@@ -1059,150 +1533,213 @@ object UiTools {
      * - Brings the existing saved origin task forward through supported navigation (never routes to `close_app`
      *   and never blindly presses Back or Home).
      * - Distinguishes task switching from both apps being visible together in split-screen/multi-window.
-     * - Refuses to relaunch an unrelated task that shares the same package name.
-     * - Verifies that the saved origin app, exact window, and open draft (when present) are actually in the
+     * - Refuses to relaunch an unrelated task that shares the same package name when real taskId/component values differ.
+     * - Never rejects the correct Notepad screen because its Accessibility windowId or guessed title changed.
+     * - Verifies that the saved origin app and open draft (when present) are actually in the
      *   foreground before announcing success. Never claims the draft survived based on the package name alone.
      */
     suspend fun returnToOriginCanonical(
         context: Context,
-        coldStartTimeoutMs: Long = defaultColdStartTimeoutMs
+        coldStartTimeoutMs: Long = defaultColdStartTimeoutMs,
+        callerToolName: String = "return_to_origin"
     ): CanonicalAppLaunchResult {
         if (com.example.engine.LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.BLOCKED,
-                requestedApp = "return_to_previous_app",
-                reasonCode = "DEVICE_LOCKED",
-                message = "Blocked: Cannot return to the previous app while the phone is locked.",
-                verificationNote = "Blocked by Phase 01 lock-screen gate."
-            ).also { lastCanonicalResult = it }
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = lastOriginTaskSnapshot,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.BLOCKED,
+                    requestedApp = "return_to_previous_app",
+                    reasonCode = "DEVICE_LOCKED",
+                    message = "Blocked: Cannot return to the previous app while the phone is locked.",
+                    verificationNote = "Blocked by Phase 01 lock-screen gate."
+                )
+            )
         }
 
         val savedOrigin = lastOriginTaskSnapshot
-            ?: return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.NEEDS_SETUP,
-                requestedApp = "return_to_previous_app",
-                observedPackage = null,
-                verified = false,
-                reasonCode = "NO_SAVED_ORIGIN_TASK",
-                message = "NeedsSetup: No saved previous app window is available to return to.",
-                verificationNote = "lastOriginTaskSnapshot is null."
-            ).also { lastCanonicalResult = it }
+            ?: return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = null,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.NEEDS_SETUP,
+                    requestedApp = "return_to_previous_app",
+                    observedPackage = null,
+                    verified = false,
+                    reasonCode = "NO_SAVED_ORIGIN_TASK",
+                    message = "NeedsSetup: No saved previous app window is available to return to.",
+                    verificationNote = "lastOriginTaskSnapshot is null."
+                )
+            )
 
         val preReturnSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)
         val currentForegroundPkg = preReturnSnap?.packageName
 
         // Check if an unrelated task sharing the same package name would be exposed/relaunched
         val candidateTask = testActiveCandidateTaskForReturn
+        val hasRealSavedTaskIdForCandidate = savedOrigin.taskId > 0 && savedOrigin.taskId != savedOrigin.windowId
+        val hasRealCandidateTaskId = candidateTask != null && candidateTask.taskId > 0 && candidateTask.taskId != candidateTask.windowId
         if (candidateTask != null &&
             candidateTask.packageName.equals(savedOrigin.packageName, ignoreCase = true) &&
-            ((savedOrigin.taskId != -1 && candidateTask.taskId != -1 && candidateTask.taskId != savedOrigin.taskId) ||
+            ((hasRealSavedTaskIdForCandidate && hasRealCandidateTaskId && candidateTask.taskId != savedOrigin.taskId) ||
                 (savedOrigin.activityComponent.isNotBlank() &&
                     candidateTask.activityComponent.isNotBlank() &&
                     !candidateTask.activityComponent.equals(savedOrigin.activityComponent, ignoreCase = true)))
         ) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.BLOCKED,
-                requestedApp = "return_to_previous_app",
-                resolvedPackage = savedOrigin.packageName,
-                resolvedLabel = savedOrigin.appLabel,
-                observedPackage = currentForegroundPkg,
-                verified = false,
-                preservedOriginTask = savedOrigin,
-                reasonCode = "UNRELATED_TASK_SAME_PACKAGE",
-                message = "Blocked: Refused to relaunch unrelated task (taskId=${candidateTask.taskId}, component=${candidateTask.activityComponent}) sharing package ${savedOrigin.packageName}; saved origin task is taskId=${savedOrigin.taskId} (${savedOrigin.activityComponent}).",
-                verificationNote = "Candidate task shares package ${savedOrigin.packageName} but mismatches saved taskId/component."
-            ).also { lastCanonicalResult = it }
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.BLOCKED,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = currentForegroundPkg,
+                    verified = false,
+                    preservedOriginTask = savedOrigin,
+                    reasonCode = "UNRELATED_TASK_SAME_PACKAGE",
+                    message = "Blocked: Refused to relaunch unrelated task (taskId=${candidateTask.taskId}, component=${candidateTask.activityComponent}) sharing package ${savedOrigin.packageName}; saved origin task is taskId=${savedOrigin.taskId} (${savedOrigin.activityComponent}).",
+                    verificationNote = "Candidate task shares package ${savedOrigin.packageName} but mismatches saved taskId/component."
+                )
+            )
         }
 
         val dispatchElapsedMs = SystemClock.elapsedRealtime()
-        val (navigationDispatched, navMethod) = bringSavedOriginTaskForward(
+        val navOutcome = bringSavedOriginTaskForward(
             context = context,
             savedOrigin = savedOrigin,
             currentForegroundPkg = currentForegroundPkg,
             coldStartTimeoutMs = coldStartTimeoutMs
         )
 
-        if (!navigationDispatched) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.NEEDS_SETUP,
-                requestedApp = "return_to_previous_app",
-                resolvedPackage = savedOrigin.packageName,
-                resolvedLabel = savedOrigin.appLabel,
-                observedPackage = null,
-                verified = false,
-                preservedOriginTask = savedOrigin,
-                reasonCode = "NAVIGATION_UNAVAILABLE",
-                message = "NeedsSetup: Supported task-return navigation is unavailable for ${savedOrigin.appLabel} (${savedOrigin.packageName}).",
-                verificationNote = "No supported task-return navigation handler or launch intent succeeded."
-            ).also { lastCanonicalResult = it }
+        if (navOutcome.errorReasonCode == "AMBIGUOUS_RECENTS_TASK") {
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = currentForegroundPkg,
+                    verified = false,
+                    launchMethod = navOutcome.methodUsed,
+                    preservedOriginTask = savedOrigin,
+                    reasonCode = "AMBIGUOUS_RECENTS_TASK",
+                    message = navOutcome.errorMessage,
+                    verificationNote = "Ambiguous tasks in Recents for ${savedOrigin.packageName}: ${navOutcome.ambiguousRecentsCandidates.joinToString(", ")}"
+                )
+            )
         }
 
-        val freshObs = ScreenObserver.observeFreshTargetPackage(
-            expectedPackages = setOf(savedOrigin.packageName),
-            afterElapsedRealtimeMs = dispatchElapsedMs,
-            timeoutMs = coldStartTimeoutMs,
-            originPackage = currentForegroundPkg
-        )
+        val navMethod = navOutcome.methodUsed
+        if (!navOutcome.dispatched) {
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.NEEDS_SETUP,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = null,
+                    verified = false,
+                    preservedOriginTask = savedOrigin,
+                    reasonCode = "NAVIGATION_UNAVAILABLE",
+                    message = "NeedsSetup: Supported task-return navigation is unavailable for ${savedOrigin.appLabel} (${savedOrigin.packageName}).",
+                    verificationNote = "No supported task-return navigation handler or launch intent succeeded."
+                )
+            )
+        }
+
+        val freshObs = navOutcome.freshObservation?.takeIf { it.matched }
+            ?: ScreenObserver.observeFreshTargetPackage(
+                expectedPackages = setOf(savedOrigin.packageName),
+                afterElapsedRealtimeMs = dispatchElapsedMs,
+                timeoutMs = coldStartTimeoutMs,
+                originPackage = currentForegroundPkg
+            )
 
         val returnedSnap = freshObs.snapshot
+        val hasRealSavedTaskId = savedOrigin.taskId > 0 && savedOrigin.taskId != savedOrigin.windowId
+        val hasRealReturnedTaskId = returnedSnap != null && returnedSnap.taskId > 0 && returnedSnap.taskId != returnedSnap.windowId
         if (returnedSnap != null &&
             returnedSnap.packageName.equals(savedOrigin.packageName, ignoreCase = true) &&
-            savedOrigin.taskId != -1 &&
-            returnedSnap.taskId != -1 &&
+            hasRealSavedTaskId &&
+            hasRealReturnedTaskId &&
             returnedSnap.taskId != savedOrigin.taskId
         ) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
-                requestedApp = "return_to_previous_app",
-                resolvedPackage = savedOrigin.packageName,
-                resolvedLabel = savedOrigin.appLabel,
-                observedPackage = returnedSnap.packageName,
-                verified = false,
-                launchMethod = navMethod,
-                preservedOriginTask = savedOrigin,
-                reasonCode = "UNRELATED_TASK_OBSERVED",
-                message = "Requested/Unverified: Observed package ${returnedSnap.packageName} (window='${returnedSnap.activityComponent}'), but taskId=${returnedSnap.taskId} does not match saved origin taskId=${savedOrigin.taskId}.",
-                verificationNote = "Foreground task shares package ${savedOrigin.packageName} but is an unrelated task."
-            ).also { lastCanonicalResult = it }
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = returnedSnap.packageName,
+                    verified = false,
+                    launchMethod = navMethod,
+                    preservedOriginTask = savedOrigin,
+                    reasonCode = "UNRELATED_TASK_OBSERVED",
+                    message = "Requested/Unverified: Observed package ${returnedSnap.packageName} (window='${returnedSnap.activityComponent}'), but taskId=${returnedSnap.taskId} does not match saved origin taskId=${savedOrigin.taskId}.",
+                    verificationNote = "Foreground task shares package ${savedOrigin.packageName} but is an unrelated task."
+                )
+            )
         }
+
+        val savedComp = savedOrigin.activityComponent.trim()
+        val returnedComp = returnedSnap?.activityComponent?.trim().orEmpty()
+        val hasRealSavedComp = savedComp.isNotEmpty() &&
+            !savedComp.endsWith("/MainActivity")
+        val hasRealReturnedComp = returnedComp.isNotEmpty() &&
+            !returnedComp.endsWith("/MainActivity") &&
+            returnedComp != "${returnedSnap?.packageName}/${returnedSnap?.titleGuess}"
 
         if (returnedSnap != null &&
             returnedSnap.packageName.equals(savedOrigin.packageName, ignoreCase = true) &&
-            savedOrigin.activityComponent.isNotBlank() &&
-            !savedOrigin.activityComponent.endsWith("/MainActivity") &&
-            returnedSnap.activityComponent.isNotBlank() &&
-            !returnedSnap.activityComponent.equals(savedOrigin.activityComponent, ignoreCase = true)
+            hasRealSavedComp &&
+            hasRealReturnedComp &&
+            !returnedComp.equals(savedComp, ignoreCase = true)
         ) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
-                requestedApp = "return_to_previous_app",
-                resolvedPackage = savedOrigin.packageName,
-                resolvedLabel = savedOrigin.appLabel,
-                observedPackage = returnedSnap.packageName,
-                verified = false,
-                launchMethod = navMethod,
-                preservedOriginTask = savedOrigin,
-                reasonCode = "ORIGIN_WINDOW_MISMATCH",
-                message = "Requested/Unverified: ${savedOrigin.appLabel} (${savedOrigin.packageName}) is in the foreground, but the exact window could not be restored (expected '${savedOrigin.activityComponent}', observed '${returnedSnap.activityComponent}').",
-                verificationNote = "Expected activityComponent=${savedOrigin.activityComponent}, observed=${returnedSnap.activityComponent}."
-            ).also { lastCanonicalResult = it }
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = returnedSnap.packageName,
+                    verified = false,
+                    launchMethod = navMethod,
+                    preservedOriginTask = savedOrigin,
+                    reasonCode = "ORIGIN_WINDOW_MISMATCH",
+                    message = "Requested/Unverified: ${savedOrigin.appLabel} (${savedOrigin.packageName}) is in the foreground, but the exact window could not be restored (expected '$savedComp', observed '$returnedComp').",
+                    verificationNote = "Expected activityComponent=$savedComp, observed=$returnedComp."
+                )
+            )
         }
 
         if (freshObs.matched && freshObs.bothAppsVisibleTogether) {
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
-                requestedApp = "return_to_previous_app",
-                resolvedPackage = savedOrigin.packageName,
-                resolvedLabel = savedOrigin.appLabel,
-                observedPackage = freshObs.observedPackage,
-                verified = false,
-                launchMethod = navMethod,
-                preservedOriginTask = savedOrigin,
-                bothAppsVisibleTogether = true,
-                reasonCode = "BOTH_APPS_VISIBLE_TOGETHER",
-                message = "Requested/Unverified: Both ${savedOrigin.packageName} and $currentForegroundPkg are visible together in split-screen/multi-window rather than completing a task switch back to origin.",
-                verificationNote = "Visible packages=${returnedSnap?.visibleApplicationPackages}; both apps visible together."
-            ).also { lastCanonicalResult = it }
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = freshObs.observedPackage,
+                    verified = false,
+                    launchMethod = navMethod,
+                    preservedOriginTask = savedOrigin,
+                    bothAppsVisibleTogether = true,
+                    reasonCode = "BOTH_APPS_VISIBLE_TOGETHER",
+                    message = "Requested/Unverified: Both ${savedOrigin.packageName} and $currentForegroundPkg are visible together in split-screen/multi-window rather than completing a task switch back to origin.",
+                    verificationNote = "Visible packages=${returnedSnap?.visibleApplicationPackages}; both apps visible together."
+                )
+            )
         }
 
         if (freshObs.matched && returnedSnap != null) {
@@ -1229,24 +1766,55 @@ object UiTools {
                     } else {
                         "editable drafts=${observedDrafts.values.joinToString()}"
                     }
-                    return CanonicalAppLaunchResult(
-                        status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    return recordReturnDiagnostics(
+                        callerToolName = callerToolName,
+                        savedOrigin = savedOrigin,
+                        result = CanonicalAppLaunchResult(
+                            status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                            requestedApp = "return_to_previous_app",
+                            resolvedPackage = savedOrigin.packageName,
+                            resolvedLabel = savedOrigin.appLabel,
+                            observedPackage = freshObs.observedPackage,
+                            verified = false,
+                            launchMethod = navMethod,
+                            preservedOriginTask = savedOrigin,
+                            draftPreserved = false,
+                            restoredDrafts = observedDrafts,
+                            reasonCode = "ORIGIN_DRAFT_MISMATCH",
+                            message = "Requested/Unverified: ${savedOrigin.appLabel} (${savedOrigin.packageName}, window='${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}') is in the foreground, but the saved draft ('${expectedDrafts.values.joinToString()}') could not be verified on screen (observed $observedDesc).",
+                            verificationNote = "Expected drafts=${expectedDrafts}, observed editable drafts=${observedDrafts}. Never claiming draft survival from package name alone."
+                        )
+                    )
+                }
+
+                return recordReturnDiagnostics(
+                    callerToolName = callerToolName,
+                    savedOrigin = savedOrigin,
+                    result = CanonicalAppLaunchResult(
+                        status = CanonicalAppLaunchStatus.VERIFIED,
                         requestedApp = "return_to_previous_app",
                         resolvedPackage = savedOrigin.packageName,
                         resolvedLabel = savedOrigin.appLabel,
                         observedPackage = freshObs.observedPackage,
-                        verified = false,
+                        verified = true,
                         launchMethod = navMethod,
                         preservedOriginTask = savedOrigin,
-                        draftPreserved = false,
+                        bothAppsVisibleTogether = false,
+                        draftPreserved = true,
                         restoredDrafts = observedDrafts,
-                        reasonCode = "ORIGIN_DRAFT_MISMATCH",
-                        message = "Requested/Unverified: ${savedOrigin.appLabel} (${savedOrigin.packageName}, window='${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}') is in the foreground, but the saved draft ('${expectedDrafts.values.joinToString()}') could not be verified on screen (observed $observedDesc).",
-                        verificationNote = "Expected drafts=${expectedDrafts}, observed editable drafts=${observedDrafts}. Never claiming draft survival from package name alone."
-                    ).also { lastCanonicalResult = it }
-                }
+                        reasonCode = "VERIFIED_ORIGIN_RESTORED",
+                        message = "Verified: Returned to saved origin task ${savedOrigin.appLabel} (${savedOrigin.packageName}, taskId=${savedOrigin.taskId}, window=${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}) with draft '${observedDrafts.values.joinToString()}' preserved.",
+                        verificationNote = "Fresh snapshot verified origin package=${freshObs.observedPackage}, taskId=${returnedSnap.taskId}, window=${returnedSnap.activityComponent}, restoredDrafts=${observedDrafts}."
+                    )
+                )
+            }
 
-                return CanonicalAppLaunchResult(
+            // No prior draft was recorded in savedOrigin; do not fabricate draftPreserved=true unless an editable draft is actually observed
+            val hasObservedDraftNow = observedDrafts.isNotEmpty()
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
                     status = CanonicalAppLaunchStatus.VERIFIED,
                     requestedApp = "return_to_previous_app",
                     resolvedPackage = savedOrigin.packageName,
@@ -1256,32 +1824,13 @@ object UiTools {
                     launchMethod = navMethod,
                     preservedOriginTask = savedOrigin,
                     bothAppsVisibleTogether = false,
-                    draftPreserved = true,
+                    draftPreserved = hasObservedDraftNow,
                     restoredDrafts = observedDrafts,
                     reasonCode = "VERIFIED_ORIGIN_RESTORED",
-                    message = "Verified: Returned to saved origin task ${savedOrigin.appLabel} (${savedOrigin.packageName}, taskId=${savedOrigin.taskId}, window=${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}) with draft '${observedDrafts.values.joinToString()}' preserved.",
-                    verificationNote = "Fresh snapshot verified origin package=${freshObs.observedPackage}, taskId=${returnedSnap.taskId}, window=${returnedSnap.activityComponent}, restoredDrafts=${observedDrafts}."
-                ).also { lastCanonicalResult = it }
-            }
-
-            // No prior draft was recorded in savedOrigin; do not fabricate draftPreserved=true unless an editable draft is actually observed
-            val hasObservedDraftNow = observedDrafts.isNotEmpty()
-            return CanonicalAppLaunchResult(
-                status = CanonicalAppLaunchStatus.VERIFIED,
-                requestedApp = "return_to_previous_app",
-                resolvedPackage = savedOrigin.packageName,
-                resolvedLabel = savedOrigin.appLabel,
-                observedPackage = freshObs.observedPackage,
-                verified = true,
-                launchMethod = navMethod,
-                preservedOriginTask = savedOrigin,
-                bothAppsVisibleTogether = false,
-                draftPreserved = hasObservedDraftNow,
-                restoredDrafts = observedDrafts,
-                reasonCode = "VERIFIED_ORIGIN_RESTORED",
-                message = "Verified: Returned to saved origin task ${savedOrigin.appLabel} (${savedOrigin.packageName}, taskId=${savedOrigin.taskId}, window=${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}).",
-                verificationNote = "Fresh snapshot verified origin package=${freshObs.observedPackage}, taskId=${returnedSnap.taskId}, window=${returnedSnap.activityComponent}, draftPreserved=$hasObservedDraftNow."
-            ).also { lastCanonicalResult = it }
+                    message = "Verified: Returned to saved origin task ${savedOrigin.appLabel} (${savedOrigin.packageName}, taskId=${savedOrigin.taskId}, window=${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}).",
+                    verificationNote = "Fresh snapshot verified origin package=${freshObs.observedPackage}, taskId=${returnedSnap.taskId}, window=${returnedSnap.activityComponent}, draftPreserved=$hasObservedDraftNow."
+                )
+            )
         }
 
         val observedSummary = if (returnedSnap != null) {
@@ -1289,19 +1838,23 @@ object UiTools {
         } else {
             freshObs.observedPackage ?: "none"
         }
-        return CanonicalAppLaunchResult(
-            status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
-            requestedApp = "return_to_previous_app",
-            resolvedPackage = savedOrigin.packageName,
-            resolvedLabel = savedOrigin.appLabel,
-            observedPackage = freshObs.observedPackage,
-            verified = false,
-            launchMethod = navMethod,
-            preservedOriginTask = savedOrigin,
-            reasonCode = "RETURN_OBSERVATION_UNVERIFIED",
-            message = "Requested/Unverified: Attempted to return to ${savedOrigin.appLabel} (${savedOrigin.packageName}), but it was not observed in the foreground within ${coldStartTimeoutMs}ms (observed=$observedSummary).",
-            verificationNote = "Task-return navigation ($navMethod) dispatched; observedPackage=${freshObs.observedPackage ?: "null"}."
-        ).also { lastCanonicalResult = it }
+        return recordReturnDiagnostics(
+            callerToolName = callerToolName,
+            savedOrigin = savedOrigin,
+            result = CanonicalAppLaunchResult(
+                status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                requestedApp = "return_to_previous_app",
+                resolvedPackage = savedOrigin.packageName,
+                resolvedLabel = savedOrigin.appLabel,
+                observedPackage = freshObs.observedPackage,
+                verified = false,
+                launchMethod = navMethod,
+                preservedOriginTask = savedOrigin,
+                reasonCode = "RETURN_OBSERVATION_UNVERIFIED",
+                message = "Requested/Unverified: Attempted to return to ${savedOrigin.appLabel} (${savedOrigin.packageName}), but it was not observed in the foreground within ${coldStartTimeoutMs}ms (observed=$observedSummary).",
+                verificationNote = "Task-return navigation ($navMethod) dispatched; observedPackage=${freshObs.observedPackage ?: "null"}."
+            )
+        )
     }
 
     /**
@@ -1319,14 +1872,22 @@ object UiTools {
     ): CanonicalAppLaunchResult {
         val trimmed = commandText.trim()
         if (isReturnToPreviousAppCommand(trimmed)) {
-            return returnToOriginCanonical(context = context, coldStartTimeoutMs = coldStartTimeoutMs)
+            return returnToOriginCanonical(
+                context = context,
+                coldStartTimeoutMs = coldStartTimeoutMs,
+                callerToolName = "diagnostic_typed_command"
+            )
         }
 
         val offlineAction = com.example.engine.OfflineCommandEngine().parseCommand(
             rawText = trimmed
         )
         if (offlineAction.action == "return_to_origin" || offlineAction.action == "return_to_previous_app") {
-            return returnToOriginCanonical(context = context, coldStartTimeoutMs = coldStartTimeoutMs)
+            return returnToOriginCanonical(
+                context = context,
+                coldStartTimeoutMs = coldStartTimeoutMs,
+                callerToolName = "diagnostic_typed_command"
+            )
         }
         val deviceTasks = com.example.engine.SuperAgiBrainEngine.extractAllDeviceTasks(context, trimmed)
         if (deviceTasks.any {
@@ -1334,7 +1895,11 @@ object UiTools {
                     (it.target == "origin_task" || it.target == "previous_app")
             }
         ) {
-            return returnToOriginCanonical(context = context, coldStartTimeoutMs = coldStartTimeoutMs)
+            return returnToOriginCanonical(
+                context = context,
+                coldStartTimeoutMs = coldStartTimeoutMs,
+                callerToolName = "diagnostic_typed_command"
+            )
         }
         val extractedTarget = when {
             offlineAction.action == "open_app" && offlineAction.target.isNotBlank() -> offlineAction.target
@@ -1347,12 +1912,21 @@ object UiTools {
             context = context,
             appName = extractedTarget,
             visibleHomeMode = visibleHomeMode,
-            coldStartTimeoutMs = coldStartTimeoutMs
+            coldStartTimeoutMs = coldStartTimeoutMs,
+            callerToolName = "diagnostic_typed_command"
         )
     }
 
-    suspend fun openApp(context: Context, appName: String): ToolResult {
-        return openAppCanonical(context = context, appName = appName).toToolResult("open_app")
+    suspend fun openApp(
+        context: Context,
+        appName: String,
+        callerToolName: String = "open_app"
+    ): ToolResult {
+        return openAppCanonical(
+            context = context,
+            appName = appName,
+            callerToolName = callerToolName
+        ).toToolResult(callerToolName)
     }
     suspend fun typeInField(
         text: String,

@@ -738,7 +738,8 @@ class ActionExecutor(private val context: Context) {
         val canonical = kotlinx.coroutines.runBlocking {
             com.omnivoice.agentfix.UiTools.openAppCanonical(
                 context = context,
-                appName = appName
+                appName = appName,
+                callerToolName = "ActionExecutor.executeOpenApp"
             )
         }
         return canonical.toExecutionResult()
@@ -746,7 +747,10 @@ class ActionExecutor(private val context: Context) {
 
     fun executeReturnToOrigin(): ExecutionResult {
         val canonical = kotlinx.coroutines.runBlocking {
-            com.omnivoice.agentfix.UiTools.returnToOriginCanonical(context = context)
+            com.omnivoice.agentfix.UiTools.returnToOriginCanonical(
+                context = context,
+                callerToolName = "ActionExecutor.executeReturnToOrigin"
+            )
         }
         return canonical.toExecutionResult()
     }

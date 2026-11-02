@@ -2123,6 +2123,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             )
         ) {
             Log.i(TAG, "Redirecting Live tool '$rawFnName' -> 'return_to_origin' for utterance '$activeUtterance'")
+            args.put("_redirectedFromTool", rawFnName)
             "return_to_origin"
         } else {
             rawFnName
@@ -2250,20 +2251,49 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             }
 
             "communicate_or_open_app" -> {
-                val actionType = args.optString("actionType", "").lowercase()
-                val contactOrAppName = args.optString("contactOrAppName", "")
-                val messageOrQuery = args.optString("messageOrQuery", "")
-                val (summary, uri) = executeLiveCommunicationOrApp(actionType, contactOrAppName, messageOrQuery)
-                val card = LiveSlideUpCard(
-                    functionName = fnName,
-                    title = contactOrAppName.ifBlank { actionType.replace("_", " ").uppercase() },
-                    subtitle = summary,
-                    deepLinkUri = uri,
-                    appName = contactOrAppName.ifBlank { "App" },
-                    isLaunchingApp = true
-                )
-                pushSlideUpCard(card)
-                summary
+                val actionType = args.optString("actionType", "").trim()
+                val contactOrAppName = args.optString("contactOrAppName", "").trim()
+                val messageOrQuery = args.optString("messageOrQuery", "").trim()
+                if (com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                        actionType = actionType,
+                        contactOrAppName = contactOrAppName,
+                        messageOrQuery = messageOrQuery
+                    )
+                ) {
+                    val targetApp = contactOrAppName.ifBlank { actionType }
+                    val launchRes = com.omnivoice.agentfix.UiTools.openAppCanonical(
+                        context = context,
+                        appName = targetApp,
+                        callerToolName = "communicate_or_open_app"
+                    )
+                    customToolResponse = launchRes.toToolResult("communicate_or_open_app").toJson()
+                    val card = LiveSlideUpCard(
+                        functionName = fnName,
+                        title = launchRes.resolvedLabel ?: targetApp,
+                        subtitle = launchRes.message,
+                        appName = launchRes.resolvedLabel ?: targetApp,
+                        targetPackage = launchRes.resolvedPackage.orEmpty(),
+                        isLaunchingApp = launchRes.ok && launchRes.verified
+                    )
+                    pushSlideUpCard(card)
+                    launchRes.message
+                } else {
+                    val (summary, uri) = executeLiveCommunicationOrApp(
+                        actionType = actionType.lowercase(),
+                        contactOrAppName = contactOrAppName,
+                        messageOrQuery = messageOrQuery
+                    )
+                    val card = LiveSlideUpCard(
+                        functionName = fnName,
+                        title = contactOrAppName.ifBlank { actionType.replace("_", " ").uppercase() },
+                        subtitle = summary,
+                        deepLinkUri = uri,
+                        appName = contactOrAppName.ifBlank { "App" },
+                        isLaunchingApp = true
+                    )
+                    pushSlideUpCard(card)
+                    summary
+                }
             }
 
             "save_or_update_contact", "save_contact_by_voice" -> {
@@ -2395,27 +2425,53 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     taskDescription.contains("SCROLL", ignoreCase = true) -> "down"
                     else -> args.optString("scrollDirection", "none").trim()
                 }
-                val accessOutcome = JarvisHandsFreeEngine.executeControlAnyAppWithAccessibility(
-                    context = context,
-                    appName = appName,
-                    taskDescription = taskDescription,
-                    targetButtonOrField = targetButtonOrField,
-                    textToType = textToType,
-                    scrollDirection = scrollDirection,
-                    bridge = androidBridge,
-                    actionExecutor = actionExecutor
-                )
-                verifiedToolOutcome = accessOutcome
-                val card = LiveSlideUpCard(
-                    functionName = fnName,
-                    title = "Accessibility Control → $appName",
-                    subtitle = accessOutcome.message,
-                    appName = appName,
-                    targetPackage = accessOutcome.targetPackage,
-                    isLaunchingApp = accessOutcome.executed
-                )
-                pushSlideUpCard(card)
-                accessOutcome.message
+                val isPlainOpen = (taskDescription.equals("OPEN", ignoreCase = true) ||
+                    taskDescription.equals("OPEN_APP", ignoreCase = true) ||
+                    taskDescription.equals("LAUNCH", ignoreCase = true) ||
+                    taskDescription.equals("LAUNCH_APP", ignoreCase = true)) &&
+                    targetButtonOrField.isBlank() &&
+                    textToType.isBlank() &&
+                    scrollDirection.equals("none", ignoreCase = true)
+                if (isPlainOpen) {
+                    val launchRes = com.omnivoice.agentfix.UiTools.openAppCanonical(
+                        context = context,
+                        appName = appName,
+                        callerToolName = fnName
+                    )
+                    customToolResponse = launchRes.toToolResult(fnName).toJson()
+                    val card = LiveSlideUpCard(
+                        functionName = fnName,
+                        title = "Accessibility Control → ${launchRes.resolvedLabel ?: appName}",
+                        subtitle = launchRes.message,
+                        appName = launchRes.resolvedLabel ?: appName,
+                        targetPackage = launchRes.resolvedPackage.orEmpty(),
+                        isLaunchingApp = launchRes.ok && launchRes.verified
+                    )
+                    pushSlideUpCard(card)
+                    launchRes.message
+                } else {
+                    val accessOutcome = JarvisHandsFreeEngine.executeControlAnyAppWithAccessibility(
+                        context = context,
+                        appName = appName,
+                        taskDescription = taskDescription,
+                        targetButtonOrField = targetButtonOrField,
+                        textToType = textToType,
+                        scrollDirection = scrollDirection,
+                        bridge = androidBridge,
+                        actionExecutor = actionExecutor
+                    )
+                    verifiedToolOutcome = accessOutcome
+                    val card = LiveSlideUpCard(
+                        functionName = fnName,
+                        title = "Accessibility Control → $appName",
+                        subtitle = accessOutcome.message,
+                        appName = appName,
+                        targetPackage = accessOutcome.targetPackage,
+                        isLaunchingApp = accessOutcome.executed
+                    )
+                    pushSlideUpCard(card)
+                    accessOutcome.message
+                }
             }
 
             "control_social_and_media_apps", "jarvis_app_commander" -> {
@@ -2427,29 +2483,52 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 ).trim()
                 val content = args.optString("extraData", args.optString("content", "")).trim()
 
-                val outcome = JarvisHandsFreeEngine.executeJarvisAppCommander(
-                    context = context,
-                    appName = app,
-                    commandType = action,
-                    searchQueryOrTarget = queryOrTarget,
-                    extraData = content,
-                    bridge = androidBridge,
-                    actionExecutor = actionExecutor
-                )
+                val isPlainOpen = (action == "open" || action == "open_app" || action == "open_feed" || action == "launch") &&
+                    (queryOrTarget.isBlank() || queryOrTarget.equals(app, ignoreCase = true)) &&
+                    content.isBlank()
+                if (isPlainOpen) {
+                    val launchRes = com.omnivoice.agentfix.UiTools.openAppCanonical(
+                        context = context,
+                        appName = app,
+                        callerToolName = fnName
+                    )
+                    customToolResponse = launchRes.toToolResult(fnName).toJson()
+                    val appDisplayName = launchRes.resolvedLabel ?: app.replace("_", " ").replaceFirstChar { it.uppercase() }
+                    val card = LiveSlideUpCard(
+                        functionName = fnName,
+                        title = "$appDisplayName • ${launchRes.status.wireName}",
+                        subtitle = launchRes.message,
+                        appName = appDisplayName,
+                        targetPackage = launchRes.resolvedPackage.orEmpty(),
+                        isLaunchingApp = launchRes.ok && launchRes.verified
+                    )
+                    pushSlideUpCard(card)
+                    launchRes.message
+                } else {
+                    val outcome = JarvisHandsFreeEngine.executeJarvisAppCommander(
+                        context = context,
+                        appName = app,
+                        commandType = action,
+                        searchQueryOrTarget = queryOrTarget,
+                        extraData = content,
+                        bridge = androidBridge,
+                        actionExecutor = actionExecutor
+                    )
 
-                val appDisplayName = app.replace("_", " ").replaceFirstChar { it.uppercase() }
-                val card = LiveSlideUpCard(
-                    functionName = fnName,
-                    title = "$appDisplayName • ${action.replace("_", " ").uppercase()}",
-                    subtitle = outcome.summary,
-                    deepLinkUri = outcome.deepLinkUri,
-                    appName = appDisplayName,
-                    targetPackage = outcome.targetPackage,
-                    isLaunchingApp = true,
-                    macroSteps = outcome.macroSteps
-                )
-                pushSlideUpCard(card)
-                outcome.spokenConfirmationHint
+                    val appDisplayName = app.replace("_", " ").replaceFirstChar { it.uppercase() }
+                    val card = LiveSlideUpCard(
+                        functionName = fnName,
+                        title = "$appDisplayName • ${action.replace("_", " ").uppercase()}",
+                        subtitle = outcome.summary,
+                        deepLinkUri = outcome.deepLinkUri,
+                        appName = appDisplayName,
+                        targetPackage = outcome.targetPackage,
+                        isLaunchingApp = true,
+                        macroSteps = outcome.macroSteps
+                    )
+                    pushSlideUpCard(card)
+                    outcome.spokenConfirmationHint
+                }
             }
 
             "jarvis_hardware_and_screen_control" -> {
@@ -3006,6 +3085,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         contactOrAppName: String,
         messageOrQuery: String
     ): Pair<String, String> {
+        if (com.omnivoice.agentfix.UiTools.isPlainAppOpenInCommunicateOrOpenApp(
+                actionType = actionType,
+                contactOrAppName = contactOrAppName,
+                messageOrQuery = messageOrQuery
+            )
+        ) {
+            val targetApp = contactOrAppName.ifBlank { actionType }
+            val launchRes = kotlinx.coroutines.runBlocking {
+                com.omnivoice.agentfix.UiTools.openAppCanonical(
+                    context = context,
+                    appName = targetApp,
+                    callerToolName = "communicate_or_open_app"
+                )
+            }
+            return launchRes.message to (launchRes.resolvedPackage ?: "")
+        }
+
         val encodedMsg = URLEncoder.encode(messageOrQuery, "UTF-8")
         val deepLinkUri = when {
             actionType.contains("whatsapp") -> "whatsapp://send?text=$encodedMsg"
@@ -3013,7 +3109,17 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             actionType.contains("sms") -> "sms:$contactOrAppName?body=$encodedMsg"
             actionType.contains("youtube") -> "https://www.youtube.com/results?search_query=${URLEncoder.encode(messageOrQuery.ifBlank { contactOrAppName }, "UTF-8")}"
             actionType.contains("google") || actionType.contains("search") -> "https://www.google.com/search?q=${URLEncoder.encode(messageOrQuery.ifBlank { contactOrAppName }, "UTF-8")}"
-            else -> "intent://#Intent;package=$contactOrAppName;end"
+            else -> {
+                val targetApp = contactOrAppName.ifBlank { actionType }
+                val launchRes = kotlinx.coroutines.runBlocking {
+                    com.omnivoice.agentfix.UiTools.openAppCanonical(
+                        context = context,
+                        appName = targetApp,
+                        callerToolName = "communicate_or_open_app"
+                    )
+                }
+                return launchRes.message to (launchRes.resolvedPackage ?: "")
+            }
         }
 
         try {

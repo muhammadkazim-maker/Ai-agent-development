@@ -396,6 +396,13 @@ fun DiagnosticsScreen(viewModel: VoiceAssistantViewModel) {
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
+                            Text(
+                                text = "Build ID: ${com.omnivoice.agentfix.UiTools.PHASE_02_BUILD_ID}",
+                                color = EmeraldTertiary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.testTag("phase02_build_id_text")
+                            )
                         }
                     }
 
@@ -460,6 +467,65 @@ fun DiagnosticsScreen(viewModel: VoiceAssistantViewModel) {
                     if (!logCopiedMessage.isNullOrBlank()) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(text = logCopiedMessage!!, color = EmeraldTertiary, fontSize = 10.sp)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        // Phase 02 Open & Return Journey Short Copyable Result (excludes note contents, contact details & private screen text)
+        item {
+            val phase02Snapshot = remember(refreshKey, logCopiedMessage) {
+                com.omnivoice.agentfix.UiTools.lastPhase02Diagnostics
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 600.dp)
+                    .testTag("phase02_journey_diagnostics_card"),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "PHASE 02 OPEN & RETURN JOURNEY RESULT",
+                        color = CyanPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = phase02Snapshot.toMultilineCardText(),
+                        color = TextPrimary,
+                        fontSize = 11.sp,
+                        modifier = Modifier.testTag("phase02_journey_diagnostics_summary")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            val latest = com.omnivoice.agentfix.UiTools.lastPhase02Diagnostics.toCopyableSummary()
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("Phase 02 Journey Result", latest))
+                            logCopiedMessage = "Copied Phase 02 journey result: $latest"
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("copy_phase02_journey_diagnostics_button"),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Copy Phase 02 Journey Result",
+                            tint = EmeraldTertiary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            "Copy Phase 02 Journey Result (No Private Text)",
+                            fontSize = 11.sp,
+                            color = EmeraldTertiary,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

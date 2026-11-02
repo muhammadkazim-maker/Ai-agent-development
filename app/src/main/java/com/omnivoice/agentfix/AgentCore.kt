@@ -317,4 +317,10 @@ object AgentSession {
         } catch (_: Exception) {
         }
     }
+
+    fun clearForTest() {
+        lastUserUtterance = ""
+        lastUtteranceElapsedMs = 0L
+        DuplicateCallGuard.clear()
+    }
 }

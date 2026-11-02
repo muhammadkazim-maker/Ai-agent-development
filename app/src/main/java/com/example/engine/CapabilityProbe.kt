@@ -324,6 +324,8 @@ object CapabilityProbe {
     ): String {
         val sb = StringBuilder()
         sb.appendLine("=== OMNIVOICE SANITIZED DIAGNOSTICS LOG ===")
+        sb.appendLine("Build ID: ${com.omnivoice.agentfix.UiTools.PHASE_02_BUILD_ID}")
+        sb.appendLine("Phase 02 Journey: ${com.omnivoice.agentfix.UiTools.lastPhase02Diagnostics.toCopyableSummary()}")
         sb.appendLine("OS: ${profile.androidReleaseName} (Security Patch: ${profile.securityPatch})")
         sb.appendLine("Device: ${profile.manufacturer} ${profile.model} (${profile.oemSkin.displayName})")
         sb.appendLine("Capability Tier: ${profile.currentTier.label} (Offline Tier: ${profile.offlineTier.label})")

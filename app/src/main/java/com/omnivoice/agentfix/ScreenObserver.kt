@@ -606,8 +606,8 @@ object ScreenObserver {
             visibleTexts = visibleTexts,
             visibleIcons = visibleIcons,
             windowId = primaryWindowId,
-            taskId = primaryWindowId,
-            activityComponent = "$pkg/$titleGuess",
+            taskId = -1,
+            activityComponent = "",
             visibleApplicationPackages = visibleAppPackages,
             editableFieldDrafts = editableDrafts
         )

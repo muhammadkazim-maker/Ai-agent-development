@@ -96,11 +96,23 @@ class ToolDispatcher(context: Context) {
                         "app_name",
                         rawArgs.optString("appName", rawArgs.optString("app", rawArgs.optString("target", "")))
                     )
-                    UiTools.openApp(appContext, appName)
+                    val callerTool = toolName.trim().ifBlank { "open_app" }
+                    UiTools.openApp(appContext, appName, callerToolName = callerTool).copy(tool = "open_app")
                 }
 
                 "return_to_origin" -> {
-                    UiTools.returnToOriginCanonical(appContext).toToolResult("return_to_origin")
+                    val redirectedFrom = rawArgs.optString("_redirectedFromTool", "").trim()
+                    val callerTool = when {
+                        redirectedFrom.isNotBlank() && redirectedFrom != "return_to_origin" ->
+                            "$redirectedFrom->return_to_origin"
+                        rawCanonical != "return_to_origin" ->
+                            "${toolName.trim().ifBlank { rawCanonical }}->return_to_origin"
+                        else -> toolName.trim().ifBlank { "return_to_origin" }
+                    }
+                    UiTools.returnToOriginCanonical(
+                        context = appContext,
+                        callerToolName = callerTool
+                    ).toToolResult("return_to_origin")
                 }
 
                 "type_in_field" -> {
