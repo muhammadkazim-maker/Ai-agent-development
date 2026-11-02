@@ -147,6 +147,19 @@ object SuperAgiBrainEngine {
         val lower = clause.lowercase(Locale.ROOT).trim()
         var step = startStep
 
+        // 0. Dedicated Return-to-Previous-App / Origin Window ("wapas iss window par aao", "pichli app par wapas jao", "wapas usi window par aao", "return to the previous app", "wapas jao")
+        if (com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(clause)) {
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = NluTaskType.CUSTOM_ANDROID_INTENT,
+                    target = "origin_task",
+                    actionValue = "RETURN_TO_ORIGIN"
+                )
+            )
+            return tasks
+        }
+
         // 1. Flashlight / Torch
         val hasFlashKeyword = DeterministicNluEngine.FLASHLIGHT_KEYWORDS.any { lower.contains(it) }
         if (hasFlashKeyword && Regex("\\b(on|off|jala|bujha|band|khol|chala|turn|enable|disable)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
@@ -544,10 +557,11 @@ object SuperAgiBrainEngine {
 
         // Also check if user just said a well-known app name with "open" or "kholo" anywhere in a short phrase
         val knownApps = listOf(
+            "work whatsapp business", "whatsapp business", "work whatsapp", "personal whatsapp",
             "whatsapp", "youtube", "instagram", "facebook", "tiktok", "camera", "gallery", "photos",
             "chrome", "browser", "settings", "gmail", "maps", "google maps", "spotify", "calculator",
             "calendar", "clock", "contacts", "messages", "play store", "telegram", "snapchat", "twitter",
-            "x", "linkedin", "netflix", "daraz", "easypaisa", "jazzcash", "zong", "careem", "inDrive", "uber"
+            "x", "linkedin", "netflix", "daraz", "easypaisa", "jazzcash", "zong", "careem", "inDrive", "uber", "notes"
         )
         if (Regex("\\b(open|kholo|khol|chala|chalao|launch|start)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
             for (app in knownApps) {
@@ -567,6 +581,12 @@ object SuperAgiBrainEngine {
                 taskType = NluTaskType.OPEN_APP,
                 target = voiceAction.target.ifBlank { params["app_name"] ?: params["package_name"] ?: "Settings" },
                 actionValue = "OPEN"
+            )
+            "return_to_origin", "return_to_previous_app" -> DeterministicNluTask(
+                stepNumber = step,
+                taskType = NluTaskType.CUSTOM_ANDROID_INTENT,
+                target = "origin_task",
+                actionValue = "RETURN_TO_ORIGIN"
             )
             "toggle_flashlight" -> DeterministicNluTask(
                 stepNumber = step,
@@ -763,14 +783,20 @@ object SuperAgiBrainEngine {
                     if (isEnglish) "updating your WhatsApp profile picture" else "aapki WhatsApp DP update kar raha hoon"
                 }
                 NluTaskType.CUSTOM_ANDROID_INTENT -> {
-                    if (isEnglish) "executed ${task.target}" else "${task.target} mukammal kar diya hai"
+                    if (task.target.equals("origin_task", ignoreCase = true) ||
+                        task.actionValue.equals("RETURN_TO_ORIGIN", ignoreCase = true)
+                    ) {
+                        if (isEnglish) "returning to the previous app window" else "pichli app window par wapas ja raha hoon"
+                    } else {
+                        if (isEnglish) "executed ${task.target}" else "${task.target} mukammal kar diya hai"
+                    }
                 }
             }
         }
         return if (isEnglish) {
-            "Done! I have " + parts.joinToString(" and ") + "."
+            "I am " + parts.joinToString(" and ") + "."
         } else {
-            "Jee Boss, main ne " + parts.joinToString(" aur ") + "."
+            "Jee Boss, main " + parts.joinToString(" aur ") + "."
         }
     }
 

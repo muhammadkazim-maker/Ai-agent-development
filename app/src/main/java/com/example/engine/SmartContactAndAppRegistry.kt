@@ -256,6 +256,49 @@ object SmartContactAndAppRegistry {
     }
 
     /**
+     * Batch-merges multiple (name, phone) entries into `omni_contacts_db` in a single pass
+     * and persists once at the end, avoiding O(N^2) JSON serialization per cursor row.
+     */
+    fun saveOrUpdateContactsBatch(
+        context: Context,
+        entries: List<Pair<String, String>>
+    ): List<SmartContactEntry> {
+        val current = getAllContacts(context).toMutableList()
+        if (entries.isEmpty()) return current
+
+        val now = System.currentTimeMillis()
+        var nextIdOffset = 0L
+        for ((rawName, rawPhone) in entries) {
+            val trimmedName = rawName.trim()
+            val effectivePhone = rawPhone.trim()
+            if (trimmedName.isEmpty() || effectivePhone.isEmpty()) continue
+            val existingIdx = current.indexOfFirst { it.name.equals(trimmedName, ignoreCase = true) }
+            if (existingIdx >= 0) {
+                val prev = current[existingIdx]
+                current[existingIdx] = prev.copy(
+                    name = trimmedName,
+                    phoneNumber = effectivePhone.ifBlank { prev.phoneNumber },
+                    whatsappNumber = effectivePhone.ifBlank { prev.whatsappNumber.ifBlank { prev.phoneNumber } },
+                    updatedAt = now
+                )
+            } else {
+                nextIdOffset++
+                current.add(
+                    SmartContactEntry(
+                        id = now + nextIdOffset,
+                        name = trimmedName,
+                        phoneNumber = effectivePhone,
+                        whatsappNumber = effectivePhone,
+                        updatedAt = now
+                    )
+                )
+            }
+        }
+        persistContactsList(context, current)
+        return current
+    }
+
+    /**
      * Explicitly updates an existing contact by `id` (or creates it if `id` is not found),
      * allowing users to edit or clear any field (name, phone, WhatsApp, Instagram, Facebook, TikTok).
      */

@@ -284,6 +284,34 @@ class AutonomousTaskEngine(
             return@withContext convEntry
         }
 
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            val blockedReply = "Blocked: Device actions cannot run while the phone is locked. Please unlock your phone using Android's standard lock screen."
+            val blockedEntry = AutonomousFeedEntry(
+                id = entryId,
+                userTranscript = trimmedCommand,
+                detectedLanguage = detectedLang,
+                intentType = VoiceIntentType.ACTION,
+                intentCategory = NluIntentCategory.SINGLE_DEVICE_TASK,
+                chainOfThoughtReasoning = "Blocked by Phase 01 Lock Screen Policy: device is locked.",
+                confidenceScore = 100,
+                audioClarityScore = effectiveClarity,
+                aiReply = blockedReply,
+                steps = verifiedSteps.mapIndexed { idx, step ->
+                    step.copy(
+                        stepIndex = idx + 1,
+                        status = TaskStepStatus.FAILED,
+                        detail = "Blocked: Phone is locked"
+                    )
+                },
+                generatedImage = null,
+                generatedArtifact = null,
+                bridgePayloads = emptyList(),
+                isExecuting = false
+            )
+            onProgressUpdate(blockedEntry)
+            return@withContext blockedEntry
+        }
+
         var currentSteps = verifiedSteps.mapIndexed { idx, step ->
             step.copy(stepIndex = idx + 1, status = TaskStepStatus.PENDING)
         }

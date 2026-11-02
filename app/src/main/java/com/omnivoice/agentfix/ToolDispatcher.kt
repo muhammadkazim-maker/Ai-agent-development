@@ -21,8 +21,52 @@ class ToolDispatcher(context: Context) {
         rawArgs: JSONObject = JSONObject(),
         callId: String? = null
     ): ToolResult = withContext(Dispatchers.IO) {
-        val canonical = canonicalToolName(toolName)
+        val rawCanonical = canonicalToolName(toolName)
+        val argHint = rawArgs.optString(
+            "app_name",
+            rawArgs.optString(
+                "appName",
+                rawArgs.optString("target", rawArgs.optString("target_text", ""))
+            )
+        )
+        val canonical = if (
+            (rawCanonical == "close_app" || rawCanonical == "perform_gesture" || rawCanonical == "open_app") &&
+            (UiTools.isReturnToPreviousAppCommand(AgentSession.lastUserUtterance) ||
+                UiTools.isReturnToPreviousAppCommand(argHint))
+        ) {
+            AgentLog.i(
+                "Dispatcher",
+                "Redirecting $rawCanonical -> return_to_origin for return-to-previous-app utterance '${AgentSession.lastUserUtterance.ifBlank { argHint }}'"
+            )
+            "return_to_origin"
+        } else {
+            rawCanonical
+        }
         AgentLog.i("Dispatcher", "dispatch($toolName -> $canonical, callId=${callId ?: "none"}, args=$rawArgs)")
+
+        if (com.example.engine.LockScreenUnlockManager.isDeviceCurrentlyLocked(appContext) &&
+            com.example.engine.LockScreenUnlockManager.isBlockedWhenDeviceLocked(canonical)
+        ) {
+            val lockedResult = ToolResult.failure(
+                tool = canonical,
+                message = "Blocked: '$canonical' is a private or device-mutating action and cannot run while the phone is locked.",
+                errorCode = "DEVICE_LOCKED"
+            )
+            AgentLog.w("Dispatcher", "Blocked $canonical because device is locked")
+            return@withContext lockedResult
+        }
+
+        if (canonical != "whatsapp_send_voice_note" &&
+            com.example.engine.LockScreenUnlockManager.isPhase01GatedTool(canonical)
+        ) {
+            val gatedResult = ToolResult.failure(
+                tool = canonical,
+                message = "Blocked: '$canonical' is temporarily gated in Phase 01 until its verification phase passes.",
+                errorCode = "PHASE_01_TOOL_GATED"
+            )
+            AgentLog.w("Dispatcher", "Phase 01 gate blocked $canonical")
+            return@withContext gatedResult
+        }
 
         val dupBlocked = DuplicateCallGuard.checkAndRecord(canonical, rawArgs, callId)
         if (dupBlocked != null) {
@@ -53,6 +97,10 @@ class ToolDispatcher(context: Context) {
                         rawArgs.optString("appName", rawArgs.optString("app", rawArgs.optString("target", "")))
                     )
                     UiTools.openApp(appContext, appName)
+                }
+
+                "return_to_origin" -> {
+                    UiTools.returnToOriginCanonical(appContext).toToolResult("return_to_origin")
                 }
 
                 "type_in_field" -> {
@@ -322,6 +370,7 @@ class ToolDispatcher(context: Context) {
             "describe_screen",
             "get_device_info",
             "open_app",
+            "return_to_origin",
             "type_in_field",
             "ui_click_text",
             "search_anything",
@@ -339,6 +388,18 @@ class ToolDispatcher(context: Context) {
             "remove_standing_rule"
         )
         private val legacyAliasMap = mapOf(
+            "launch_app" to "open_app",
+            "start_app" to "open_app",
+            "open_and_navigate_app" to "open_app",
+            "wapas_jao" to "return_to_origin",
+            "go_back" to "return_to_origin",
+            "navigate_back" to "return_to_origin",
+            "return_to_previous_app" to "return_to_origin",
+            "return_previous_app" to "return_to_origin",
+            "switch_to_previous_app" to "return_to_origin",
+            "wapas_iss_window_par_aao" to "return_to_origin",
+            "wapas_usi_window_par_aao" to "return_to_origin",
+            "pichli_app_par_wapas_jao" to "return_to_origin",
             "inspect_current_live_screen" to "describe_screen",
             "read_screen" to "describe_screen",
             "get_mobile_hardware_telemetry" to "get_device_info",

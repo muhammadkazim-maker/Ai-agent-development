@@ -306,6 +306,7 @@ class AndroidBridge(
      */
     @JavascriptInterface
     fun getOmniContactsDb(): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return "[]"
         return SmartContactAndAppRegistry.getRawOmniContactsDbJson(context)
     }
 
@@ -314,6 +315,9 @@ class AndroidBridge(
      */
     @JavascriptInterface
     fun setOmniContactsDb(rawJson: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "blocked").put("reason", "DEVICE_LOCKED").toString()
+        }
         val updated = SmartContactAndAppRegistry.importOmniContactsDbJson(context, rawJson)
         JarvisHandsFreeEngine.mirrorToJarvisPhoneContacts(context, updated)
         return JSONObject().apply {
@@ -327,6 +331,7 @@ class AndroidBridge(
      */
     @JavascriptInterface
     fun getJarvisPhoneContacts(): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return "[]"
         return JarvisHandsFreeEngine.getJarvisPhoneContactsJson(context)
     }
 
@@ -335,6 +340,9 @@ class AndroidBridge(
      */
     @JavascriptInterface
     fun setJarvisPhoneContacts(rawJson: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "blocked").put("reason", "DEVICE_LOCKED").toString()
+        }
         val updated = JarvisHandsFreeEngine.importJarvisPhoneContactsJson(context, rawJson)
         return JSONObject().apply {
             put("status", "ok")
@@ -439,9 +447,11 @@ class AndroidBridge(
     // 2. ISOLATED WHATSAPP SEND (Never sends to the wrong open chatbox!)
     @JavascriptInterface
     fun sendWhatsAppVerified(phone: String, targetContactName: String, message: String) {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return
         val cleanPhone = phone.replace("[^0-9]".toRegex(), "").let {
             if (it.startsWith("03")) "92" + it.substring(1) else it
         }
+        if (cleanPhone.length < 10) return
         JarvisAccessibilityService.armVerifiedWhatsAppSend(targetContactName, message)
 
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -462,27 +472,32 @@ class AndroidBridge(
         }
     }
 
-    // 3. REAL WHATSAPP MESSAGE DELETION (Long-Press -> Trash -> Delete for Everyone)
+    // 3. REAL WHATSAPP MESSAGE DELETION (Gated in Phase 01 & blocked when locked)
     @JavascriptInterface
     fun deleteWhatsAppMessage(targetText: String, deleteForEveryone: Boolean): Boolean {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return false
+        if (LockScreenUnlockManager.isPhase01GatedTool("delete_whatsapp_message")) return false
         return JarvisAccessibilityService.instance?.deleteMessageInWhatsApp(targetText, deleteForEveryone) ?: false
     }
 
     // 4. DIRECT INPUT INJECTION (Types into Search Bar directly, NOT keyboard suggestion strip!)
     @JavascriptInterface
     fun injectTextAndSubmitSearch(query: String): Boolean {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return false
         return JarvisAccessibilityService.instance?.typeIntoFocusedOrSearchField(query, true) ?: false
     }
 
     // 5. REAL APP CLOSING / HOME NAVIGATION
     @JavascriptInterface
     fun closeCurrentAppOrGoHome(actionType: String): Boolean {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return false
         return JarvisAccessibilityService.instance?.closeAppOrNavigate(actionType) ?: false
     }
 
     // 6. REAL-TIME LIVE SCREEN SNAPSHOT (Fixes Stale Screen Memory)
     @JavascriptInterface
     fun getLiveScreenTreeJson(): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return "{}"
         return JarvisAccessibilityService.instance?.dumpCurrentScreenJson() ?: "{}"
     }
 
@@ -527,44 +542,25 @@ class AndroidBridge(
     // 8. 100% PHONE CONTACTS SYNC
     @JavascriptInterface
     fun getAllContactsJson(): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) return "[]"
         val hasPerm = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.READ_CONTACTS
         ) == PackageManager.PERMISSION_GRANTED
 
-        val contactsArray = JSONArray()
         if (hasPerm) {
-            JarvisHandsFreeEngine.syncAndroidSystemContacts(context)
-            try {
-                val cursor = context.contentResolver.query(
-                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                    arrayOf(
-                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                        ContactsContract.CommonDataKinds.Phone.NUMBER
-                    ),
-                    null, null, null
-                )
-                cursor?.use {
-                    while (it.moveToNext()) {
-                        val obj = JSONObject()
-                        obj.put("name", it.getString(0) ?: "")
-                        obj.put("tel", it.getString(1) ?: "")
-                        contactsArray.put(obj)
-                    }
-                }
-            } catch (_: Exception) {}
+            JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(context)
         }
         OmniAutonomousCoreEngine.syncMasterContactsStorage(context)
-        return if (contactsArray.length() > 0) {
-            contactsArray.toString()
-        } else {
-            JarvisHandsFreeEngine.getJarvisPhoneContactsJson(context)
-        }
+        return JarvisHandsFreeEngine.getJarvisPhoneContactsJson(context)
     }
 
     @JavascriptInterface
     fun executeZeroTouchAction(jsonPayload: String): String {
         Log.i(TAG, "AndroidBridge.executeZeroTouchAction invoked: $jsonPayload")
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "blocked").put("reason", "DEVICE_LOCKED").toString()
+        }
         return try {
             val root = JSONObject(jsonPayload)
             val action = root.optString("action", "AUTO_SEND_WHATSAPP")
@@ -725,6 +721,9 @@ class AndroidBridge(
      */
     @JavascriptInterface
     fun connectWifiWithPassword(ssid: String, password: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").toString()
+        }
         val timestamp = System.currentTimeMillis()
         val cleanSsid = ssid.trim().ifBlank { "Home_5G_Fiber" }
         val cleanPass = password.trim()
@@ -759,6 +758,9 @@ class AndroidBridge(
      */
     @JavascriptInterface
     fun typeAndClick(textToType: String, targetButtonText: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").toString()
+        }
         val timestamp = System.currentTimeMillis()
         if (textToType.isNotBlank()) {
             SmartContactAndAppRegistry.copyTextToClipboard(context, "JARVIS Type", textToType)
@@ -798,6 +800,18 @@ class AndroidBridge(
 
     @JavascriptInterface
     fun autoSendWhatsApp(cleanPhone: String, message: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").put("launched", false).toString()
+        }
+        val digitsOnly = cleanPhone.filter { it.isDigit() }
+        if (digitsOnly.length < 10) {
+            return JSONObject().apply {
+                put("status", "MISSING_PHONE_NUMBER")
+                put("phone", cleanPhone)
+                put("launched", false)
+                put("clicked", false)
+            }.toString()
+        }
         val timestamp = System.currentTimeMillis()
         if (message.isNotBlank()) {
             SmartContactAndAppRegistry.copyTextToClipboard(context, "JARVIS Auto-Send", message)
@@ -805,7 +819,7 @@ class AndroidBridge(
         OmniAccessibilityService.scheduleZeroTouchAutoSend("com.whatsapp")
         OmniAccessibilityService.inputTextIntoFocusedField(message)
         val clicked = OmniAccessibilityService.clickNodeByText("Send")
-        val uriStr = "whatsapp://send?phone=$cleanPhone&text=${Uri.encode(message)}"
+        val uriStr = "whatsapp://send?phone=$digitsOnly&text=${Uri.encode(message)}"
         val launched = SmartContactAndAppRegistry.launchUniversalDeepLink(
             context = context,
             deepLinkUri = uriStr,
@@ -836,6 +850,9 @@ class AndroidBridge(
 
     @JavascriptInterface
     fun performGlobalClick(targetLabel: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").put("clicked", false).toString()
+        }
         val timestamp = System.currentTimeMillis()
         val label = targetLabel.ifBlank { "Send" }
         OmniAccessibilityService.scheduleZeroTouchAutoSend("com.whatsapp")
@@ -880,6 +897,9 @@ class AndroidBridge(
         targetTextOrId: String,
         inputText: String
     ): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").put("actionPerformed", false).toString()
+        }
         val timestamp = System.currentTimeMillis()
         val cleanAction = actionType.trim().uppercase()
         val targetPkg = SmartContactAndAppRegistry.resolveAndroidPackage(appName)
@@ -952,6 +972,9 @@ class AndroidBridge(
 
     @JavascriptInterface
     fun makeDirectCall(cleanPhone: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "blocked").put("errorCode", "DEVICE_LOCKED").put("launched", false).toString()
+        }
         val timestamp = System.currentTimeMillis()
         val dialTarget = if (cleanPhone.startsWith("+")) cleanPhone else "+$cleanPhone"
         val hasCallPerm = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -1001,6 +1024,9 @@ class AndroidBridge(
     @JavascriptInterface
     fun executeAccessibilityMacro(jsonPayload: String): String {
         Log.i(TAG, "AndroidBridge.executeAccessibilityMacro invoked: $jsonPayload")
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "blocked").put("errorCode", "DEVICE_LOCKED").toString()
+        }
         return try {
             val root = JSONObject(jsonPayload)
             val targetApp = root.optString("targetApp", "")
@@ -1094,8 +1120,36 @@ class AndroidBridge(
             val deepLinkUri = json.optString("deepLinkUri", paramsObj.optString("deepLinkUri", ""))
             val timestamp = json.optLong("timestamp", System.currentTimeMillis())
 
-            // 1. Trigger Deep Link / URI Intent immediately if provided
-            if (deepLinkUri.isNotBlank()) {
+            if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context) &&
+                LockScreenUnlockManager.isBlockedWhenDeviceLocked(tool)
+            ) {
+                val blockedMsg = "Blocked: '$tool' cannot run while the phone is locked."
+                recordDispatch(tool, paramsObj.toString(), timestamp, "BLOCKED_DEVICE_LOCKED")
+                return JSONObject().apply {
+                    put("status", "blocked")
+                    put("errorCode", "DEVICE_LOCKED")
+                    put("tool", tool)
+                    put("result", blockedMsg)
+                    put("timestamp", timestamp)
+                }.toString()
+            }
+
+            if (LockScreenUnlockManager.isPhase01GatedTool(tool)) {
+                val gatedMsg = "Blocked: '$tool' is disabled by Phase 01 safety policy."
+                recordDispatch(tool, paramsObj.toString(), timestamp, "BLOCKED_PHASE_01_GATE")
+                return JSONObject().apply {
+                    put("status", "blocked")
+                    put("errorCode", "PHASE_01_TOOL_GATED")
+                    put("tool", tool)
+                    put("result", gatedMsg)
+                    put("timestamp", timestamp)
+                }.toString()
+            }
+
+            // 1. Trigger Deep Link / URI Intent immediately if provided (never launch unverified WhatsApp share sheets without a resolved phone number)
+            val isUnresolvedWhatsAppShareLink = deepLinkUri.startsWith("whatsapp://send", ignoreCase = true) &&
+                !deepLinkUri.contains("phone=", ignoreCase = true)
+            if (deepLinkUri.isNotBlank() && !isUnresolvedWhatsAppShareLink) {
                 launchDeepLinkUri(deepLinkUri)
             }
 
@@ -1190,7 +1244,6 @@ class AndroidBridge(
                 val contact = params.optString("contactName", "")
                 val text = params.optString("messageText", "")
                 val attachment = params.optString("attachmentUrl", "")
-                launchDeepLinkUri("whatsapp://send?text=${Uri.encode(text)}")
                 val res = actionExecutor.execute(
                     VoiceAction(
                         action = "send_whatsapp",
@@ -1348,7 +1401,6 @@ class AndroidBridge(
             action.contains("whatsapp") || (category == "communication" && target.contains("whatsapp", ignoreCase = true)) -> {
                 val contact = params.optString("contactName", target)
                 val msg = params.optString("messageText", value)
-                launchDeepLinkUri("whatsapp://send?text=${Uri.encode(msg)}")
                 val res = actionExecutor.execute(
                     VoiceAction(action = "send_whatsapp", target = contact, parameters = mapOf("message" to msg))
                 )
@@ -1510,11 +1562,17 @@ class AndroidBridge(
 
     @JavascriptInterface
     fun getBiometricVault(): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").toString()
+        }
         return BiometricVaultManager.getInstance(context).getVaultJson()
     }
 
     @JavascriptInterface
     fun setBiometricVault(jsonString: String): String {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return JSONObject().put("status", "BLOCKED_DEVICE_LOCKED").toString()
+        }
         val ok = BiometricVaultManager.getInstance(context).importVaultJson(jsonString)
         return JSONObject().put("status", if (ok) "ok" else "error").toString()
     }
@@ -1551,7 +1609,8 @@ class AndroidBridge(
         return JSONObject().apply {
             put("ok", res.ok)
             put("method", res.method)
-            put("detail", res.detail)
+            put("message", res.message)
+            put("detail", res.message)
         }.toString()
     }
 

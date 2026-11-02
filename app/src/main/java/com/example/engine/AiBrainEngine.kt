@@ -71,7 +71,8 @@ class AiBrainEngine(
             "describe_screen", "get_device_info", "type_in_field", "ui_click_text",
             "whatsapp_send_message", "whatsapp_delete_message", "close_app",
             "whatsapp_send_voice_note", "perform_gesture", "analyze_screen_visual",
-            "handle_phone_call", "teach_standing_rule", "list_standing_rules", "remove_standing_rule"
+            "handle_phone_call", "teach_standing_rule", "list_standing_rules", "remove_standing_rule",
+            "return_to_origin", "return_to_previous_app"
         )
 
         /**
@@ -338,6 +339,24 @@ class AiBrainEngine(
                         spokenResponse = spokenSummary,
                         confirmationRequired = false
                     )
+                    NluTaskType.CUSTOM_ANDROID_INTENT -> {
+                        if (task.target == "origin_task" || task.actionValue == "RETURN_TO_ORIGIN") {
+                            VoiceAction(
+                                action = "return_to_origin",
+                                target = "origin_task",
+                                parameters = mapOf("navigation" to "return_to_previous_app"),
+                                spokenResponse = spokenSummary,
+                                confirmationRequired = false
+                            )
+                        } else {
+                            VoiceAction(
+                                action = "multi_step",
+                                target = trimmed,
+                                spokenResponse = spokenSummary,
+                                confirmationRequired = false
+                            )
+                        }
+                    }
                     else -> VoiceAction(
                         action = "multi_step",
                         target = trimmed,

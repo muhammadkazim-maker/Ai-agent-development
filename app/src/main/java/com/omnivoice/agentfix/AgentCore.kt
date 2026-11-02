@@ -262,6 +262,10 @@ object DuplicateCallGuard {
         "analyze_screen_visual",
         "list_standing_rules"
     )
+    fun clear() {
+        executedCallIds.clear()
+        executedFingerprints.clear()
+    }
     fun onNewUserTurn(turnId: Long) {
         val now = SystemClock.elapsedRealtime()
         executedCallIds.entries.removeIf { now - it.value > 60_000L }

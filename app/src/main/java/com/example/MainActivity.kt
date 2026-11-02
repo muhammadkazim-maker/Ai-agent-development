@@ -45,7 +45,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,13 +57,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.engine.JarvisHandsFreeEngine
-import com.example.service.WakeWordForegroundService
 import com.example.ui.screens.JarvisStageFlowScreen
 import com.example.ui.screens.SettingsHubScreen
 import com.example.ui.theme.CyanPrimary
@@ -120,9 +122,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (viewModel.isLiveSessionActive.value) {
-            enterJarvisPipMode()
-        }
+        // Keep main screen normal unless the user explicitly enters floating/PiP mode.
     }
 
     fun enterJarvisPipMode(): Boolean {
@@ -160,7 +160,9 @@ fun MainScreen(
     onEnterPipMode: () -> Boolean = { false }
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var showFullSettingsHub by rememberSaveable { mutableStateOf(false) }
+    var pendingUserListenRequest by rememberSaveable { mutableStateOf(false) }
 
     var hasMicPermission by remember {
         mutableStateOf(
@@ -175,15 +177,27 @@ fun MainScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasMicPermission = granted
-        if (granted) {
-            WakeWordForegroundService.start(context)
+        val shouldStart = granted &&
+            pendingUserListenRequest &&
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        pendingUserListenRequest = false
+        if (shouldStart) {
             viewModel.startListeningForCommand()
         }
     }
 
-    LaunchedEffect(hasMicPermission) {
-        if (hasMicPermission) {
-            WakeWordForegroundService.start(context)
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasMicPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 

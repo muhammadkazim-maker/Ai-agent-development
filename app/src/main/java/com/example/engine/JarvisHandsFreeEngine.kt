@@ -5,9 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Looper
 import android.provider.ContactsContract
 import android.util.Log
 import androidx.core.content.ContextCompat
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import com.example.data.model.VoiceAction
 import com.example.service.OmniAccessibilityService
 import kotlinx.coroutines.CoroutineScope
@@ -178,36 +181,69 @@ object JarvisHandsFreeEngine {
 
     @Volatile
     private var lastAutoContactsSyncMs: Long = 0L
+    private val isContactsSyncInProgress = AtomicBoolean(false)
+    private val _contactsSyncExecutionCount = AtomicInteger(0)
+    val contactsSyncExecutionCount: Int
+        get() = _contactsSyncExecutionCount.get()
+
+    fun resetContactsSyncStateForTest() {
+        lastAutoContactsSyncMs = 0L
+        isContactsSyncInProgress.set(false)
+        _contactsSyncExecutionCount.set(0)
+    }
 
     /**
      * Automatic 100% Phone Contacts Injection (`window.AndroidBridge.getAllContactsJson()`):
-     * On startup and whenever a contact search happens, automatically pulls 100% of device phone contacts
-     * into state and `jarvis_phone_contacts` with ZERO manual user clicks when READ_CONTACTS is granted.
+     * Moves blocking contacts-provider queries off the main thread, avoids duplicate syncs,
+     * and returns immediately when READ_CONTACTS is denied.
      */
     fun autoInjectBridgeContactsIfPermitted(context: Context, force: Boolean = false) {
-        val now = System.currentTimeMillis()
-        if (!force && (now - lastAutoContactsSyncMs) < 30_000L) return
+        val appContext = context.applicationContext
         val hasPerm = ContextCompat.checkSelfPermission(
-            context,
+            appContext,
             Manifest.permission.READ_CONTACTS
         ) == PackageManager.PERMISSION_GRANTED
-        if (hasPerm) {
-            lastAutoContactsSyncMs = now
-            syncAndroidSystemContacts(context)
+        if (!hasPerm) return
+
+        val now = System.currentTimeMillis()
+        val minIntervalMs = if (force) 5_000L else 30_000L
+        if (isContactsSyncInProgress.get() || (now - lastAutoContactsSyncMs) < minIntervalMs) {
+            return
+        }
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            ioScope.launch {
+                val checkNow = System.currentTimeMillis()
+                if (!isContactsSyncInProgress.get() && (checkNow - lastAutoContactsSyncMs) >= minIntervalMs) {
+                    syncAndroidSystemContacts(appContext)
+                }
+            }
+        } else {
+            syncAndroidSystemContacts(appContext)
         }
     }
 
     fun init(context: Context) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val appContext = context.applicationContext
+        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedWebhook = prefs.getString(KEY_JARVIS_WEBHOOK_URL, null)
             ?: prefs.getString(KEY_JARVIS_AUTOMATION_WEBHOOK, null)
             ?: DEFAULT_LOCAL_WEBHOOK
         _zeroTouchWebhookUrl.value = savedWebhook.ifBlank { DEFAULT_LOCAL_WEBHOOK }
         _zeroTouchEnabled.value = prefs.getBoolean(KEY_ZERO_TOUCH_ENABLED, true)
 
-        autoInjectBridgeContactsIfPermitted(context, force = true)
-        val currentContacts = SmartContactAndAppRegistry.getAllContacts(context)
-        mirrorToJarvisPhoneContacts(context, currentContacts)
+        ioScope.launch {
+            val hasPerm = ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.READ_CONTACTS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasPerm) {
+                autoInjectBridgeContactsIfPermitted(appContext, force = false)
+            } else {
+                val currentContacts = SmartContactAndAppRegistry.getAllContacts(appContext)
+                mirrorToJarvisPhoneContacts(appContext, currentContacts)
+            }
+        }
     }
 
     fun appendLog(category: String, line: String, isSuccess: Boolean = true) {
@@ -520,51 +556,59 @@ object JarvisHandsFreeEngine {
             return 0 to SmartContactAndAppRegistry.getAllContacts(context)
         }
 
-        var importedCount = 0
+        if (!isContactsSyncInProgress.compareAndSet(false, true)) {
+            return 0 to SmartContactAndAppRegistry.getAllContacts(context)
+        }
+
         try {
-            val resolver = context.contentResolver
-            val projection = arrayOf(
-                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                ContactsContract.CommonDataKinds.Phone.NUMBER
-            )
-            resolver.query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                projection,
-                null,
-                null,
-                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC"
-            )?.use { cursor ->
-                val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-                val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                while (cursor.moveToNext()) {
-                    val rawName = if (nameIdx >= 0) cursor.getString(nameIdx)?.trim().orEmpty() else ""
-                    val rawNum = if (numIdx >= 0) cursor.getString(numIdx)?.trim().orEmpty() else ""
-                    if (rawName.isNotBlank() && rawNum.isNotBlank()) {
-                        val intlPhone = formatInternationalWhatsAppNumber(rawNum)
-                        if (intlPhone.length >= 7) {
-                            SmartContactAndAppRegistry.saveOrUpdateContact(
-                                context = context,
-                                name = rawName,
-                                phoneNumber = intlPhone,
-                                whatsappNumber = intlPhone
-                            )
-                            importedCount++
+            lastAutoContactsSyncMs = System.currentTimeMillis()
+            _contactsSyncExecutionCount.incrementAndGet()
+            val batchEntries = mutableListOf<Pair<String, String>>()
+            try {
+                val resolver = context.contentResolver
+                val projection = arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+                resolver.query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    projection,
+                    null,
+                    null,
+                    "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC"
+                )?.use { cursor ->
+                    val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                    val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    while (cursor.moveToNext()) {
+                        val rawName = if (nameIdx >= 0) cursor.getString(nameIdx)?.trim().orEmpty() else ""
+                        val rawNum = if (numIdx >= 0) cursor.getString(numIdx)?.trim().orEmpty() else ""
+                        if (rawName.isNotBlank() && rawNum.isNotBlank()) {
+                            val intlPhone = formatInternationalWhatsAppNumber(rawNum)
+                            if (intlPhone.length >= 7) {
+                                batchEntries.add(rawName to intlPhone)
+                            }
                         }
                     }
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed querying system contacts: ${e.message}")
+                appendLog("CONTACTS_ERROR", "Contacts query error: ${e.message}", isSuccess = false)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed querying system contacts: ${e.message}")
-            appendLog("CONTACTS_ERROR", "Contacts query error: ${e.message}", isSuccess = false)
-        }
 
-        val updatedList = SmartContactAndAppRegistry.getAllContacts(context)
-        mirrorToJarvisPhoneContacts(context, updatedList)
-        appendLog(
-            category = "CONTACTS_SYNC",
-            line = "Synced $importedCount phone numbers (${updatedList.size} total in jarvis_phone_contacts)"
-        )
-        return importedCount to updatedList
+            val updatedList = if (batchEntries.isNotEmpty()) {
+                SmartContactAndAppRegistry.saveOrUpdateContactsBatch(context, batchEntries)
+            } else {
+                SmartContactAndAppRegistry.getAllContacts(context)
+            }
+            mirrorToJarvisPhoneContacts(context, updatedList)
+            appendLog(
+                category = "CONTACTS_SYNC",
+                line = "Synced ${batchEntries.size} phone numbers (${updatedList.size} total in jarvis_phone_contacts)"
+            )
+            return batchEntries.size to updatedList
+        } finally {
+            isContactsSyncInProgress.set(false)
+        }
     }
 
     fun importVCardString(context: Context, vcfText: String): List<SmartContactEntry> {

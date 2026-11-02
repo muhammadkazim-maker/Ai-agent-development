@@ -67,7 +67,12 @@ data class ScreenSnapshot(
     val editableFields: List<UiNodeSummary>,
     val clickableLabels: List<String>,
     val visibleTexts: List<String>,
-    val visibleIcons: List<String> = emptyList()
+    val visibleIcons: List<String> = emptyList(),
+    val windowId: Int = -1,
+    val taskId: Int = -1,
+    val activityComponent: String = "",
+    val visibleApplicationPackages: Set<String> = emptySet(),
+    val editableFieldDrafts: Map<String, String> = emptyMap()
 ) {
     fun ageMs(): Long = (SystemClock.elapsedRealtime() - elapsedRealtimeMs).coerceAtLeast(0L)
     fun toJson(): JSONObject = JSONObject().apply {
@@ -76,9 +81,17 @@ data class ScreenSnapshot(
         put("titleGuess", titleGuess)
         put("ageMs", ageMs())
         put("timestampMs", timestampMs)
+        put("elapsedRealtimeMs", elapsedRealtimeMs)
+        put("windowId", windowId)
+        put("taskId", taskId)
+        if (activityComponent.isNotBlank()) put("activityComponent", activityComponent)
+        put("visibleApplicationPackages", JSONArray(visibleApplicationPackages.toList()))
         put("visibleTexts", JSONArray(visibleTexts))
         put("clickableLabels", JSONArray(clickableLabels))
         put("visibleIcons", JSONArray(visibleIcons))
+        val draftsObj = JSONObject()
+        for ((k, v) in editableFieldDrafts) draftsObj.put(k, v)
+        put("editableFieldDrafts", draftsObj)
         val editArr = JSONArray()
         for (f in editableFields) editArr.put(f.toJson())
         put("editableFields", editArr)
@@ -87,6 +100,16 @@ data class ScreenSnapshot(
         put("nodes", nodeArr)
     }
 }
+
+data class FreshPackageObservation(
+    val matched: Boolean,
+    val observedPackage: String?,
+    val snapshot: ScreenSnapshot?,
+    val bothAppsVisibleTogether: Boolean = false,
+    val timedOut: Boolean = false,
+    val observerAvailable: Boolean = true
+)
+
 object ScreenObserver {
     private val windowChangeCounter = AtomicLong(0L)
     @Volatile
@@ -95,6 +118,13 @@ object ScreenObserver {
     @Volatile
     var lastObservedAppPackage: String = ""
         private set
+    @Volatile
+    var lastObservedUserAppSnapshot: ScreenSnapshot? = null
+        internal set
+    private val lastObservedEditableDraftsByPackage =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.LinkedHashMap<String, String>>()
+    @Volatile
+    var testSnapshotSupplier: ((preferNonSelfPackage: Boolean) -> ScreenSnapshot?)? = null
     val windowChangeSeq: Long
         get() = windowChangeCounter.get()
     private val knownImePrefixes = listOf(
@@ -121,6 +151,57 @@ object ScreenObserver {
         }
         return knownImePrefixes.any { lower.startsWith(it) }
     }
+
+    /**
+     * Returns true if [pkg] is a transient assistant, keyboard (IME), system UI, permission dialog,
+     * or launcher window that must never overwrite or masquerade as the user's originating app task.
+     */
+    fun isTransientNonUserAppPackage(
+        pkg: String?,
+        selfPkg: String? = AgentBridge.appContext?.packageName
+    ): Boolean {
+        if (pkg.isNullOrBlank()) return true
+        val trimmed = pkg.trim()
+        val lower = trimmed.lowercase(Locale.ROOT)
+        if (lower == "unknown") return true
+        if (!selfPkg.isNullOrBlank() && lower == selfPkg.trim().lowercase(Locale.ROOT)) return true
+        if (lower == "com.example.omnivoice" || lower.startsWith("com.aistudio.")) return true
+        if (isImePackage(trimmed)) return true
+        if (lower == "com.android.systemui" ||
+            lower.contains("permissioncontroller") ||
+            lower == "com.android.packageinstaller" ||
+            lower == "com.google.android.packageinstaller"
+        ) {
+            return true
+        }
+        if (UiTools.isLauncherPackage(trimmed)) return true
+        return false
+    }
+
+    fun resetCachedOriginStateForTest() {
+        lastObservedAppPackage = ""
+        lastObservedUserAppSnapshot = null
+        lastObservedEditableDraftsByPackage.clear()
+    }
+
+    internal fun recordUserAppSnapshotIfEligible(
+        snap: ScreenSnapshot?,
+        selfPkg: String? = AgentBridge.appContext?.packageName
+    ): ScreenSnapshot? {
+        if (snap == null) return null
+        val pkg = snap.packageName.trim()
+        if (isTransientNonUserAppPackage(pkg, selfPkg)) {
+            return snap
+        }
+        if (snap.editableFieldDrafts.isNotEmpty()) {
+            lastObservedEditableDraftsByPackage[pkg] = LinkedHashMap(snap.editableFieldDrafts)
+        } else {
+            lastObservedEditableDraftsByPackage.remove(pkg)
+        }
+        lastObservedUserAppSnapshot = snap
+        return snap
+    }
+
     fun onEvent(event: AccessibilityEvent?, serviceOwnPackage: CharSequence? = null) {
         if (event == null) return
         lastEventElapsedMs = SystemClock.elapsedRealtime()
@@ -131,10 +212,50 @@ object ScreenObserver {
         ) {
             windowChangeCounter.incrementAndGet()
         }
+        val selfPkg = serviceOwnPackage?.toString()?.takeIf { it.isNotBlank() }
+            ?: AgentBridge.appContext?.packageName
         if (evPkg.isNotBlank() && !isImePackage(evPkg) && evPkg != "com.android.systemui") {
             if (evPkg != lastObservedAppPackage) {
                 AgentLog.d("ScreenObserver", "Foreground app package -> $evPkg")
                 lastObservedAppPackage = evPkg
+            }
+        }
+        if (evPkg.isNotBlank() && !isTransientNonUserAppPackage(evPkg, selfPkg)) {
+            if (evType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
+                evType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
+                evType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED
+            ) {
+                try {
+                    val src = event.source
+                    val isEditableSrc = src?.isEditable == true ||
+                        event.className?.toString()?.contains("EditText", ignoreCase = true) == true
+                    if (isEditableSrc) {
+                        val rawText = src?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: event.text?.joinToString("") { it.toString() }?.trim()?.takeIf { it.isNotEmpty() }
+                        if (!rawText.isNullOrBlank()) {
+                            val fieldKey = src?.viewIdResourceName?.trim()?.takeIf { it.isNotEmpty() }
+                                ?: "editable_draft"
+                            val map = lastObservedEditableDraftsByPackage.getOrPut(evPkg) { LinkedHashMap() }
+                            map[fieldKey] = rawText
+                            val prevSnap = lastObservedUserAppSnapshot
+                            if (prevSnap != null && prevSnap.packageName.equals(evPkg, ignoreCase = true)) {
+                                val updatedDrafts = LinkedHashMap(prevSnap.editableFieldDrafts)
+                                updatedDrafts[fieldKey] = rawText
+                                lastObservedUserAppSnapshot = prevSnap.copy(
+                                    editableFieldDrafts = updatedDrafts,
+                                    elapsedRealtimeMs = SystemClock.elapsedRealtime()
+                                )
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            if (evType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && AgentBridge.service != null) {
+                try {
+                    captureFreshSnapshot(preferNonSelfPackage = true)
+                } catch (_: Exception) {
+                }
             }
         }
     }
@@ -157,7 +278,7 @@ object ScreenObserver {
         if (activeRoot != null) {
             try { activeRoot.refresh() } catch (_: Exception) {}
             val pkg = activeRoot.packageName?.toString().orEmpty()
-            if (!isImePackage(pkg) && (!preferNonSelfPackage || pkg != selfPkg)) {
+            if (!isImePackage(pkg) && (!preferNonSelfPackage || (pkg != selfPkg && pkg != "com.example.omnivoice"))) {
                 results.add(activeRoot)
             }
         }
@@ -171,9 +292,11 @@ object ScreenObserver {
                         (w.type == AccessibilityWindowInfo.TYPE_APPLICATION || w.type == AccessibilityWindowInfo.TYPE_SYSTEM)
                 }.sortedByDescending { w ->
                     var priority = 0
+                    val wPkg = w.root?.packageName?.toString().orEmpty()
                     if (w.isFocused) priority += 100
                     if (w.isActive) priority += 50
-                    if (preferNonSelfPackage && w.root?.packageName?.toString() != selfPkg) priority += 25
+                    if (preferNonSelfPackage && wPkg != selfPkg && wPkg != "com.example.omnivoice") priority += 80
+                    if (preferNonSelfPackage && !isTransientNonUserAppPackage(wPkg, selfPkg)) priority += 60
                     priority
                 }
                 for (w in sortedWindows) {
@@ -207,7 +330,7 @@ object ScreenObserver {
             try { activeRoot.refresh() } catch (_: Exception) {}
             val activePkg = activeRoot.packageName?.toString().orEmpty()
             if (activePkg.isNotBlank() && !isImePackage(activePkg) && activePkg != "com.android.systemui") {
-                if (!preferNonSelfPackage || activePkg != selfPkg) {
+                if (!preferNonSelfPackage || (activePkg != selfPkg && activePkg != "com.example.omnivoice")) {
                     // Check if windows list has an even more specific focused dialog window
                     try {
                         val windows = svc.windows
@@ -216,7 +339,7 @@ object ScreenObserver {
                                 w.isFocused &&
                                 w.root != null &&
                                 !isImePackage(w.root?.packageName?.toString()) &&
-                                (!preferNonSelfPackage || w.root?.packageName?.toString() != selfPkg)
+                                (!preferNonSelfPackage || (w.root?.packageName?.toString() != selfPkg && w.root?.packageName?.toString() != "com.example.omnivoice"))
                         }?.root
                         if (focusedDialog != null) {
                             try { focusedDialog.refresh() } catch (_: Exception) {}
@@ -238,9 +361,17 @@ object ScreenObserver {
                 }
                 if (preferNonSelfPackage) {
                     val externalActive = appWindows.firstOrNull { w ->
-                        (w.isFocused || w.isActive) && w.root?.packageName?.toString() != selfPkg
+                        val wPkg = w.root?.packageName?.toString().orEmpty()
+                        (w.isFocused || w.isActive) && !isTransientNonUserAppPackage(wPkg, selfPkg)
                     } ?: appWindows.firstOrNull { w ->
-                        w.root?.packageName?.toString() != selfPkg
+                        val wPkg = w.root?.packageName?.toString().orEmpty()
+                        !isTransientNonUserAppPackage(wPkg, selfPkg)
+                    } ?: appWindows.firstOrNull { w ->
+                        val wPkg = w.root?.packageName?.toString().orEmpty()
+                        (w.isFocused || w.isActive) && wPkg != selfPkg && wPkg != "com.example.omnivoice"
+                    } ?: appWindows.firstOrNull { w ->
+                        val wPkg = w.root?.packageName?.toString().orEmpty()
+                        wPkg != selfPkg && wPkg != "com.example.omnivoice"
                     }
                     if (externalActive?.root != null) {
                         val root = externalActive.root!!
@@ -391,12 +522,31 @@ object ScreenObserver {
         return "$vert-$horiz"
     }
 
-    fun captureFreshSnapshot(): ScreenSnapshot? {
+    fun isObserverAvailable(): Boolean {
+        return testSnapshotSupplier != null || AgentBridge.service != null
+    }
+
+    fun captureFreshSnapshot(preferNonSelfPackage: Boolean = false): ScreenSnapshot? {
+        testSnapshotSupplier?.let { supplier ->
+            val supplied = supplier(preferNonSelfPackage)
+            return recordUserAppSnapshotIfEligible(supplied)
+        }
         val svc = AgentBridge.service ?: return null
-        val roots = findAllActiveRoots(svc, preferNonSelfPackage = false)
+        val roots = findAllActiveRoots(svc, preferNonSelfPackage = preferNonSelfPackage)
         val primaryRoot = roots.firstOrNull() ?: return null
         val pkg = primaryRoot.packageName?.toString()?.takeIf { it.isNotBlank() }
-            ?: lastObservedAppPackage.ifBlank { "unknown" }
+            ?: lastObservedAppPackage.ifBlank { "" }
+        if (pkg.isBlank()) return null
+        val built = buildSnapshotFromRoots(svc, pkg, roots, primaryRoot)
+        return recordUserAppSnapshotIfEligible(built)
+    }
+
+    private fun buildSnapshotFromRoots(
+        svc: AccessibilityService,
+        pkg: String,
+        roots: List<AccessibilityNodeInfo>,
+        primaryRoot: AccessibilityNodeInfo
+    ): ScreenSnapshot {
         val appLabel = resolveAppLabel(pkg)
         val nodes = mutableListOf<UiNodeSummary>()
         for (r in roots) {
@@ -419,6 +569,30 @@ object ScreenObserver {
             } else null
         }.distinct().take(35)
         val editableFields = nodes.filter { it.isEditable && !isImePackage(it.packageName) }
+        val editableDrafts = linkedMapOf<String, String>()
+        for (field in editableFields) {
+            if (field.text.isNotBlank()) {
+                val key = field.viewId.ifBlank { field.hintText.ifBlank { "field_${field.index}" } }
+                editableDrafts[key] = field.text
+            }
+        }
+        val visibleAppPackages = linkedSetOf<String>()
+        visibleAppPackages.add(pkg)
+        try {
+            val windows = svc.windows
+            if (!windows.isNullOrEmpty()) {
+                for (w in windows) {
+                    if (w.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        val wPkg = w.root?.packageName?.toString().orEmpty()
+                        if (wPkg.isNotBlank() && !isImePackage(wPkg) && wPkg != "com.android.systemui") {
+                            visibleAppPackages.add(wPkg)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        val primaryWindowId = try { primaryRoot.windowId } catch (_: Exception) { -1 }
         val titleGuess = guessScreenTitle(nodes, visibleTexts, appLabel)
         return ScreenSnapshot(
             timestampMs = System.currentTimeMillis(),
@@ -430,8 +604,76 @@ object ScreenObserver {
             editableFields = editableFields,
             clickableLabels = clickableLabels,
             visibleTexts = visibleTexts,
-            visibleIcons = visibleIcons
+            visibleIcons = visibleIcons,
+            windowId = primaryWindowId,
+            taskId = primaryWindowId,
+            activityComponent = "$pkg/$titleGuess",
+            visibleApplicationPackages = visibleAppPackages,
+            editableFieldDrafts = editableDrafts
         )
+    }
+
+    /**
+     * Captures or retrieves the originating non-transient user app snapshot before navigating Home
+     * or launching a target app. Strictly ignores transient assistant ([selfPackageName]), keyboard (IME),
+     * SystemUI, permission dialog, and launcher windows, falling back to any underlying user app window
+     * in [AccessibilityService.getWindows] or [lastObservedUserAppSnapshot].
+     */
+    fun captureOriginUserAppSnapshot(
+        selfPackageName: String,
+        targetPackageToExclude: String? = null
+    ): ScreenSnapshot? {
+        val current = captureFreshSnapshot(preferNonSelfPackage = true)
+            ?: captureFreshSnapshot(preferNonSelfPackage = false)
+        if (current != null) {
+            val pkg = current.packageName.trim()
+            val excludedByTarget = !targetPackageToExclude.isNullOrBlank() &&
+                pkg.equals(targetPackageToExclude.trim(), ignoreCase = true)
+            if (!isTransientNonUserAppPackage(pkg, selfPackageName) && !excludedByTarget) {
+                return recordUserAppSnapshotIfEligible(current, selfPackageName)
+            }
+        }
+
+        // If the active window is a transient window (assistant, IME, launcher, SystemUI),
+        // inspect underlying application windows in AccessibilityService.windows if available
+        val svc = AgentBridge.service
+        if (svc != null) {
+            try {
+                val windows = svc.windows
+                if (!windows.isNullOrEmpty()) {
+                    val userAppWin = windows.firstOrNull { w ->
+                        if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) return@firstOrNull false
+                        val r = w.root ?: return@firstOrNull false
+                        val wPkg = r.packageName?.toString()?.trim().orEmpty()
+                        val excludedByTarget = !targetPackageToExclude.isNullOrBlank() &&
+                            wPkg.equals(targetPackageToExclude.trim(), ignoreCase = true)
+                        !isTransientNonUserAppPackage(wPkg, selfPackageName) && !excludedByTarget
+                    }
+                    val root = userAppWin?.root
+                    if (root != null) {
+                        try { root.refresh() } catch (_: Exception) {}
+                        val wPkg = root.packageName?.toString()?.trim().orEmpty()
+                        if (wPkg.isNotBlank()) {
+                            val built = buildSnapshotFromRoots(svc, wPkg, listOf(root), root)
+                            return recordUserAppSnapshotIfEligible(built, selfPackageName)
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        // Fall back to the last observed non-transient user app snapshot (e.g., Notepad before assistant/launcher appeared)
+        val cached = lastObservedUserAppSnapshot
+        if (cached != null) {
+            val pkg = cached.packageName.trim()
+            val excludedByTarget = !targetPackageToExclude.isNullOrBlank() &&
+                pkg.equals(targetPackageToExclude.trim(), ignoreCase = true)
+            if (!isTransientNonUserAppPackage(pkg, selfPackageName) && !excludedByTarget) {
+                return recordUserAppSnapshotIfEligible(cached, selfPackageName)
+            }
+        }
+        return null
     }
     private fun traverseTree(
         node: AccessibilityNodeInfo?,
@@ -521,18 +763,88 @@ object ScreenObserver {
         }
     }
     suspend fun waitForPackage(expectedPackages: Set<String>, timeoutMs: Long = 4500L): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val snap = captureFreshSnapshot()
-            if (snap != null && expectedPackages.any { it.equals(snap.packageName, ignoreCase = true) }) {
-                return true
-            }
-            delay(45L)
-        }
-        return false
+        val obs = observeFreshTargetPackage(
+            expectedPackages = expectedPackages,
+            afterElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+            timeoutMs = timeoutMs
+        )
+        return obs.matched && !obs.bothAppsVisibleTogether
     }
+
+    /**
+     * Waits for a fresh post-dispatch observation of one of [expectedPackages] with a bounded timeout
+     * suitable for cold starts. Rejects stale snapshots captured before [afterElapsedRealtimeMs],
+     * never fabricates an unobserved foreground package, and distinguishes full task switching from
+     * split-screen/multi-window where both the origin app and target app are simultaneously visible.
+     */
+    suspend fun observeFreshTargetPackage(
+        expectedPackages: Set<String>,
+        afterElapsedRealtimeMs: Long,
+        timeoutMs: Long = 2500L,
+        pollIntervalMs: Long = 45L,
+        originPackage: String? = null
+    ): FreshPackageObservation {
+        if (!isObserverAvailable()) {
+            return FreshPackageObservation(
+                matched = false,
+                observedPackage = null,
+                snapshot = null,
+                bothAppsVisibleTogether = false,
+                timedOut = false,
+                observerAvailable = false
+            )
+        }
+        val safeTimeout = timeoutMs.coerceAtLeast(0L)
+        val deadlineElapsed = SystemClock.elapsedRealtime() + safeTimeout
+        val startNano = System.nanoTime()
+        var lastFreshSnap: ScreenSnapshot? = null
+        do {
+            val snap = captureFreshSnapshot(preferNonSelfPackage = true)
+            if (snap != null && snap.elapsedRealtimeMs >= afterElapsedRealtimeMs) {
+                lastFreshSnap = snap
+                val pkg = snap.packageName.takeIf { it.isNotBlank() && it != "unknown" }
+                if (pkg != null && expectedPackages.any { it.equals(pkg, ignoreCase = true) }) {
+                    val visibleSet = if (snap.visibleApplicationPackages.isNotEmpty()) {
+                        snap.visibleApplicationPackages
+                    } else {
+                        setOf(pkg)
+                    }
+                    val bothVisible = !originPackage.isNullOrBlank() &&
+                        !originPackage.equals(pkg, ignoreCase = true) &&
+                        visibleSet.any { it.equals(originPackage, ignoreCase = true) } &&
+                        visibleSet.any { expected -> expectedPackages.any { it.equals(expected, ignoreCase = true) } }
+                    return FreshPackageObservation(
+                        matched = true,
+                        observedPackage = pkg,
+                        snapshot = snap,
+                        bothAppsVisibleTogether = bothVisible,
+                        timedOut = false,
+                        observerAvailable = true
+                    )
+                }
+            }
+            val elapsedWallMs = (System.nanoTime() - startNano) / 1_000_000L
+            if (SystemClock.elapsedRealtime() >= deadlineElapsed || elapsedWallMs >= safeTimeout) break
+            delay(pollIntervalMs.coerceAtLeast(10L))
+        } while (SystemClock.elapsedRealtime() < deadlineElapsed && ((System.nanoTime() - startNano) / 1_000_000L) < safeTimeout)
+
+        val finalObservedPkg = lastFreshSnap?.packageName?.takeIf { it.isNotBlank() && it != "unknown" }
+        val finalVisibleSet = lastFreshSnap?.visibleApplicationPackages.orEmpty()
+        val bothVisibleAtEnd = !originPackage.isNullOrBlank() &&
+            finalVisibleSet.any { it.equals(originPackage, ignoreCase = true) } &&
+            finalVisibleSet.any { expected -> expectedPackages.any { it.equals(expected, ignoreCase = true) } }
+        return FreshPackageObservation(
+            matched = false,
+            observedPackage = finalObservedPkg,
+            snapshot = lastFreshSnap,
+            bothAppsVisibleTogether = bothVisibleAtEnd,
+            timedOut = true,
+            observerAvailable = true
+        )
+    }
+
     fun describeCurrentScreen(): ToolResult {
-        if (AgentBridge.service == null) {
+        if (!isObserverAvailable()) {
             return ToolResult.needsPermission(
                 tool = "describe_screen",
                 permissionOrService = "AccessibilityService",

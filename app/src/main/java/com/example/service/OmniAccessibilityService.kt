@@ -120,15 +120,24 @@ class OmniAccessibilityService : AccessibilityService() {
             val service = instance
             val root = service?.rootInActiveWindow
             if (root == null) {
+                val freshSnap = com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+                if (freshSnap != null && freshSnap.packageName.isNotBlank() && freshSnap.packageName != "unknown") {
+                    return ScreenUiObservation(
+                        activePackage = freshSnap.packageName,
+                        visibleTexts = freshSnap.visibleTexts.take(12),
+                        clickableLabels = freshSnap.clickableLabels.take(8),
+                        summary = "Active app: ${freshSnap.packageName}. ${freshSnap.titleGuess}"
+                    )
+                }
                 return ScreenUiObservation(
-                    activePackage = "com.example.omnivoice",
-                    visibleTexts = listOf("OmniVoice Assistant Console", "Voice Orb Ready", "Bilingual Urdu + English Engine Active"),
-                    clickableLabels = listOf("Mic Button", "Send Command", "AI Skills", "Routines"),
-                    summary = "Active screen: OmniVoice Assistant Console (Ready for voice or cross-app commands)."
+                    activePackage = "",
+                    visibleTexts = emptyList(),
+                    clickableLabels = emptyList(),
+                    summary = "No active accessibility window observed."
                 )
             }
 
-            val pkg = root.packageName?.toString() ?: "unknown"
+            val pkg = root.packageName?.toString().orEmpty()
             val texts = mutableListOf<String>()
             val clickables = mutableListOf<String>()
             traverseNode(root, texts, clickables, depth = 0)

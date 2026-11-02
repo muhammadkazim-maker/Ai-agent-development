@@ -999,6 +999,14 @@ object WhatsAppController {
         message: String,
         explicitPhone: String = ""
     ): ToolResult {
+        if (com.example.engine.LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return ToolResult.failure(
+                tool = "whatsapp_send_voice_note",
+                message = "Blocked: Cannot send a WhatsApp voice note while the phone is locked.",
+                errorCode = "DEVICE_LOCKED"
+            )
+        }
+
         val cleanMsg = message.trim()
         if (cleanMsg.isEmpty()) {
             return ToolResult.failure("whatsapp_send_voice_note", "Voice note message text cannot be empty.", "EMPTY_MESSAGE")
@@ -1013,9 +1021,9 @@ object WhatsAppController {
                 ok = false,
                 status = ToolStatus.NOT_FOUND.name,
                 tool = "whatsapp_send_voice_note",
-                message = "Contact '$contact' was not found in your contacts or has no valid phone number.",
+                message = "Contact '$contact' was not found in your contacts or has no valid phone number. Stopped before launching any WhatsApp intent.",
                 verified = false,
-                verificationNote = "Zero contacts matched '$contact'; refused to send WhatsApp voice note.",
+                verificationNote = "Zero contacts matched '$contact'; stopped before any intent.",
                 data = JSONObject().put("requestedContact", contact),
                 errorCode = "CONTACT_NOT_FOUND"
             )
@@ -1029,7 +1037,7 @@ object WhatsAppController {
                 ok = false,
                 status = ToolStatus.AMBIGUOUS_CONTACT.name,
                 tool = "whatsapp_send_voice_note",
-                message = "Multiple contacts match '$contact': $names. Please clarify which one.",
+                message = "Multiple contacts match '$contact': $names. Please clarify which one. Stopped before launching any WhatsApp intent.",
                 verified = false,
                 verificationNote = "Ambiguous contact match (${topTies.size} candidates); aborted before opening WhatsApp.",
                 data = JSONObject().put("candidates", JSONArray(topTies.map { it.displayName })),
@@ -1038,139 +1046,24 @@ object WhatsAppController {
         }
 
         val chosen = matches.first()
-        val wavFile = synthesizeSpeechToWavFile(context, cleanMsg)
-        if (wavFile == null || !wavFile.exists() || wavFile.length() <= 44L) {
-            return ToolResult.failure(
-                tool = "whatsapp_send_voice_note",
-                message = "Failed to synthesize voice note audio file for '${chosen.displayName}'.",
-                errorCode = "TTS_WAV_SYNTHESIS_FAILED"
-            )
-        }
-
-        val service = AgentBridge.service
         val baseData = JSONObject().apply {
             put("contactName", chosen.displayName)
             put("phoneUsed", chosen.normalizedDigits)
             put("spokenText", cleanMsg)
-            put("wavFilePath", wavFile.absolutePath)
-            put("wavSizeBytes", wavFile.length())
+            put("phaseGate", "DISABLED_UNTIL_PHASE_11")
         }
 
-        if (service == null) {
-            return ToolResult.needsPermission(
-                tool = "whatsapp_send_voice_note",
-                permissionOrService = "AccessibilityService",
-                message = "Synthesized voice note WAV (${wavFile.length()} bytes) for ${chosen.displayName}, but AccessibilityService is not enabled to verify chat header and dispatch inside WhatsApp."
-            ).copy(data = baseData)
-        }
-
-        val waPkg = resolveInstalledWhatsAppPackage(context) ?: "com.whatsapp"
-        val deepLinkUri = "https://api.whatsapp.com/send?phone=${chosen.normalizedDigits}"
-        val chatIntent = Intent(Intent.ACTION_VIEW, Uri.parse(deepLinkUri)).apply {
-            setPackage(waPkg)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        try {
-            context.startActivity(chatIntent)
-        } catch (e: Exception) {
-            return ToolResult.failure(
-                tool = "whatsapp_send_voice_note",
-                message = "Failed to open WhatsApp chat for ${chosen.displayName}: ${e.message}",
-                errorCode = "WHATSAPP_LAUNCH_FAILED",
-                data = baseData
-            )
-        }
-
-        val headerVerified = waitForTargetChatHeader(chosen.displayName, chosen.normalizedDigits, timeoutMs = 6000L)
-        if (!headerVerified.first) {
-            return ToolResult.failure(
-                tool = "whatsapp_send_voice_note",
-                message = "Safety abort: WhatsApp chat header ('${headerVerified.second}') did not match '${chosen.displayName}'. Refused to record/send voice note.",
-                errorCode = "CHAT_HEADER_MISMATCH",
-                data = baseData.put("observedHeader", headerVerified.second)
-            )
-        }
-
-        val root = ScreenObserver.findApplicationRoot(service, preferNonSelfPackage = false)
-            ?: return ToolResult.failure("whatsapp_send_voice_note", "WhatsApp window lost before recording voice note.", "WINDOW_LOST", data = baseData)
-
-        val voiceBtn = findWhatsAppNodeByIdTail(root, "voice_note_btn")
-            ?: UiTools.findClickableMatchingNode(root, "Voice message", exact = false)
-
-        if (voiceBtn == null) {
-            return ToolResult.failure(
-                tool = "whatsapp_send_voice_note",
-                message = "Verified ${chosen.displayName}'s WhatsApp chat header, but the Voice Note microphone button was not visible.",
-                errorCode = "VOICE_BUTTON_NOT_FOUND",
-                data = baseData
-            )
-        }
-
-        val rect = Rect().also { voiceBtn.getBoundsInScreen(it) }
-        val holdMs = (cleanMsg.length * 35L).coerceIn(450L, 1800L)
-        val path = Path().apply { moveTo(rect.exactCenterX(), rect.exactCenterY()) }
-        val holdGesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0L, holdMs))
-            .build()
-        val dispatched = service.dispatchGesture(holdGesture, null, null)
-        if (!dispatched) {
-            return ToolResult.failure(
-                tool = "whatsapp_send_voice_note",
-                message = "Could not hold WhatsApp voice note button for ${chosen.displayName}.",
-                errorCode = "VOICE_HOLD_FAILED",
-                data = baseData
-            )
-        }
-        delay(holdMs.coerceAtMost(250L) + 60L)
-        return ToolResult.success(
+        // Phase 01 Policy: Broken voice-note sending path is disabled until Phase 11.
+        // Silence, a mic click, and opening a share sheet are never proof of sending.
+        return ToolResult(
+            ok = false,
+            status = ToolStatus.FAILED.name,
             tool = "whatsapp_send_voice_note",
-            message = "Sent WhatsApp voice note to ${chosen.displayName}: \"$cleanMsg\".",
-            verified = true,
-            verificationNote = "Header matched '${headerVerified.second}', synthesized ${wavFile.length()}-byte WAV, and held voice_note_btn for ${holdMs}ms.",
-            data = baseData.put("headerVerified", headerVerified.second).put("holdDurationMs", holdMs)
+            message = "WhatsApp voice-note sending to ${chosen.displayName} is disabled until Phase 11. Silence, a microphone button click, or opening a share sheet is not proof of sending, so no voice note was sent.",
+            verified = false,
+            verificationNote = "Voice-note sending path is disabled until Phase 11; stopped before launching any WhatsApp intent or share sheet.",
+            data = baseData,
+            errorCode = "VOICE_NOTE_DISABLED_PHASE_11"
         )
-    }
-
-    fun synthesizeSpeechToWavFile(context: Context, text: String): java.io.File? {
-        val dir = java.io.File(context.cacheDir, "voice_notes").apply { mkdirs() }
-        val outFile = java.io.File(dir, "omnivoice_vn_${System.currentTimeMillis()}.wav")
-        try {
-            val sampleRate = 16000
-            val durationSec = (text.length * 0.06).coerceIn(0.6, 5.0)
-            val numSamples = (sampleRate * durationSec).toInt()
-            val pcmBytes = ByteArray(numSamples * 2)
-            for (i in 0 until numSamples) {
-                val t = i.toDouble() / sampleRate
-                val env = kotlin.math.sin(Math.PI * i / numSamples)
-                val sample = (kotlin.math.sin(2.0 * Math.PI * 220.0 * t) * 6000.0 * env).toInt().toShort()
-                pcmBytes[i * 2] = (sample.toInt() and 0xFF).toByte()
-                pcmBytes[i * 2 + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
-            }
-            val totalDataLen = pcmBytes.size + 36
-            val byteRate = sampleRate * 2
-            val header = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
-                put('R'.code.toByte()); put('I'.code.toByte()); put('F'.code.toByte()); put('F'.code.toByte())
-                putInt(totalDataLen)
-                put('W'.code.toByte()); put('A'.code.toByte()); put('V'.code.toByte()); put('E'.code.toByte())
-                put('f'.code.toByte()); put('m'.code.toByte()); put('t'.code.toByte()); put(' '.code.toByte())
-                putInt(16)
-                putShort(1) // PCM
-                putShort(1) // Mono
-                putInt(sampleRate)
-                putInt(byteRate)
-                putShort(2) // BlockAlign
-                putShort(16) // BitsPerSample
-                put('d'.code.toByte()); put('a'.code.toByte()); put('t'.code.toByte()); put('a'.code.toByte())
-                putInt(pcmBytes.size)
-            }.array()
-            java.io.FileOutputStream(outFile).use { fos ->
-                fos.write(header)
-                fos.write(pcmBytes)
-            }
-            return outFile
-        } catch (e: Exception) {
-            AgentLog.w("WhatsApp", "WAV synthesis error: ${e.message}")
-            return null
-        }
     }
 }

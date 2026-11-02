@@ -301,9 +301,7 @@ fun SecuritySetupScreen(viewModel: VoiceAssistantViewModel) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Auto-Unlock PIN Card
-        val storedPin by viewModel.storedPin.collectAsState()
-        var pinInput by remember { mutableStateOf("") }
+        // Standard Android Lock Policy Card (PIN collection/replay disabled)
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -326,63 +324,27 @@ fun SecuritySetupScreen(viewModel: VoiceAssistantViewModel) {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Auto-Unlock PIN Entry",
+                            text = "System Lock Screen Protection",
                             color = TextPrimary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
 
-                    if (storedPin.isNotBlank()) {
-                        Text(
-                            text = "PIN Configured",
-                            color = EmeraldTertiary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+                    Text(
+                        text = "Enforced",
+                        color = EmeraldTertiary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Method A Auto-Unlock: Used by AccessibilityService to automatically swipe up and enter your device PIN on the lockscreen keypad after your spoken passphrase is authenticated.",
+                    text = "Device PIN and pattern collection, storage, autofill, and replay are disabled for your safety. Android's standard lock screen stays enabled, and private actions are blocked whenever the phone is locked.",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
-
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = pinInput,
-                        onValueChange = { if (it.length <= 8 && it.all { c -> c.isDigit() }) pinInput = it },
-                        placeholder = { Text(if (storedPin.isNotBlank()) "••••" else "Enter phone PIN (e.g. 1234)", fontSize = 12.sp) },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        shape = RoundedCornerShape(8.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = CyanPrimary,
-                            unfocusedBorderColor = DarkSurfaceBorder,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            if (pinInput.isNotBlank()) {
-                                viewModel.setStoredUnlockPin(pinInput)
-                                pinInput = ""
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Save PIN", color = Color(0xFF003548), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
-                }
             }
         }
 

@@ -97,6 +97,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -117,6 +118,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -128,9 +130,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.engine.BiometricVaultManager
 import com.example.engine.DraggableOrbState
 import com.example.engine.GeminiLiveVoice
+import com.example.engine.JarvisHandsFreeEngine
 import com.example.engine.JarvisOrbActionState
 import com.example.engine.LiveConnectionState
 import com.example.engine.OsKernel
@@ -187,6 +192,7 @@ fun JarvisStageFlowScreen(
     onOpenAdvancedSettingsHub: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val vaultManager = remember { BiometricVaultManager.getInstance(context) }
     val osKernel = remember { OsKernel.getInstance(context) }
 
@@ -201,11 +207,48 @@ fun JarvisStageFlowScreen(
     val liveUserTranscript by viewModel.liveUserTranscript.collectAsState()
     val liveAiTranscript by viewModel.liveAiTranscript.collectAsState()
 
-    var currentStage by remember(isPermsCompleted) {
+    var hasMicPermissionActual by remember {
         mutableStateOf(
-            if (!isPermsCompleted) JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val shouldOpenHomeStage = isPermsCompleted || hasMicPermissionActual
+
+    var currentStage by remember(shouldOpenHomeStage) {
+        mutableStateOf(
+            if (!shouldOpenHomeStage) JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER
             else JarvisStage.STAGE_B_MINIMAL_START
         )
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val micGrantedNow = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                hasMicPermissionActual = micGrantedNow
+                val contactsGrantedNow = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.READ_CONTACTS
+                ) == PackageManager.PERMISSION_GRANTED
+                if (contactsGrantedNow) {
+                    JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(context, force = false)
+                }
+                if (micGrantedNow) {
+                    vaultManager.markPermissionsCompleted()
+                    if (currentStage == JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER) {
+                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     var showQuickSettingsDialog by remember { mutableStateOf(false) }
@@ -252,7 +295,6 @@ fun JarvisStageFlowScreen(
                     onSelectVoice = { voice -> viewModel.omniLiveEngine.selectVoice(voice) },
                     onStartJarvis = {
                         viewModel.startGeminiLiveSession()
-                        onEnterPipMode()
                         currentStage = JarvisStage.STAGE_C_CORNER_ORB
                     },
                     onSwitchToLiveHud = {
@@ -368,6 +410,7 @@ private fun JarvisStageAPermissionsGatekeeper(
     onAllGranted: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var hasAccessibility by remember { mutableStateOf(OmniAccessibilityService.isConnected()) }
     var hasNotificationListener by remember { mutableStateOf(OmniNotificationListenerService.isServiceRunning()) }
     var hasOverlay by remember {
@@ -392,26 +435,65 @@ private fun JarvisStageAPermissionsGatekeeper(
         )
     }
 
+    fun refreshActualPermissions() {
+        hasAccessibility = OmniAccessibilityService.isConnected()
+        hasNotificationListener = OmniNotificationListenerService.isServiceRunning()
+        hasOverlay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(context)
+        } else {
+            true
+        }
+        hasMic = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        hasContacts = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+        hasPhone = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CALL_PHONE
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasContacts) {
+            JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(context, force = false)
+        }
+    }
+
     val runtimePermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        hasMic = results[Manifest.permission.RECORD_AUDIO] == true || hasMic
-        hasContacts = results[Manifest.permission.READ_CONTACTS] == true || hasContacts
-        hasPhone = results[Manifest.permission.CALL_PHONE] == true || hasPhone
+        hasMic = results[Manifest.permission.RECORD_AUDIO]
+            ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+        hasContacts = results[Manifest.permission.READ_CONTACTS]
+            ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED)
+        hasPhone = results[Manifest.permission.CALL_PHONE]
+            ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED)
+        if (hasContacts) {
+            JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(context, force = false)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshActualPermissions()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     LaunchedEffect(Unit) {
-        hasAccessibility = OmniAccessibilityService.isConnected()
-        hasNotificationListener = OmniNotificationListenerService.isServiceRunning()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            hasOverlay = Settings.canDrawOverlays(context)
-        }
+        refreshActualPermissions()
     }
 
     val totalSteps = 3
     val completedSteps = (if (hasAccessibility) 1 else 0) +
         (if (hasNotificationListener) 1 else 0) +
-        (if (hasMic && hasContacts && hasOverlay) 1 else 0)
+        (if (hasMic) 1 else 0)
 
     val progress = (completedSteps.toFloat() / totalSteps.toFloat()).coerceIn(0.25f, 1f)
 
@@ -532,19 +614,20 @@ private fun JarvisStageAPermissionsGatekeeper(
                 GatekeeperPermissionRow(
                     title = "03 // 16kHz Audio, Contacts & Overlay",
                     subtitle = "Bilingual voice recognition, WhatsApp contact matcher & floating plasma orb",
-                    isGranted = hasMic && hasContacts && hasOverlay,
+                    isGranted = hasMic,
                     icon = Icons.Default.Layers,
-                    actionLabel = if (hasMic && hasContacts && hasOverlay) "READY" else "ALLOW",
+                    actionLabel = if (hasMic) "READY" else "ALLOW",
                     onAction = {
-                        runtimePermLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.RECORD_AUDIO,
-                                Manifest.permission.READ_CONTACTS,
-                                Manifest.permission.CALL_PHONE,
-                                Manifest.permission.CAMERA
+                        if (!hasMic || !hasContacts || !hasPhone) {
+                            runtimePermLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.RECORD_AUDIO,
+                                    Manifest.permission.READ_CONTACTS,
+                                    Manifest.permission.CALL_PHONE,
+                                    Manifest.permission.CAMERA
+                                )
                             )
-                        )
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
                             try {
                                 context.startActivity(
                                     Intent(
@@ -687,8 +770,21 @@ private fun JarvisStageBMinimalLaunchScreen(
     onTestAccent: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var stageBPromptInput by remember { mutableStateOf("") }
-    val isAccessibilityConnected = remember { OmniAccessibilityService.isConnected() }
+    var isAccessibilityConnected by remember { mutableStateOf(OmniAccessibilityService.isConnected()) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isAccessibilityConnected = OmniAccessibilityService.isConnected()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val infiniteTransition = rememberInfiniteTransition(label = "quantum_core")
     val rotation by infiniteTransition.animateFloat(
@@ -940,6 +1036,7 @@ private fun JarvisStageBMinimalLaunchScreen(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .size(192.dp)
+                        .clickable { onStartJarvis() }
                         .testTag("btn_start_jarvis")
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1983,6 +2080,7 @@ private fun JarvisStageCCornerOrbView(
                             .size(40.dp)
                             .background(QuantumGlassCard, CircleShape)
                             .border(1.dp, QuantumBorder, CircleShape)
+                            .testTag("btn_enter_pip_mode")
                     ) {
                         Icon(
                             imageVector = Icons.Default.PictureInPicture,
@@ -2238,7 +2336,6 @@ private fun JarvisSettingsAndVaultModal(
     onDismiss: () -> Unit
 ) {
     val vault by vaultManager.vaultState.collectAsState()
-    var pinEdit by remember { mutableStateOf(vault.masterPin) }
     var voiceEdit by remember { mutableStateOf(vault.secretVoiceUnlockWord) }
     var orbSensitivityEdit by remember(vault.orbDragSensitivity) { mutableFloatStateOf(vault.orbDragSensitivity) }
 
@@ -2283,19 +2380,10 @@ private fun JarvisSettingsAndVaultModal(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                OutlinedTextField(
-                    value = pinEdit,
-                    onValueChange = { pinEdit = it },
-                    label = { Text("Device Master PIN") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = QuantumCyan,
-                        unfocusedBorderColor = QuantumBorder,
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary
-                    ),
-                    singleLine = true
+                Text(
+                    text = "Device PIN/pattern collection and replay are disabled. Android's standard lock screen remains active.",
+                    fontSize = 11.sp,
+                    color = TextSecondary
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -2420,8 +2508,8 @@ private fun JarvisSettingsAndVaultModal(
                     Button(
                         onClick = {
                             vaultManager.enrollVault(
-                                masterPin = pinEdit,
-                                lockScreenPattern = vault.lockScreenPattern,
+                                masterPin = "",
+                                lockScreenPattern = "",
                                 secretVoiceWord = voiceEdit,
                                 biometricEnrolled = true
                             )

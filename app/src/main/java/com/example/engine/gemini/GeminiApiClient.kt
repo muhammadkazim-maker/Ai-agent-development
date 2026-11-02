@@ -1602,12 +1602,35 @@ class DefaultGeminiApiClient(
                 paramMap["exact"] = args.optBoolean("exact", false).toString()
                 spokenResponse = "Clicking $target."
             }
+            "return_to_origin", "return_to_previous_app" -> {
+                actionName = "return_to_origin"
+                target = "origin_task"
+                paramMap["navigation"] = "return_to_previous_app"
+                spokenResponse = LanguageProcessor.formatReplyInLanguage(
+                    "Returning to the previous app window.",
+                    "Pichli app window par wapas ja raha hoon.",
+                    "پچھلی ایپ ونڈو پر واپس جا رہا ہوں۔",
+                    detectedLang
+                )
+            }
             "close_app" -> {
-                actionName = "close_app"
-                target = args.optString("app_name", "current")
-                paramMap["app_name"] = target
-                paramMap["method"] = args.optString("method", "home")
-                spokenResponse = "Closing $target."
+                if (com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(com.omnivoice.agentfix.AgentSession.lastUserUtterance)) {
+                    actionName = "return_to_origin"
+                    target = "origin_task"
+                    paramMap["navigation"] = "return_to_previous_app"
+                    spokenResponse = LanguageProcessor.formatReplyInLanguage(
+                        "Returning to the previous app window.",
+                        "Pichli app window par wapas ja raha hoon.",
+                        "پچھلی ایپ ونڈو پر واپس جا رہا ہوں۔",
+                        detectedLang
+                    )
+                } else {
+                    actionName = "close_app"
+                    target = args.optString("app_name", "current")
+                    paramMap["app_name"] = target
+                    paramMap["method"] = args.optString("method", "home")
+                    spokenResponse = "Closing $target."
+                }
             }
             "open_app" -> {
                 actionName = "open_app"

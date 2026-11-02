@@ -134,6 +134,13 @@ class WakeWordForegroundService : Service() {
                 return false
             }
 
+            if (_isServiceActive.value && activeInstance != null) {
+                if (_isListeningPaused.value) {
+                    resume(context)
+                }
+                return true
+            }
+
             return try {
                 val intent = Intent(context, WakeWordForegroundService::class.java).apply {
                     action = ACTION_START
@@ -147,6 +154,9 @@ class WakeWordForegroundService : Service() {
         }
 
         fun stop(context: Context) {
+            if (!_isServiceActive.value && activeInstance == null) {
+                return
+            }
             try {
                 val intent = Intent(context, WakeWordForegroundService::class.java).apply {
                     action = ACTION_STOP

@@ -278,10 +278,61 @@ class OfflineCommandEngine {
             }
         }
 
+        // 1A. WhatsApp Voice Note (English, Roman Urdu, Urdu Nastaliq)
+        val isVoiceNoteCmd = lower.contains("voice note") || lower.contains("voicenote") ||
+            lower.contains("voice message") || lower.contains("audio message") ||
+            lower.contains("audio note") || lower.contains("awaaz ka message") ||
+            originalRaw.contains("وائس نوٹ") || originalRaw.contains("آڈیو میسج")
+        if (isVoiceNoteCmd) {
+            val (recipient, msg) = extractVoiceNoteRecipientAndMessage(trimmed, originalRaw)
+            if (recipient.isNotBlank()) {
+                val reply = LanguageProcessor.formatReplyInLanguage(
+                    "Checking WhatsApp voice note for $recipient.",
+                    "$recipient ke liye WhatsApp voice note check kiya ja raha hai.",
+                    "$recipient کے لیے واٹس ایپ وائس نوٹ چیک کیا جا رہا ہے۔",
+                    lang
+                )
+                return VoiceAction(
+                    action = "whatsapp_send_voice_note",
+                    target = recipient,
+                    parameters = mapOf("target" to recipient, "contact" to recipient, "message" to msg),
+                    confirmationRequired = false,
+                    spokenResponse = reply
+                )
+            }
+        }
+
+        // 0C. Return to Saved Origin Task ("wapas iss window par aao", "pichli app par wapas jao", "wapas usi window par aao", "return to the previous app", "wapas jao")
+        if (com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(originalRaw) ||
+            com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(trimmed)
+        ) {
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Returning to the previous app window.",
+                "Pichli app window par wapas ja raha hoon.",
+                "پچھلی ایپ ونڈو پر واپس جا رہا ہوں۔",
+                lang
+            )
+            return VoiceAction(
+                action = "return_to_origin",
+                target = "origin_task",
+                parameters = mapOf("navigation" to "return_to_previous_app"),
+                confirmationRequired = false,
+                spokenResponse = reply
+            )
+        }
+
         // 1. WhatsApp (English, Roman Urdu, Urdu Nastaliq, Mixed)
         // E.g. "WhatsApp khol kar Ahmed ko message send karo ke I'll be late", "send whatsapp to Ahmed saying Hello", "واٹس ایپ پر احمد کو میسج کرو"
         if (lower.contains("whatsapp") || originalRaw.contains("واٹس ایپ")) {
-            if (lower.contains("message") || lower.contains("bhejo") || lower.contains("send") || lower.contains("karo") || lower.contains("ko ") || originalRaw.contains("میسج") || originalRaw.contains("کو")) {
+            val isExplicitOpenCmd = Regex(
+                "^(?:please\\s+)?(?:(?:open|launch|start|run)\\s+)?(?:personal\\s+|work\\s+)?whatsapp(?:\\s+business)?(?:\\s+(?:app|kholo|khol\\s+do|open\\s+karo|chalao|chala\\s+do|start\\s+karo))?$",
+                RegexOption.IGNORE_CASE
+            ).matches(trimmed) ||
+                originalRaw.trim().let {
+                    (it.contains("واٹس ایپ") && (it.endsWith("کھولو") || it.endsWith("کھول دو") || it.endsWith("چلاؤ"))) &&
+                        !it.contains("میسج") && !it.contains("کال")
+                }
+            if (!isExplicitOpenCmd && (lower.contains("message") || lower.contains("bhejo") || lower.contains("send") || lower.contains("karo") || lower.contains("ko ") || originalRaw.contains("میسج") || originalRaw.contains("کو"))) {
                 val (recipient, msg) = extractRecipientAndMessage(trimmed, originalRaw, isWhatsApp = true)
                 if (recipient.isNotBlank()) {
                     val reply = LanguageProcessor.formatReplyInLanguage(
@@ -299,17 +350,26 @@ class OfflineCommandEngine {
                     )
                 }
             }
-            // Otherwise open WhatsApp
+            // Otherwise open WhatsApp (preserving Business / Personal / Work qualifier when specified)
+            val whatsappTarget = when {
+                lower.contains("business") || lower.contains("w4b") || originalRaw.contains("بزنس") ->
+                    if (lower.contains("work")) "Work WhatsApp Business" else "WhatsApp Business"
+                lower.contains("work") || lower.contains("daftar") || lower.contains("office") ->
+                    "Work WhatsApp"
+                lower.contains("personal") || lower.contains("zaati") || originalRaw.contains("ذاتی") ->
+                    "Personal WhatsApp"
+                else -> "WhatsApp"
+            }
             val reply = LanguageProcessor.formatReplyInLanguage(
-                "Opening WhatsApp.",
-                "WhatsApp khola ja raha hai.",
-                "واٹس ایپ کھولا جا رہا ہے۔",
+                "Opening $whatsappTarget.",
+                "$whatsappTarget khola ja raha hai.",
+                "$whatsappTarget کھولا جا رہا ہے۔",
                 lang
             )
             return VoiceAction(
                 action = "open_app",
-                target = "WhatsApp",
-                parameters = mapOf("appName" to "WhatsApp"),
+                target = whatsappTarget,
+                parameters = mapOf("appName" to whatsappTarget),
                 confirmationRequired = false,
                 spokenResponse = reply
             )
@@ -380,7 +440,7 @@ class OfflineCommandEngine {
                 action = "call",
                 target = resolvedName,
                 parameters = params,
-                confirmationRequired = false,
+                confirmationRequired = true,
                 spokenResponse = reply
             )
         }
@@ -928,6 +988,40 @@ class OfflineCommandEngine {
         return null
     }
 
+    private fun extractVoiceNoteRecipientAndMessage(
+        normalized: String,
+        originalRaw: String
+    ): Pair<String, String> {
+        val romanVnRegex = Regex(
+            "(?:whatsapp\\s+(?:khol\\s+kar|par|pe)\\s+)?([a-zA-Z0-9_\\s]+?)\\s+ko\\s+(?:whatsapp\\s+)?(?:par\\s+|pe\\s+)?(?:voice\\s*note|voicenote|voice\\s*message|audio\\s*message|audio\\s*note|awaaz\\s+ka\\s+message)\\s*(?:bhejo|send\\s+karo|karo|bhej\\s+do|kro)?(?:\\s*(?:ke|kay|that|saying|:)\\s*(.+))?$",
+            RegexOption.IGNORE_CASE
+        )
+        romanVnRegex.find(normalized)?.let {
+            val target = it.groupValues[1].trim()
+            val body = it.groupValues[2].trim().ifBlank { "Assalam-o-Alaikum" }
+            return target to body
+        }
+
+        val urduVnRegex = Regex("(?:واٹس\\s*ایپ\\s*پر\\s*)?(.+?)\\s+کو\\s+(?:واٹس\\s*ایپ\\s*)?(?:وائس\\s*نوٹ|آڈیو\\s*میسج).*?(?:(?:کہ|:)\\s*(.+))?$")
+        urduVnRegex.find(originalRaw.trim())?.let {
+            val target = it.groupValues[1].trim()
+            val body = it.groupValues[2].trim().ifBlank { "السلام علیکم" }
+            return target to body
+        }
+
+        val engVnRegex = Regex(
+            "^(?:please\\s+)?(?:send\\s+(?:an?\\s+)?(?:whatsapp\\s+)?(?:voice\\s*note|voicenote|voice\\s*message|audio\\s*message|audio\\s*note)\\s+(?:on\\s+whatsapp\\s+)?to)\\s+([a-zA-Z0-9_\\s]+?)(?:\\s*(?::|saying|that|with\\s+text)\\s*(.+))?$",
+            RegexOption.IGNORE_CASE
+        )
+        engVnRegex.find(normalized)?.let {
+            val target = it.groupValues[1].trim()
+            val body = it.groupValues[2].trim().ifBlank { "Hello" }
+            return target to body
+        }
+
+        return "" to ""
+    }
+
     private fun extractRecipientAndMessage(
         normalized: String,
         originalRaw: String,
@@ -935,7 +1029,7 @@ class OfflineCommandEngine {
     ): Pair<String, String> {
         // Pattern 1 (Roman Urdu / Mixed): "<App khol kar> <Recipient> ko <whatsapp> message <send/bhejo/karo> ke <Message>"
         val romanMsgRegex = Regex(
-            "(?:whatsapp\\s+(?:khol\\s+kar|par|pe)\\s+)?([a-zA-Z]+)\\s+ko\\s+(?:whatsapp\\s+)?(?:message|sms|text|msg)?\\s*(?:bhejo|send\\s+karo|karo|bhej\\s+do|kro)?\\s*(?:ke|kay|that|:)\\s+(.+)$",
+            "(?:whatsapp\\s+(?:khol\\s+kar|par|pe)\\s+)?([a-zA-Z0-9_\\s]+?)\\s+ko\\s+(?:whatsapp\\s+)?(?:par\\s+|pe\\s+)?(?:message|sms|text|msg)?\\s*(?:bhejo|send\\s+karo|karo|bhej\\s+do|kro)?\\s*(?:ke|kay|that|:)\\s+(.+)$",
             RegexOption.IGNORE_CASE
         )
         romanMsgRegex.find(normalized)?.let {
@@ -944,7 +1038,7 @@ class OfflineCommandEngine {
 
         // Pattern 2 (Roman Urdu without message body): "Ahmed ko whatsapp message bhejo"
         val romanShortRegex = Regex(
-            "(?:whatsapp\\s+(?:khol\\s+kar|par|pe)\\s+)?([a-zA-Z]+)\\s+ko\\s+(?:whatsapp\\s+)?(?:message|sms|text|msg)(?:\\s+bhejo|\\s+karo|\\s+send\\s+karo)?$",
+            "(?:whatsapp\\s+(?:khol\\s+kar|par|pe)\\s+)?([a-zA-Z0-9_\\s]+?)\\s+ko\\s+(?:whatsapp\\s+)?(?:par\\s+|pe\\s+)?(?:message|sms|text|msg)(?:\\s+bhejo|\\s+karo|\\s+send\\s+karo)?$",
             RegexOption.IGNORE_CASE
         )
         romanShortRegex.find(normalized)?.let {
@@ -963,7 +1057,7 @@ class OfflineCommandEngine {
 
         // Pattern 4 (English): "Send a WhatsApp/text/message to Ahmed saying: I'll be late"
         val engRegex = Regex(
-            "^(?:send\\s+(?:an?\\s+)?(?:whatsapp(?:\\s+message)?|sms|text|message)\\s+to|text|message|whatsapp)\\s+([a-zA-Z0-9\\s]+?)(?:\\s*(?::|saying|that|with\\s+text)\\s*(.+))?$",
+            "^(?:send\\s+(?:an?\\s+)?(?:whatsapp(?:\\s+message)?|sms|text|message)\\s+to|text|message|whatsapp)\\s+([a-zA-Z0-9_\\s]+?)(?:\\s*(?::|saying|that|with\\s+text)\\s*(.+))?$",
             RegexOption.IGNORE_CASE
         )
         engRegex.find(normalized)?.let {

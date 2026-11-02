@@ -32,68 +32,25 @@ object CallController {
         contactOrNumber: String = "",
         speakerphone: Boolean = false
     ): ToolResult {
+        if (com.example.engine.LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return ToolResult.failure(
+                tool = "handle_phone_call",
+                message = "Blocked: Call control actions cannot run while the phone is locked.",
+                errorCode = "DEVICE_LOCKED"
+            )
+        }
+
         val cleanAction = action.trim().lowercase(Locale.ROOT).ifBlank { "call" }
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
 
         return when (cleanAction) {
             "answer", "accept", "pick_up", "pickup" -> {
-                val hasAnswerPerm = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ANSWER_PHONE_CALLS
-                ) == PackageManager.PERMISSION_GRANTED
-
-                var answeredViaTelecom = false
-                if (hasAnswerPerm && telecomManager != null) {
-                    try {
-                        @Suppress("DEPRECATION")
-                        telecomManager.acceptRingingCall()
-                        answeredViaTelecom = true
-                    } catch (e: Exception) {
-                        AgentLog.w("CallController", "acceptRingingCall failed: ${e.message}")
-                    }
-                }
-
-                var answeredViaUi = false
-                if (!answeredViaTelecom && AgentBridge.service != null) {
-                    val root = ScreenObserver.findApplicationRoot(AgentBridge.service, preferNonSelfPackage = false)
-                    val answerNode = UiTools.findClickableMatchingNode(root, "Answer", exact = false)
-                        ?: UiTools.findClickableMatchingNode(root, "Accept", exact = false)
-                    if (answerNode != null) {
-                        answeredViaUi = UiTools.performClickOrTap(answerNode)
-                    }
-                }
-
-                if (speakerphone && audioManager != null) {
-                    setSpeakerphoneState(audioManager, true)
-                }
-
-                if (answeredViaTelecom || answeredViaUi) {
-                    val method = if (answeredViaTelecom) "TelecomManager.acceptRingingCall" else "Accessibility UI Answer button"
-                    ToolResult.success(
-                        tool = "handle_phone_call",
-                        message = "Answered incoming call via $method.",
-                        verified = true,
-                        verificationNote = "Call answer dispatched via $method (speakerphone=$speakerphone).",
-                        data = JSONObject().apply {
-                            put("action", "answer")
-                            put("method", method)
-                            put("speakerphone", speakerphone)
-                        }
-                    )
-                } else if (!hasAnswerPerm) {
-                    ToolResult.needsPermission(
-                        tool = "handle_phone_call",
-                        permissionOrService = "android.permission.ANSWER_PHONE_CALLS",
-                        message = "Cannot answer call automatically: ANSWER_PHONE_CALLS permission is not granted and no Answer button was visible on screen."
-                    )
-                } else {
-                    ToolResult.failure(
-                        tool = "handle_phone_call",
-                        message = "Attempted to answer incoming call, but no ringing call was active.",
-                        errorCode = "NO_RINGING_CALL"
-                    )
-                }
+                ToolResult.failure(
+                    tool = "handle_phone_call",
+                    message = "Unattended call answering is disabled for safety. Please answer incoming calls manually on your phone.",
+                    errorCode = "UNATTENDED_ANSWER_DISABLED"
+                )
             }
 
             "end", "reject", "decline", "hangup", "hang_up" -> {

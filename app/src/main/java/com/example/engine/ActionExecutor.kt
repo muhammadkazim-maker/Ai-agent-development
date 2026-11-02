@@ -42,6 +42,21 @@ class ActionExecutor(private val context: Context) {
 
     fun execute(action: VoiceAction): ExecutionResult {
         Log.d(TAG, "Executing action: ${action.action} for target: ${action.target}")
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context) &&
+            LockScreenUnlockManager.isBlockedWhenDeviceLocked(action.action)
+        ) {
+            return ExecutionResult.Failure(
+                "Blocked: '${action.action}' cannot run while the phone is locked. Please unlock your phone using Android's standard lock screen."
+            )
+        }
+        if (LockScreenUnlockManager.isPhase01GatedTool(action.action) &&
+            action.action != "whatsapp_send_voice_note" &&
+            action.action != "send_whatsapp_voice_note"
+        ) {
+            return ExecutionResult.Failure(
+                "Blocked: '${action.action}' is disabled by Phase 01 safety policy."
+            )
+        }
         return try {
             when (action.action) {
                 // Multi-Step Chained Execution & 7 Core Orchestrated Tools
@@ -52,6 +67,26 @@ class ActionExecutor(private val context: Context) {
                 "update_whatsapp_dp" -> executeUpdateWhatsAppDp(
                     action.parameters["imageUri"] ?: action.parameters["imageSource"] ?: action.target
                 )
+                "whatsapp_send_voice_note", "send_whatsapp_voice_note" -> {
+                    val recipient = action.parameters["contact"]
+                        ?: action.parameters["recipient"]
+                        ?: action.parameters["target"]
+                        ?: action.target
+                    val message = action.parameters["message"]
+                        ?: action.parameters["text"]
+                        ?: ""
+                    val outcome = kotlinx.coroutines.runBlocking {
+                        WhatsAppVoiceNoteController.getInstance(context).sendVoiceNote(
+                            recipient,
+                            message
+                        )
+                    }
+                    if (outcome.ok) {
+                        ExecutionResult.Success(outcome.message)
+                    } else {
+                        ExecutionResult.Failure(outcome.message)
+                    }
+                }
                 "describe_screen", "get_device_info", "type_in_field", "ui_click_text",
                 "whatsapp_send_message", "whatsapp_delete_message", "delete_whatsapp_message",
                 "whatsapp_call", "whatsapp_voice_call", "whatsapp_video_call", "close_app" -> {
@@ -130,8 +165,27 @@ class ActionExecutor(private val context: Context) {
                 "send_email" -> executeEmail(action.target, action.parameters["message"] ?: "")
 
                 // Apps & Navigation
-                "open_app" -> executeOpenApp(action.target.ifBlank { action.parameters["app_name"].orEmpty() })
-                "navigate" -> executeNavigate(action.target)
+                "open_app", "launch_app", "start_app" -> executeOpenApp(
+                    action.target.ifBlank {
+                        action.parameters["app_name"]
+                            ?: action.parameters["appName"]
+                            ?: action.parameters["app"]
+                            ?: ""
+                    }
+                )
+                "return_to_origin", "return_to_previous_app", "wapas_jao", "go_back", "navigate_back" -> executeReturnToOrigin()
+                "navigate" -> {
+                    val navTarget = action.target.trim().lowercase()
+                    if (navTarget == "back" || navTarget == "wapas" || navTarget == "wapas_jao" ||
+                        navTarget == "origin_task" || navTarget == "return_to_previous_app" ||
+                        com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(action.target) ||
+                        com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(com.omnivoice.agentfix.AgentSession.lastUserUtterance)
+                    ) {
+                        executeReturnToOrigin()
+                    } else {
+                        executeNavigate(action.target)
+                    }
+                }
                 "search_web", "google_search", "execute_direct_search" -> {
                     val q = action.parameters["query"]?.takeIf { it.isNotBlank() } ?: action.target
                     val platform = action.parameters["platform"] ?: action.parameters["app"] ?: "google"
@@ -237,7 +291,7 @@ class ActionExecutor(private val context: Context) {
                 // Notifications & Security
                 "read_notifications" -> executeReadNotifications()
                 "lock_device" -> executeLockDevice()
-                "unlock_device" -> ExecutionResult.Success(action.spokenResponse.ifBlank { "Device unlock requested." })
+                "unlock_device" -> ExecutionResult.Failure("Automated device unlock is disabled. Please unlock your phone using Android's standard lock screen.")
                 "find_phone" -> executeFindPhone()
 
                 // Teach Word & Conditional Rules
@@ -260,6 +314,21 @@ class ActionExecutor(private val context: Context) {
      * Never fakes success!
      */
     fun executeVerified(action: VoiceAction, isConfirmedByUser: Boolean = false): ActionResult {
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context) &&
+            LockScreenUnlockManager.isBlockedWhenDeviceLocked(action.action)
+        ) {
+            return ActionResult.Failed(
+                "Blocked: '${action.action}' cannot run while the phone is locked. Please unlock your phone using Android's standard lock screen."
+            )
+        }
+        if (LockScreenUnlockManager.isPhase01GatedTool(action.action) &&
+            action.action != "whatsapp_send_voice_note" &&
+            action.action != "send_whatsapp_voice_note"
+        ) {
+            return ActionResult.Failed(
+                "Blocked: '${action.action}' is disabled by Phase 01 safety policy."
+            )
+        }
         ActionVerifier.ensureTorchMonitor(context)
 
         // 1. Check high-risk actions (payments, deleting, factory reset)
@@ -335,7 +404,11 @@ class ActionExecutor(private val context: Context) {
         }
 
         // 4. Execute and verify real device effect
-        return when (val execRes = execute(action)) {
+        val execRes = execute(action)
+        if (action.action in setOf("open_app", "launch_app", "start_app", "return_to_origin", "wapas_jao", "go_back", "navigate_back")) {
+            com.omnivoice.agentfix.UiTools.lastCanonicalResult?.let { return it.toActionResult() }
+        }
+        return when (execRes) {
             is ExecutionResult.Success -> {
                 when (action.action) {
                     "adjust_volume" -> ActionVerifier.verifyVolumeChange(audioManager)
@@ -500,21 +573,8 @@ class ActionExecutor(private val context: Context) {
         return ExecutionResult.Success("Calling $target$simSuffix.")
     }
 
-    @SuppressLint("MissingPermission")
-    @Suppress("DEPRECATION")
     private fun executeAnswerCall(): ExecutionResult {
-        val hasAnswerPermission = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.ANSWER_PHONE_CALLS
-        ) == PackageManager.PERMISSION_GRANTED
-
-        return if (hasAnswerPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            telecomManager?.acceptRingingCall()
-            ExecutionResult.Success("Call answered.")
-        } else {
-            OmniAccessibilityService.pressHome()
-            ExecutionResult.Success("Answering call via system handler.")
-        }
+        return ExecutionResult.Failure("Unattended call answering is disabled for safety.")
     }
 
     @SuppressLint("MissingPermission")
@@ -593,25 +653,53 @@ class ActionExecutor(private val context: Context) {
     }
 
     private fun executeWhatsApp(target: String, message: String): ExecutionResult {
-        val canonicalTarget = LanguageProcessor.resolveContactNickname(target)
-        val rawNumber = resolveContactPhoneNumber(canonicalTarget)
-            ?: SmartContactAndAppRegistry.findContactByName(context, canonicalTarget)?.whatsappNumber
-            ?: ""
-        val phoneNumber = SmartContactAndAppRegistry.formatWhatsAppPhone(rawNumber)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            data = if (phoneNumber.isNotBlank()) {
-                Uri.parse("https://api.whatsapp.com/send?phone=$phoneNumber&text=${Uri.encode(message)}")
-            } else {
-                Uri.parse("https://api.whatsapp.com/send?text=${Uri.encode(message)}")
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            return ExecutionResult.Failure(
+                "Blocked: WhatsApp messages cannot be sent while the phone is locked. Please unlock your phone first."
+            )
+        }
+        val cleanTarget = target.trim()
+        if (cleanTarget.isBlank()) {
+            return ExecutionResult.Failure("Stopped before intent: recipient contact name is missing.")
+        }
+        val canonicalTarget = LanguageProcessor.resolveContactNickname(cleanTarget)
+        val rawDigitsCount = canonicalTarget.count { it.isDigit() }
+        val resolvedRawNumber = if (rawDigitsCount >= 10) {
+            canonicalTarget
+        } else {
+            when (val resolution = SmartContactAndAppRegistry.resolveContactWithDisambiguation(context, canonicalTarget)) {
+                is ContactResolutionOutcome.NotFound -> {
+                    return ExecutionResult.Failure(
+                        "Stopped before intent: contact '$cleanTarget' was not found in Contacts."
+                    )
+                }
+                is ContactResolutionOutcome.Ambiguous -> {
+                    val names = resolution.candidates.joinToString(", ") { it.name }
+                    return ExecutionResult.Failure(
+                        "Stopped before intent: multiple contacts match '$cleanTarget' ($names). Please specify the full contact name."
+                    )
+                }
+                is ContactResolutionOutcome.Resolved -> {
+                    resolution.contact.whatsappNumber.ifBlank { resolution.contact.phoneNumber }
+                }
             }
+        }
+        val phoneNumber = SmartContactAndAppRegistry.formatWhatsAppPhone(resolvedRawNumber)
+        if (phoneNumber.count { it.isDigit() } < 10) {
+            return ExecutionResult.Failure(
+                "Stopped before intent: contact '$cleanTarget' does not have a valid WhatsApp phone number."
+            )
+        }
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("https://api.whatsapp.com/send?phone=$phoneNumber&text=${Uri.encode(message)}")
             setPackage("com.whatsapp")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
         return try {
             context.startActivity(intent)
-            ExecutionResult.Success("Sending WhatsApp message to $target: '$message'.")
+            ExecutionResult.Success("Opened WhatsApp chat for $cleanTarget with draft: '$message'.")
         } catch (e: Exception) {
-            ExecutionResult.Success("Prepared WhatsApp message to $target: '$message'.")
+            ExecutionResult.Failure("Could not open WhatsApp chat for $cleanTarget: ${e.localizedMessage ?: "WhatsApp unavailable"}.")
         }
     }
 
@@ -646,40 +734,35 @@ class ActionExecutor(private val context: Context) {
 
     // --- App Launching & Navigation ---
 
-    private fun executeOpenApp(appName: String): ExecutionResult {
-        val pm = context.packageManager
-        val query = appName.lowercase().trim()
-
-        val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        var matchedPackage: String? = null
-
-        for (app in installedApps) {
-            val label = pm.getApplicationLabel(app).toString().lowercase()
-            if (label == query || label.contains(query) || app.packageName.lowercase().contains(query)) {
-                if (pm.getLaunchIntentForPackage(app.packageName) != null) {
-                    matchedPackage = app.packageName
-                    break
-                }
-            }
+    fun executeOpenApp(appName: String): ExecutionResult {
+        val canonical = kotlinx.coroutines.runBlocking {
+            com.omnivoice.agentfix.UiTools.openAppCanonical(
+                context = context,
+                appName = appName
+            )
         }
+        return canonical.toExecutionResult()
+    }
 
-        if (matchedPackage != null) {
-            val launchIntent = pm.getLaunchIntentForPackage(matchedPackage)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(launchIntent)
-                return ExecutionResult.Success("Opening $appName.")
-            }
+    fun executeReturnToOrigin(): ExecutionResult {
+        val canonical = kotlinx.coroutines.runBlocking {
+            com.omnivoice.agentfix.UiTools.returnToOriginCanonical(context = context)
         }
+        return canonical.toExecutionResult()
+    }
 
-        val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=$appName")).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        return try {
-            context.startActivity(marketIntent)
-            ExecutionResult.Success("Opening $appName.")
-        } catch (e: Exception) {
-            ExecutionResult.Success("Requested launch for $appName.")
+    fun executeDiagnosticTypedCommand(
+        commandText: String,
+        visibleHomeMode: Boolean = true,
+        coldStartTimeoutMs: Long = com.omnivoice.agentfix.UiTools.defaultColdStartTimeoutMs
+    ): com.omnivoice.agentfix.CanonicalAppLaunchResult {
+        return kotlinx.coroutines.runBlocking {
+            com.omnivoice.agentfix.UiTools.executeDiagnosticTypedCommand(
+                context = context,
+                commandText = commandText,
+                visibleHomeMode = visibleHomeMode,
+                coldStartTimeoutMs = coldStartTimeoutMs
+            )
         }
     }
 

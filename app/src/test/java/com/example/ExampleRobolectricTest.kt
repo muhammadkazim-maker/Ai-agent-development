@@ -633,31 +633,35 @@ class ExampleRobolectricTest {
         val funcDecls = toolsArray
             .getJSONObject(0)
             .getJSONArray("functionDeclarations")
-        assertEquals(24, funcDecls.length())
-        assertEquals("describe_screen", funcDecls.getJSONObject(0).getString("name"))
-        assertEquals("get_device_info", funcDecls.getJSONObject(1).getString("name"))
-        assertEquals("open_app", funcDecls.getJSONObject(2).getString("name"))
-        assertEquals("type_in_field", funcDecls.getJSONObject(3).getString("name"))
-        assertEquals("ui_click_text", funcDecls.getJSONObject(4).getString("name"))
-        assertEquals("whatsapp_send_message", funcDecls.getJSONObject(5).getString("name"))
-        assertEquals("whatsapp_delete_message", funcDecls.getJSONObject(6).getString("name"))
-        assertEquals("close_app", funcDecls.getJSONObject(7).getString("name"))
-        assertEquals("execute_adb_shell", funcDecls.getJSONObject(8).getString("name"))
-        assertEquals("unlock_phone_hands_free", funcDecls.getJSONObject(9).getString("name"))
-        assertEquals("scrape_screen", funcDecls.getJSONObject(10).getString("name"))
-        assertEquals("send_whatsapp_voice_note", funcDecls.getJSONObject(11).getString("name"))
-        assertEquals("answer_incoming_call", funcDecls.getJSONObject(12).getString("name"))
-        assertEquals("end_incoming_call", funcDecls.getJSONObject(13).getString("name"))
-        assertEquals("save_or_update_contact", funcDecls.getJSONObject(14).getString("name"))
-        assertEquals("generate_and_use_ai_image", funcDecls.getJSONObject(15).getString("name"))
-        assertEquals("control_phone_hardware", funcDecls.getJSONObject(16).getString("name"))
-        assertEquals("make_direct_phone_call", funcDecls.getJSONObject(17).getString("name"))
-        assertEquals("jarvis_generate_and_share_media", funcDecls.getJSONObject(18).getString("name"))
-        assertEquals("save_contact_by_voice", funcDecls.getJSONObject(19).getString("name"))
-        assertEquals("make_phone_call_zero_touch", funcDecls.getJSONObject(20).getString("name"))
-        assertEquals("manage_connectivity_and_settings", funcDecls.getJSONObject(21).getString("name"))
-        assertEquals("generate_ai_image_and_apply", funcDecls.getJSONObject(22).getString("name"))
-        assertEquals("learn_and_remember_permanently", funcDecls.getJSONObject(23).getString("name"))
+        assertEquals(27, funcDecls.length())
+        val registeredNames = (0 until funcDecls.length()).map { funcDecls.getJSONObject(it).getString("name") }
+        assertEquals("describe_screen", registeredNames[0])
+        assertEquals("get_device_info", registeredNames[1])
+        assertEquals("open_app", registeredNames[2])
+        assertEquals("type_in_field", registeredNames[3])
+        assertEquals("ui_click_text", registeredNames[4])
+        assertTrue(registeredNames.contains("search_anything"))
+        assertTrue(registeredNames.contains("play_video"))
+        assertTrue(registeredNames.contains("whatsapp_send_message"))
+        assertTrue(registeredNames.contains("whatsapp_delete_message"))
+        assertTrue(registeredNames.contains("whatsapp_call"))
+        assertTrue(registeredNames.contains("close_app"))
+        assertTrue(registeredNames.contains("execute_adb_shell"))
+        assertTrue(registeredNames.contains("unlock_phone_hands_free"))
+        assertTrue(registeredNames.contains("scrape_screen"))
+        assertTrue(registeredNames.contains("send_whatsapp_voice_note"))
+        assertTrue(registeredNames.contains("answer_incoming_call"))
+        assertTrue(registeredNames.contains("end_incoming_call"))
+        assertTrue(registeredNames.contains("save_or_update_contact"))
+        assertTrue(registeredNames.contains("generate_and_use_ai_image"))
+        assertTrue(registeredNames.contains("control_phone_hardware"))
+        assertTrue(registeredNames.contains("make_direct_phone_call"))
+        assertTrue(registeredNames.contains("jarvis_generate_and_share_media"))
+        assertTrue(registeredNames.contains("save_contact_by_voice"))
+        assertTrue(registeredNames.contains("make_phone_call_zero_touch"))
+        assertTrue(registeredNames.contains("manage_connectivity_and_settings"))
+        assertTrue(registeredNames.contains("generate_ai_image_and_apply"))
+        assertTrue(registeredNames.contains("learn_and_remember_permanently"))
 
         // 3. Verify SmartContactAndAppRegistry (`omni_contacts_db`) + Pakistan 03... -> 923... WhatsApp formatting
         assertEquals("923001234567", com.example.engine.SmartContactAndAppRegistry.formatWhatsAppPhone("0300-1234567"))
@@ -1759,7 +1763,7 @@ class ExampleRobolectricTest {
         val executor = com.example.engine.ActionExecutor(context)
         val bridge = com.example.engine.AndroidBridge(context, executor)
 
-        // 1. Biometric Vault Manager
+        // 1. Biometric Vault Manager (Phase 01 Hardened: PIN, pattern, and app passwords disabled)
         val vault = com.example.engine.BiometricVaultManager.getInstance(context)
         vault.enrollVault(
             masterPin = "9876",
@@ -1767,19 +1771,18 @@ class ExampleRobolectricTest {
             secretVoiceWord = "Jarvis protocol 786",
             biometricEnrolled = true
         )
-        assertEquals("9876", vault.getMasterPin())
+        assertEquals("", vault.getMasterPin())
         assertEquals("Jarvis protocol 786", vault.getSecretVoiceUnlockWord())
         assertTrue(vault.matchesVoiceUnlock("Please Jarvis protocol 786 now"))
-        assertTrue(vault.matchesVoiceUnlock("unlock phone"))
         assertFalse(vault.matchesVoiceUnlock("random phrase"))
 
         vault.setAppPassword("whatsapp", "secretAppLockPass123")
-        assertEquals("secretAppLockPass123", vault.getAppPassword("whatsapp"))
+        assertNull(vault.getAppPassword("whatsapp"))
 
         vault.markPermissionsCompleted()
         assertTrue(vault.isPermissionsAlreadyCompleted())
 
-        // 2. OsKernel Unified Command & Gesture Execution Engine
+        // 2. OsKernel Unified Command & Gesture Execution Engine (Phase 01 Hardened: shell & hands-free unlock blocked)
         val kernel = com.example.engine.OsKernel.getInstance(context)
         val testCmd = com.example.engine.OsShellCommand(
             description = "Test Tap 540 1200",
@@ -1787,48 +1790,52 @@ class ExampleRobolectricTest {
             accessibilityAction = "TAP"
         )
         val cmdResult = kernel.executeCommand(testCmd)
-        assertTrue(cmdResult.ok)
+        assertFalse(cmdResult.ok)
+        assertEquals("BLOCKED_SHELL_BRIDGE", cmdResult.methodUsed)
 
         val unlockResult = kernel.unlockPhoneHandsFree()
-        assertTrue(unlockResult.ok)
+        assertFalse(unlockResult.ok)
+        assertEquals("BLOCKED_BY_SECURITY_POLICY", unlockResult.methodUsed)
 
         val scraped = kernel.scrapeCurrentScreen()
         assertNotNull(scraped)
         assertTrue(scraped.contains("packageName") || scraped.contains("status"))
 
-        // 3. AI Call Secretary
+        // 3. AI Call Secretary (Phase 01 Hardened: unattended call answering blocked)
         val secretary = com.example.engine.AiCallSecretary.getInstance(context)
-        secretary.onIncomingCallDetected("03001234567", "Ali")
+        secretary.onIncomingCallDetected("03001234567", "SyntheticCaller")
         val session = secretary.currentSession.value
         assertEquals("03001234567", session.callerNumber)
-        assertEquals("Ali", session.callerName)
-        assertTrue(session.callState == "RINGING" || session.callState == "SCREENING")
+        assertEquals("SyntheticCaller", session.callerName)
+        assertEquals("RINGING", session.callState)
+        assertFalse(secretary.answerAndScreenCall())
+        assertEquals("BLOCKED_UNATTENDED_ANSWER", secretary.currentSession.value.callState)
 
-        secretary.appendTranscript("Caller", "Main Ali baat kar raha hoon, meeting confirm hai.")
+        secretary.appendTranscript("Caller", "Synthetic test transcript.")
         val updatedSession = secretary.currentSession.value
-        assertTrue(updatedSession.conversationTranscript.any { it.contains("meeting confirm") })
+        assertTrue(updatedSession.conversationTranscript.any { it.contains("Synthetic test transcript") })
 
-        secretary.endCall("Meeting confirmed by Ali.")
+        secretary.endCall("Synthetic call ended.")
         assertEquals("ENDED", secretary.currentSession.value.callState)
 
-        // 4. WhatsApp Voice Notes Controller
+        // 4. WhatsApp Voice Notes Controller (Phase 01 Hardened: disabled until Phase 11)
         val voiceNotes = com.example.engine.WhatsAppVoiceNoteController.getInstance(context)
-        val noteResult = voiceNotes.sendVoiceNote("Ali", "Salam, main 10 minute mein pohanch raha hoon.")
-        assertTrue(noteResult.ok)
-        assertNotNull(noteResult.method)
+        val noteResult = voiceNotes.sendVoiceNote("Ali", "Salam, synthetic voice note test.")
+        assertFalse(noteResult.ok)
+        assertEquals("DISABLED_UNTIL_PHASE_11", noteResult.method)
 
-        // 5. AndroidBridge JavascriptInterface ADB and Vault methods
+        // 5. AndroidBridge JavascriptInterface ADB and Vault methods (Phase 01 Hardened)
         val adbJson = bridge.executeAdbShell("input keyevent 4")
         assertNotNull(adbJson)
         val adbObj = org.json.JSONObject(adbJson)
-        assertTrue(adbObj.has("ok"))
+        assertFalse(adbObj.getBoolean("ok"))
 
         val vaultJson = bridge.getBiometricVault()
         assertNotNull(vaultJson)
-        assertTrue(vaultJson.contains("9876"))
+        assertFalse(vaultJson.contains("9876"))
 
-        val unlockBridge = bridge.unlockPhoneHandsFree()
-        assertTrue(unlockBridge.contains("ok"))
+        val unlockBridge = org.json.JSONObject(bridge.unlockPhoneHandsFree())
+        assertFalse(unlockBridge.getBoolean("ok"))
 
         // 6. OmniLiveSessionEngine Always-Online Continuous Mode & 1 FPS 512x512 Screen Vision Downscaler
         val liveEngine = com.example.engine.OmniLiveSessionEngine(
@@ -1841,8 +1848,7 @@ class ExampleRobolectricTest {
 
         // Verify screen vision sampling at 1 FPS downscaled to 512x512 resolution
         val largeBmp = android.graphics.Bitmap.createBitmap(1080, 1920, android.graphics.Bitmap.Config.ARGB_8888)
-        val sampled = liveEngine.sampleAndDownscaleVisionFrame(largeBmp, targetWidth = 512, targetHeight = 512)
-        // Since WebSocket isn't connected in unit test, it returns false or caches frame
+        liveEngine.sampleAndDownscaleVisionFrame(largeBmp, targetWidth = 512, targetHeight = 512)
         assertNotNull(liveEngine.lastInjectedVisionFrame)
         largeBmp.recycle()
 
@@ -2038,9 +2044,10 @@ class ExampleRobolectricTest {
             mapOf("contact" to "Bilal Tester", "message" to "Salam Bilal, main raste mein hoon"),
             "call_vn_known"
         )
-        // Without AccessibilityService bound in unit test, it synthesizes the real WAV file and honestly reports NEEDS_PERMISSION
-        assertEquals(com.omnivoice.agentfix.ToolStatus.NEEDS_PERMISSION.name, vnKnownRes.status)
-        assertTrue(vnKnownRes.data.getLong("wavSizeBytes") > 44L)
+        // Phase 01 Policy: Voice note sending is disabled until Phase 11 even when contact resolves
+        assertFalse(vnKnownRes.ok)
+        assertEquals(com.omnivoice.agentfix.ToolStatus.FAILED.name, vnKnownRes.status)
+        assertEquals("VOICE_NOTE_DISABLED_PHASE_11", vnKnownRes.errorCode)
         assertEquals("923219876543", vnKnownRes.data.getString("phoneUsed"))
 
         // 4. Verify CallController & GestureAndVisionTools honesty when permissions/service are missing
@@ -2236,7 +2243,1042 @@ class ExampleRobolectricTest {
         val reshaped = LanguageProcessor.reshapeRomanUrduForNaturalPronunciation("Main aap ka kaam kar raha hoon")
         assertFalse("Should not leave raw 'main' to be read as 'Main Street': $reshaped", reshaped.split(" ").contains("Main"))
     }
+
+    @Test
+    fun `Phase 01 Security Hardening - Legacy credential purge, PIN replay block, shell and call answer block, locked action gate, and voice note Phase 11 gate`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val shadowApp = org.robolectric.Shadows.shadowOf(context as android.app.Application)
+
+        try {
+            com.example.engine.LockScreenUnlockManager.testForceDeviceLocked = null
+
+            // 1. Seed legacy credentials in SharedPreferences AND serialized vault JSON, plus unrelated settings
+            val vaultPrefs = context.getSharedPreferences("jarvis_biometric_vault_prefs", Context.MODE_PRIVATE)
+            val legacyVaultJson = org.json.JSONObject().apply {
+                put("masterPin", "4321")
+                put("lockScreenPattern", "L-Shape-Legacy")
+                put("secretVoiceUnlockWord", "Synthetic voice phrase")
+                put("biometricEnrolled", true)
+                put("permissionsCompleted", true)
+                put("orbDragSensitivity", 0.72)
+                put("appPasswords", org.json.JSONObject().put("whatsapp", "legacyPass999"))
+            }.toString()
+
+            vaultPrefs.edit()
+                .putString("vault_master_pin", "4321")
+                .putString("stored_unlock_pin", "4321")
+                .putString("encrypted_vault_data", legacyVaultJson)
+                .remove("encrypted_vault_iv")
+                .putBoolean("jarvis_permissions_completed_once", true)
+                .putFloat("jarvis_orb_drag_sensitivity", 0.72f)
+                .commit()
+
+            val vaultManager = com.example.engine.BiometricVaultManager.getInstance(context)
+            vaultManager.purgeLegacyCredentialsAndLoadSettings()
+
+            // Verify legacy PIN, pattern, and appPasswords are removed from both preferences and serialized vault JSON
+            assertNull(vaultPrefs.getString("vault_master_pin", null))
+            assertNull(vaultPrefs.getString("stored_unlock_pin", null))
+            assertEquals("", vaultManager.getMasterPin())
+            assertNull(vaultManager.getAppPassword("whatsapp"))
+            assertEquals("", vaultManager.vaultState.value.masterPin)
+            assertEquals("", vaultManager.vaultState.value.lockScreenPattern)
+            assertTrue(vaultManager.vaultState.value.appPasswords.isEmpty())
+
+            val serializedAfterUpgrade = vaultPrefs.getString("encrypted_vault_data", "") ?: ""
+            assertFalse("Serialized vault copy must not retain legacy PIN", serializedAfterUpgrade.contains("4321"))
+            assertFalse("Serialized vault copy must not retain legacy pattern", serializedAfterUpgrade.contains("L-Shape-Legacy"))
+            assertFalse("Serialized vault copy must not retain legacy app password", serializedAfterUpgrade.contains("legacyPass999"))
+
+            // Verify unrelated settings are preserved on upgrade
+            assertTrue(vaultManager.isPermissionsAlreadyCompleted())
+            assertEquals(0.72f, vaultManager.getOrbDragSensitivity(), 0.01f)
+            assertEquals("Synthetic voice phrase", vaultManager.getSecretVoiceUnlockWord())
+            assertTrue(vaultManager.vaultState.value.biometricEnrolled)
+
+            // Verify Python/ADB bridge script and port probe are disabled
+            assertEquals("", vaultManager.getPythonBridgeOneLiner())
+            assertFalse(vaultManager.checkAdbBridgeStatus())
+
+            // 2. Verify voice-note sending stops BEFORE any intent on unresolved synthetic contact
+            while (shadowApp.nextStartedActivity != null) { /* drain prior intents */ }
+            val vnCtrl = com.example.engine.WhatsAppVoiceNoteController.getInstance(context)
+            val unresolvedVn = vnCtrl.sendVoiceNote("SyntheticGhostContact_000", "Synthetic test voice note")
+            assertFalse(unresolvedVn.ok)
+            assertEquals("CONTACT_NOT_FOUND", unresolvedVn.method)
+            assertNull("Unresolved contact must stop before launching any Intent", shadowApp.nextStartedActivity)
+
+            // 3. Verify voice-note sending is disabled until Phase 11 even for a resolved synthetic contact (no intent/share sheet)
+            com.example.engine.SmartContactAndAppRegistry.saveOrUpdateContact(
+                context = context,
+                name = "Synthetic PhaseOne Contact",
+                phoneNumber = "03005556677",
+                whatsappNumber = "03005556677"
+            )
+            while (shadowApp.nextStartedActivity != null) { /* drain prior intents */ }
+            val resolvedVn = vnCtrl.sendVoiceNote("Synthetic PhaseOne Contact", "Synthetic voice note body")
+            assertFalse(resolvedVn.ok)
+            assertEquals("DISABLED_UNTIL_PHASE_11", resolvedVn.method)
+            assertTrue(resolvedVn.message.contains("Phase 11"))
+            assertNull("Disabled voice note path must never launch a WhatsApp intent or share sheet", shadowApp.nextStartedActivity)
+
+            // 4. Verify unattended call answering is blocked across AiCallSecretary, CallController, ActionExecutor, and AndroidBridge
+            val secretary = com.example.engine.AiCallSecretary.getInstance(context)
+            secretary.onIncomingCallDetected("03005556677", "Synthetic PhaseOne Contact")
+            assertFalse(secretary.answerAndScreenCall())
+            assertEquals("BLOCKED_UNATTENDED_ANSWER", secretary.currentSession.value.callState)
+
+            val dispatcher = com.omnivoice.agentfix.ToolDispatcher.getInstance(context)
+            val callAnswerToolRes = dispatcher.dispatchMap("handle_phone_call", mapOf("action" to "answer"), "call_ans_test")
+            assertFalse(callAnswerToolRes.ok)
+            assertEquals("UNATTENDED_ANSWER_DISABLED", callAnswerToolRes.errorCode)
+
+            val executor = com.example.engine.ActionExecutor(context)
+            val execAnswerRes = executor.execute(com.example.data.model.VoiceAction(action = "answer_call", target = ""))
+            assertTrue(execAnswerRes is com.example.engine.ExecutionResult.Failure)
+
+            val bridge = com.example.engine.AndroidBridge(context, executor)
+            assertFalse(bridge.answerIncomingCall())
+
+            // 5. Verify destructive tools (whatsapp_delete_message) are gated in Phase 01
+            val deleteRes = dispatcher.dispatchMap(
+                "whatsapp_delete_message",
+                mapOf("message_text" to "last", "scope" to "everyone"),
+                "call_del_test"
+            )
+            assertFalse(deleteRes.ok)
+            assertEquals("PHASE_01_TOOL_GATED", deleteRes.errorCode)
+
+            // 6. Verify private and mutating actions are blocked whenever Android's lock screen is locked
+            com.example.engine.LockScreenUnlockManager.testForceDeviceLocked = true
+            val unlockMgr = com.example.engine.LockScreenUnlockManager(context)
+            assertTrue(unlockMgr.isDeviceLocked())
+            val attemptUnlockRes = unlockMgr.attemptUnlock("4321")
+            assertTrue(attemptUnlockRes is com.example.engine.UnlockResult.Failure)
+
+            val lockedDispatchRes = dispatcher.dispatchMap(
+                "whatsapp_send_message",
+                mapOf("contact" to "Synthetic PhaseOne Contact", "message" to "Locked test"),
+                "call_locked_wa"
+            )
+            assertFalse(lockedDispatchRes.ok)
+            assertEquals("DEVICE_LOCKED", lockedDispatchRes.errorCode)
+
+            val lockedExecRes = executor.execute(
+                com.example.data.model.VoiceAction(action = "read_notifications", target = "")
+            )
+            assertTrue(lockedExecRes is com.example.engine.ExecutionResult.Failure)
+            assertTrue((lockedExecRes as com.example.engine.ExecutionResult.Failure).error.contains("locked", ignoreCase = true))
+
+            val lockedScrape = org.json.JSONObject(com.example.engine.OsKernel.getInstance(context).scrapeCurrentScreen())
+            assertEquals("BLOCKED_DEVICE_LOCKED", lockedScrape.getString("status"))
+
+            // 7. End-to-end pipeline regression check: recognition -> intent -> authorization -> executor -> independent evidence -> spoken reply
+            com.example.engine.LockScreenUnlockManager.testForceDeviceLocked = false
+            val offlineEngine = com.example.engine.OfflineCommandEngine()
+
+            // 7a. Unresolved contact voice-note command must parse as whatsapp_send_voice_note (not open_app) and stop before any Intent
+            while (shadowApp.nextStartedActivity != null) { /* drain prior intents */ }
+            val vnUnresolvedAction = offlineEngine.parseCommand("Send a WhatsApp voice note to SyntheticGhostContact_000 saying hello")
+            assertEquals("whatsapp_send_voice_note", vnUnresolvedAction.action)
+            assertEquals("SyntheticGhostContact_000", vnUnresolvedAction.target)
+            val vnUnresolvedExec = executor.execute(vnUnresolvedAction)
+            assertTrue(vnUnresolvedExec is com.example.engine.ExecutionResult.Failure)
+            assertTrue((vnUnresolvedExec as com.example.engine.ExecutionResult.Failure).error.contains("not found", ignoreCase = true))
+            assertNull("Unresolved voice-note command must never launch any Intent", shadowApp.nextStartedActivity)
+
+            // 7b. Resolved contact voice-note command (Roman Urdu) must parse as whatsapp_send_voice_note, stop before any Intent, and report disabled until Phase 11
+            val vnResolvedAction = offlineEngine.parseCommand("Synthetic PhaseOne Contact ko WhatsApp par voice note bhejo ke main aa raha hoon")
+            assertEquals("whatsapp_send_voice_note", vnResolvedAction.action)
+            assertEquals("Synthetic PhaseOne Contact", vnResolvedAction.target)
+            val vnResolvedExec = executor.execute(vnResolvedAction)
+            assertTrue(vnResolvedExec is com.example.engine.ExecutionResult.Failure)
+            assertTrue((vnResolvedExec as com.example.engine.ExecutionResult.Failure).error.contains("Phase 11", ignoreCase = true))
+            assertNull("Resolved voice-note command must never launch a share sheet or Intent in Phase 01", shadowApp.nextStartedActivity)
+
+            // 7c. Unresolved contact WhatsApp text command must stop before launching any https://api.whatsapp.com/send?text= share-sheet Intent
+            val waUnresolvedAction = offlineEngine.parseCommand("Send WhatsApp message to SyntheticGhostContact_000 saying hello")
+            assertEquals("send_whatsapp", waUnresolvedAction.action)
+            assertEquals("SyntheticGhostContact_000", waUnresolvedAction.target)
+            val waUnresolvedExec = executor.execute(waUnresolvedAction)
+            assertTrue(waUnresolvedExec is com.example.engine.ExecutionResult.Failure)
+            assertTrue((waUnresolvedExec as com.example.engine.ExecutionResult.Failure).error.contains("not found", ignoreCase = true))
+            assertNull("Unresolved WhatsApp text command must stop before launching any share-sheet Intent", shadowApp.nextStartedActivity)
+        } finally {
+            com.example.engine.LockScreenUnlockManager.testForceDeviceLocked = null
+        }
+    }
+
+    @Test
+    fun `Phase 01 Launch Bug Regression - Path 1 return from Settings and reopen with Contacts denied or granted, and Path 2 Launch Jarvis keeps main screen visible without PiP or duplicate session`() {
+        runBlocking {
+            val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+            val shadowApp = org.robolectric.Shadows.shadowOf(app)
+
+            // Reset state for clean reproduction
+            com.example.engine.JarvisHandsFreeEngine.resetContactsSyncStateForTest()
+            com.example.service.WakeWordForegroundService.stop(app)
+
+            // =====================================================================
+            // PATH 1: Grant permissions, return from Android Settings, and reopen OmniVoice
+            // (including with Contacts permission denied)
+            // =====================================================================
+            shadowApp.denyPermissions(
+                android.Manifest.permission.RECORD_AUDIO,
+                android.Manifest.permission.READ_CONTACTS,
+                android.Manifest.permission.CALL_PHONE,
+                android.Manifest.permission.CAMERA
+            )
+            app.getSharedPreferences("jarvis_biometric_vault_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("jarvis_permissions_completed_once", false)
+                .commit()
+            val vaultManager = com.example.engine.BiometricVaultManager.getInstance(app)
+            vaultManager.purgeLegacyCredentialsAndLoadSettings()
+            assertFalse(vaultManager.isPermissionsAlreadyCompleted())
+
+            // 1a. Open MainActivity initially with permissions denied
+            val controller1 = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+            val activity1 = controller1.get()
+            assertNotNull(activity1)
+            assertFalse(
+                "WakeWordForegroundService must not auto-start on launch without user request",
+                com.example.service.WakeWordForegroundService.isServiceActive.value
+            )
+            assertEquals(
+                "Contacts sync must not run when READ_CONTACTS is denied",
+                0,
+                com.example.engine.JarvisHandsFreeEngine.contactsSyncExecutionCount
+            )
+
+            // 1b. Simulate user going to Android Settings, granting RECORD_AUDIO while leaving READ_CONTACTS denied, and returning
+            controller1.pause()
+            shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+            shadowApp.denyPermissions(android.Manifest.permission.READ_CONTACTS)
+            controller1.resume()
+
+            // Verify actual Android permission state is read on return from Settings and home screen is unlocked even with Contacts denied
+            val liveEngine = com.example.engine.OmniLiveSessionEngine.getInstance()
+            assertNotNull(liveEngine)
+            assertFalse(
+                "Returning from Settings must not start a live session automatically",
+                liveEngine!!.isSessionActive.value
+            )
+            assertEquals(
+                "Returning from Settings must not start any live session",
+                0,
+                liveEngine.liveSessionStartCount
+            )
+            assertEquals(
+                "Contacts sync must still be 0 when READ_CONTACTS is denied",
+                0,
+                com.example.engine.JarvisHandsFreeEngine.contactsSyncExecutionCount
+            )
+            controller1.pause().stop().destroy()
+
+            // 1c. Reopen OmniVoice after granting RECORD_AUDIO and READ_CONTACTS in Settings:
+            // Verify MainActivity.onCreate -> JarvisHandsFreeEngine.init does NOT block the UI thread and avoids duplicate syncs
+            com.example.engine.JarvisHandsFreeEngine.resetContactsSyncStateForTest()
+            shadowApp.grantPermissions(
+                android.Manifest.permission.RECORD_AUDIO,
+                android.Manifest.permission.READ_CONTACTS
+            )
+            com.example.engine.JarvisHandsFreeEngine.init(app)
+            // Multiple back-to-back calls (as during startup + onResume + ViewModel init) must deduplicate
+            com.example.engine.JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(app, force = false)
+            com.example.engine.JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(app, force = true)
+            kotlinx.coroutines.delay(150L)
+            assertTrue(
+                "Duplicate contacts syncs must be prevented across startup calls (expected <= 1, got ${com.example.engine.JarvisHandsFreeEngine.contactsSyncExecutionCount})",
+                com.example.engine.JarvisHandsFreeEngine.contactsSyncExecutionCount <= 1
+            )
+
+            // =====================================================================
+            // PATH 2: Open OmniVoice with permissions already granted, then press Launch Jarvis
+            // =====================================================================
+            liveEngine.endLiveSession()
+            liveEngine.resetLiveSessionStartCountForTest()
+            com.example.engine.JarvisHandsFreeEngine.setFloatingPipActive(false)
+
+            val controller2 = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+            val activity2 = controller2.get()
+            assertFalse("Activity must not be in PiP mode on launch", activity2.isInPictureInPictureMode)
+            assertFalse("Floating PiP state must be false on launch", com.example.engine.JarvisHandsFreeEngine.floatingPipActive.value)
+
+            // Simulate pressing Launch Jarvis (which invokes viewModel.startGeminiLiveSession() without onEnterPipMode())
+            val vm = androidx.lifecycle.ViewModelProvider(activity2)[com.example.ui.viewmodel.VoiceAssistantViewModel::class.java]
+            vm.startGeminiLiveSession()
+
+            assertTrue("Live session must be active after pressing Launch Jarvis", vm.isLiveSessionActive.value)
+            assertEquals("Listening session must start exactly once per user request", 1, vm.omniLiveEngine.liveSessionStartCount)
+            assertFalse(
+                "Main screen must stay visible on Launch Jarvis (must not enter PiP automatically)",
+                activity2.isInPictureInPictureMode
+            )
+            assertFalse(
+                "Floating PiP flag must remain false until user explicitly chooses floating mode",
+                com.example.engine.JarvisHandsFreeEngine.floatingPipActive.value
+            )
+
+            // Calling startGeminiLiveSession again or returning from Settings while active must NOT start a second session
+            vm.startGeminiLiveSession()
+            controller2.pause().resume()
+            assertEquals(
+                "Returning from Settings or repeated trigger while active must not start a second session",
+                1,
+                vm.omniLiveEngine.liveSessionStartCount
+            )
+            assertFalse(
+                "Returning from Settings must keep main screen visible (not in PiP)",
+                activity2.isInPictureInPictureMode
+            )
+
+            vm.endGeminiLiveSession()
+            controller2.pause().stop().destroy()
+        }
+    }
+
+    @Test
+    fun canonicalOpenAppAndReturnFromNotesJourney_regressionSuite() = kotlinx.coroutines.runBlocking {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val shadowApp = org.robolectric.Shadows.shadowOf(app)
+        val shadowPm = org.robolectric.Shadows.shadowOf(app.packageManager)
+        val shadowKeyguard = org.robolectric.Shadows.shadowOf(
+            app.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        )
+        shadowKeyguard.setIsDeviceLocked(false)
+        shadowKeyguard.setKeyguardLocked(false)
+        com.example.engine.LockScreenUnlockManager.testForceDeviceLocked = null
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+        com.omnivoice.agentfix.DuplicateCallGuard.clear()
+
+        // Helper to register launchable packages in Robolectric ShadowPackageManager
+        fun registerLaunchablePackage(pkg: String, label: String, activityName: String = "$pkg.MainActivity") {
+            val appInfo = android.content.pm.ApplicationInfo().apply {
+                packageName = pkg
+                name = label
+                nonLocalizedLabel = label
+            }
+            val pkgInfo = android.content.pm.PackageInfo().apply {
+                packageName = pkg
+                applicationInfo = appInfo
+            }
+            shadowPm.installPackage(pkgInfo)
+            val component = android.content.ComponentName(pkg, activityName)
+            shadowPm.addOrUpdateActivity(
+                android.content.pm.ActivityInfo().apply {
+                    packageName = pkg
+                    name = activityName
+                    applicationInfo = appInfo
+                    nonLocalizedLabel = label
+                }
+            )
+            val launchIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+                setPackage(pkg)
+            }
+            shadowPm.addResolveInfoForIntent(
+                launchIntent,
+                android.content.pm.ResolveInfo().apply {
+                    activityInfo = android.content.pm.ActivityInfo().apply {
+                        packageName = pkg
+                        name = activityName
+                        applicationInfo = appInfo
+                        nonLocalizedLabel = label
+                    }
+                    nonLocalizedLabel = label
+                }
+            )
+            val allLaunchersIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            }
+            shadowPm.addResolveInfoForIntent(
+                allLaunchersIntent,
+                android.content.pm.ResolveInfo().apply {
+                    activityInfo = android.content.pm.ActivityInfo().apply {
+                        packageName = pkg
+                        name = activityName
+                        applicationInfo = appInfo
+                        nonLocalizedLabel = label
+                    }
+                    nonLocalizedLabel = label
+                }
+            )
+        }
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            taskId: Int = 100,
+            component: String = "$pkg/MainActivity",
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList(),
+            drafts: Map<String, String> = emptyMap(),
+            visiblePackages: Set<String> = setOf(pkg),
+            elapsedOffsetMs: Long = 10L
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + elapsedOffsetMs,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = label,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = taskId,
+                taskId = taskId,
+                activityComponent = component,
+                visibleApplicationPackages = visiblePackages,
+                editableFieldDrafts = drafts
+            )
+        }
+
+        val executor = com.example.engine.ActionExecutor(app)
+
+        // =========================================================================
+        // 0. PHASE 01 LOCKED-DEVICE BLOCK: Locked phone must return Blocked
+        // =========================================================================
+        shadowKeyguard.setIsDeviceLocked(true)
+        val lockedRes = executor.executeDiagnosticTypedCommand("WhatsApp kholo")
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.BLOCKED, lockedRes.status)
+        assertFalse(lockedRes.verified)
+        assertNull(lockedRes.observedPackage)
+        shadowKeyguard.setIsDeviceLocked(false)
+
+        // =========================================================================
+        // 1. MISSING APP: Uninstalled app returns MissingApp and NEVER opens Play Store or web search
+        // =========================================================================
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = emptyList()
+        val missingRes = executor.executeDiagnosticTypedCommand("Signal kholo")
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.MISSING_APP, missingRes.status)
+        assertFalse("Missing app must not be verified", missingRes.verified)
+        assertNull("Missing app must have null observedPackage", missingRes.observedPackage)
+        val startedAfterMissing = shadowApp.nextStartedActivity
+        assertNull("Missing app must NEVER launch Play Store market:// or web search intent", startedAfterMissing)
+
+        // =========================================================================
+        // 2. INSTALLED APP ("WhatsApp kholo"): Visible-home icon tap + off-page launcher intent fallback
+        // =========================================================================
+        registerLaunchablePackage("com.whatsapp", "WhatsApp")
+        registerLaunchablePackage("com.example.notes", "Notes")
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notes",
+                label = "Notes",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+
+        var homePressedCount = 0
+        var tappedIcons = mutableListOf<String>()
+        var currentPhase = "NOTES_ACTIVE"
+
+        val whatsappHomeIcon = com.omnivoice.agentfix.UiNodeSummary(
+            index = 0,
+            viewId = "com.google.android.apps.nexuslauncher:id/icon",
+            className = "android.widget.TextView",
+            packageName = "com.google.android.apps.nexuslauncher",
+            text = "WhatsApp",
+            contentDescription = "WhatsApp",
+            hintText = "",
+            isClickable = true,
+            isLongClickable = true,
+            isEditable = false,
+            isScrollable = false,
+            isFocused = false,
+            isEnabled = true,
+            bounds = android.graphics.Rect(100, 400, 260, 580)
+        )
+
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            homePressedCount++
+            currentPhase = "HOME_VISIBLE"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            tappedIcons.add(node.displayLabel())
+            currentPhase = "WHATSAPP_FOREGROUND"
+            true
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (currentPhase) {
+                "NOTES_ACTIVE" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notes",
+                    taskId = 501,
+                    component = "com.example.notes/EditorActivity",
+                    drafts = mapOf("note_body" to "Buy milk and finish Phase 01 report")
+                )
+                "HOME_VISIBLE" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    taskId = 1,
+                    component = "com.google.android.apps.nexuslauncher/Main",
+                    nodes = listOf(whatsappHomeIcon)
+                )
+                "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = 702,
+                    component = "com.whatsapp/HomeActivity"
+                )
+                else -> null
+            }
+        }
+
+        val installedRes = executor.executeDiagnosticTypedCommand("WhatsApp kholo", visibleHomeMode = true, coldStartTimeoutMs = 600L)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, installedRes.status)
+        assertTrue(installedRes.verified)
+        assertEquals("com.whatsapp", installedRes.observedPackage)
+        assertEquals("VISIBLE_HOME_ICON_TAP", installedRes.launchMethod)
+        assertTrue("Must navigate Home without finishing origin activity", installedRes.homeNavigated)
+        assertEquals("Must tap accessible WhatsApp launcher icon exactly once", 1, installedRes.iconTapCount)
+        assertEquals(listOf("WhatsApp"), tappedIcons)
+        assertNotNull("Must preserve origin Notes task before leaving", installedRes.preservedOriginTask)
+        assertEquals("com.example.notes", installedRes.preservedOriginTask?.packageName)
+        assertEquals(501, installedRes.preservedOriginTask?.taskId)
+        assertEquals("Buy milk and finish Phase 01 report", installedRes.preservedOriginTask?.draftTexts?.get("note_body"))
+
+        // 2b. Off-page / indistinguishable icon on Home falls back to resolved installed package's launcher intent
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        currentPhase = "NOTES_ACTIVE"
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            currentPhase = "HOME_OFF_PAGE"
+            true
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (currentPhase) {
+                "NOTES_ACTIVE" -> buildSnapshot(pkg = "com.example.notes", label = "Notes", taskId = 501)
+                "HOME_OFF_PAGE" -> {
+                    // After startActivity is called for com.whatsapp, transition to WHATSAPP_FOREGROUND
+                    buildSnapshot(pkg = "com.whatsapp", label = "WhatsApp", taskId = 702, nodes = emptyList())
+                }
+                else -> null
+            }
+        }
+        // Make first home snapshot have no WhatsApp icon so it falls back to getLaunchIntentForPackage
+        var homeSnapCount = 0
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (currentPhase) {
+                "NOTES_ACTIVE" -> buildSnapshot(pkg = "com.example.notes", label = "Notes", taskId = 501)
+                "HOME_OFF_PAGE" -> {
+                    homeSnapCount++
+                    if (homeSnapCount == 1) {
+                        buildSnapshot(pkg = "com.google.android.apps.nexuslauncher", label = "Launcher", taskId = 1, nodes = emptyList())
+                    } else {
+                        buildSnapshot(pkg = "com.whatsapp", label = "WhatsApp", taskId = 702)
+                    }
+                }
+                else -> null
+            }
+        }
+        val fallbackRes = com.omnivoice.agentfix.UiTools.openAppCanonical(
+            context = app,
+            appName = "WhatsApp",
+            visibleHomeMode = true,
+            coldStartTimeoutMs = 600L
+        )
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, fallbackRes.status)
+        assertEquals("LAUNCHER_INTENT_FALLBACK", fallbackRes.launchMethod)
+        assertEquals(0, fallbackRes.iconTapCount)
+        assertEquals("com.whatsapp", fallbackRes.observedPackage)
+        val fallbackStarted = shadowApp.nextStartedActivity
+        assertNotNull("Off-page icon must launch resolved installed package intent", fallbackStarted)
+        assertEquals("com.whatsapp", fallbackStarted.component?.packageName ?: fallbackStarted.`package`)
+
+        // =========================================================================
+        // 3. SLOW COLD START: Bounded timeout succeeds when delayed vs. Requested/Unverified on timeout
+        // =========================================================================
+        var coldPollCount = 0
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = null
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = null
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            coldPollCount++
+            if (coldPollCount <= 3) {
+                buildSnapshot(pkg = "com.google.android.apps.nexuslauncher", label = "Launcher", taskId = 1)
+            } else {
+                buildSnapshot(pkg = "com.whatsapp", label = "WhatsApp", taskId = 702)
+            }
+        }
+        val slowColdVerified = executor.executeDiagnosticTypedCommand(
+            commandText = "WhatsApp kholo",
+            visibleHomeMode = false,
+            coldStartTimeoutMs = 800L
+        )
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, slowColdVerified.status)
+        assertTrue(slowColdVerified.verified)
+        assertEquals("com.whatsapp", slowColdVerified.observedPackage)
+
+        // 3b. When cold start exceeds bounded timeout, must return Requested/Unverified and NEVER fake com.whatsapp
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            buildSnapshot(pkg = "com.google.android.apps.nexuslauncher", label = "Launcher", taskId = 1)
+        }
+        val slowColdTimeout = executor.executeDiagnosticTypedCommand(
+            commandText = "WhatsApp kholo",
+            visibleHomeMode = false,
+            coldStartTimeoutMs = 150L
+        )
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED, slowColdTimeout.status)
+        assertFalse("Timed out cold start must have verified=false", slowColdTimeout.verified)
+        assertEquals(
+            "Timed out cold start must report actual observed launcher package, never faking com.whatsapp",
+            "com.google.android.apps.nexuslauncher",
+            slowColdTimeout.observedPackage
+        )
+
+        // =========================================================================
+        // 4. DISABLED OBSERVER: Accessibility disconnected -> Requested/Unverified with observedPackage = null
+        // =========================================================================
+        com.omnivoice.agentfix.AgentBridge.service = null
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = null
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = null
+        val disabledObsRes = executor.executeDiagnosticTypedCommand(
+            commandText = "WhatsApp kholo",
+            visibleHomeMode = true,
+            coldStartTimeoutMs = 300L
+        )
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED, disabledObsRes.status)
+        assertFalse("Disabled observer must never claim verified=true", disabledObsRes.verified)
+        assertNull("Disabled observer must never fill in an unobserved foreground package", disabledObsRes.observedPackage)
+        assertEquals("DIRECT_INSTALLED_INTENT", disabledObsRes.launchMethod)
+
+        // Also verify OmniAccessibilityService.observeCurrentScreen() does not fabricate com.example.omnivoice when disconnected
+        val rawScreenObs = com.example.service.OmniAccessibilityService.observeCurrentScreen()
+        assertEquals("", rawScreenObs.activePackage)
+
+        // =========================================================================
+        // 5. AMBIGUOUS VARIANTS: Personal vs. WhatsApp Business & Work profile disambiguation
+        // =========================================================================
+        registerLaunchablePackage("com.whatsapp.w4b", "WhatsApp Business")
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp.w4b",
+                label = "WhatsApp Business",
+                profileType = "personal",
+                isBusinessVariant = true
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "Work WhatsApp",
+                profileType = "work",
+                isBusinessVariant = false
+            )
+        )
+        val ambiguousRes = executor.executeDiagnosticTypedCommand("WhatsApp kholo")
+        assertEquals(
+            "Unqualified 'WhatsApp kholo' with Personal, Business, and Work variants installed must return NeedsSetup",
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.NEEDS_SETUP,
+            ambiguousRes.status
+        )
+        assertEquals("AMBIGUOUS_APP_VARIANT", ambiguousRes.reasonCode)
+        assertEquals(3, ambiguousRes.candidateVariants.size)
+        assertNull(ambiguousRes.observedPackage)
+
+        // Disambiguated "WhatsApp Business kholo" selects com.whatsapp.w4b
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            buildSnapshot(pkg = "com.whatsapp.w4b", label = "WhatsApp Business", taskId = 808)
+        }
+        val bizRes = executor.executeDiagnosticTypedCommand("WhatsApp Business kholo", visibleHomeMode = false, coldStartTimeoutMs = 300L)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, bizRes.status)
+        assertEquals("com.whatsapp.w4b", bizRes.resolvedPackage)
+        assertEquals("com.whatsapp.w4b", bizRes.observedPackage)
+
+        // Disambiguated "Work WhatsApp kholo" selects work profile variant
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            buildSnapshot(pkg = "com.whatsapp", label = "Work WhatsApp", taskId = 809)
+        }
+        val workRes = executor.executeDiagnosticTypedCommand("Work WhatsApp kholo", visibleHomeMode = false, coldStartTimeoutMs = 300L)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, workRes.status)
+        assertEquals("work", workRes.profileType)
+        assertEquals("com.whatsapp", workRes.observedPackage)
+
+        // =========================================================================
+        // 6. RETURN FROM NOTES ("wapas jao"): Draft preservation, split-screen distinction, and unrelated task guard
+        // =========================================================================
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+        var activeScreenState = "NOTES_WITH_DRAFT"
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (activeScreenState) {
+                "NOTES_WITH_DRAFT" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notes",
+                    taskId = 501,
+                    component = "com.example.notes/NoteEditorActivity",
+                    drafts = mapOf("editor_body" to "Important unsaved draft in Notes"),
+                    visiblePackages = setOf("com.example.notes")
+                )
+                "WHATSAPP_ACTIVE" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = 702,
+                    component = "com.whatsapp/HomeActivity",
+                    visiblePackages = setOf("com.whatsapp")
+                )
+                "SPLIT_SCREEN_BOTH_VISIBLE" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notes",
+                    taskId = 501,
+                    component = "com.example.notes/NoteEditorActivity",
+                    drafts = mapOf("editor_body" to "Important unsaved draft in Notes"),
+                    visiblePackages = setOf("com.example.notes", "com.whatsapp")
+                )
+                else -> null
+            }
+        }
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            activeScreenState = "WHATSAPP_ACTIVE"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = {
+            activeScreenState = "WHATSAPP_ACTIVE"
+            true
+        }
+
+        // Step 6a: From Notes (taskId=501 with draft), say "WhatsApp kholo"
+        val openFromNotes = executor.executeDiagnosticTypedCommand("WhatsApp kholo", visibleHomeMode = false, coldStartTimeoutMs = 300L)
+        // Because activeScreenState was NOTES_WITH_DRAFT at captureOriginTaskBeforeLeaving, switch to WHATSAPP_ACTIVE for post-dispatch
+        activeScreenState = "WHATSAPP_ACTIVE"
+        val openFromNotesVerified = com.omnivoice.agentfix.UiTools.openAppCanonical(
+            context = app,
+            appName = "WhatsApp",
+            visibleHomeMode = false,
+            coldStartTimeoutMs = 300L
+        )
+        // Restore saved origin to Notes task 501 captured before leaving Notes
+        com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = openFromNotes.preservedOriginTask
+        assertNotNull(com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot)
+        assertEquals("com.example.notes", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName)
+        assertEquals(501, com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.taskId)
+        assertEquals("Important unsaved draft in Notes", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body"))
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, openFromNotesVerified.status)
+
+        // Step 6b: Unrelated task sharing the same package name (taskId=999 vs saved taskId=501) must be blocked from relaunching
+        com.omnivoice.agentfix.UiTools.testActiveCandidateTaskForReturn = com.omnivoice.agentfix.OriginTaskSnapshot(
+            packageName = "com.example.notes",
+            appLabel = "Notes",
+            taskId = 999,
+            windowId = 999,
+            activityComponent = "com.example.notes/SettingsActivity",
+            draftTexts = emptyMap(),
+            capturedElapsedMs = android.os.SystemClock.elapsedRealtime()
+        )
+        val unrelatedTaskRes = executor.executeDiagnosticTypedCommand("wapas jao", coldStartTimeoutMs = 300L)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.BLOCKED, unrelatedTaskRes.status)
+        assertEquals("UNRELATED_TASK_SAME_PACKAGE", unrelatedTaskRes.reasonCode)
+        com.omnivoice.agentfix.UiTools.testActiveCandidateTaskForReturn = null
+
+        // Step 6c: Split-screen / multi-window where both Notes and WhatsApp are visible together is distinguished from a full task switch
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            activeScreenState = "SPLIT_SCREEN_BOTH_VISIBLE"
+            true
+        }
+        val splitScreenReturnRes = executor.executeDiagnosticTypedCommand("wapas jao", coldStartTimeoutMs = 300L)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED, splitScreenReturnRes.status)
+        assertTrue("Must flag bothAppsVisibleTogether=true when in split-screen", splitScreenReturnRes.bothAppsVisibleTogether)
+        assertFalse("Split-screen visibility must not be treated as a full verified task switch", splitScreenReturnRes.verified)
+
+        // Step 6d: Normal "wapas jao" returns to saved Notes task (taskId=501) and preserves the draft
+        activeScreenState = "WHATSAPP_ACTIVE"
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            activeScreenState = "NOTES_WITH_DRAFT"
+            true
+        }
+        val returnToNotesRes = executor.executeDiagnosticTypedCommand("wapas jao", coldStartTimeoutMs = 300L)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, returnToNotesRes.status)
+        assertTrue(returnToNotesRes.verified)
+        assertEquals("com.example.notes", returnToNotesRes.observedPackage)
+        assertTrue("Draft in Notes must be preserved on return", returnToNotesRes.draftPreserved)
+        assertEquals(
+            "Important unsaved draft in Notes",
+            returnToNotesRes.restoredDrafts["editor_body"]
+        )
+
+        // =========================================================================
+        // 7. NOTEPAD "draft 42" -> "WhatsApp kholo" -> "wapas iss window par aao"
+        //    (Dedicated return-to-previous-app action, transient window filtering,
+        //     Home-intermediate continuation, and strict window + draft verification)
+        // =========================================================================
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+        registerLaunchablePackage("com.example.notes", "Notepad")
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+
+        // 7a: Verify NLU routing across OfflineCommandEngine, SuperAgiBrainEngine, and AiBrainEngine
+        // for all required phrases ("wapas iss window par aao", "pichli app par wapas jao",
+        // "wapas usi window par aao", "return to the previous app")
+        val returnPhrases = listOf(
+            "wapas iss window par aao",
+            "pichli app par wapas jao",
+            "wapas usi window par aao",
+            "return to the previous app"
+        )
+        val offlineEngine = com.example.engine.OfflineCommandEngine()
+        for (phrase in returnPhrases) {
+            assertTrue(
+                "UiTools.isReturnToPreviousAppCommand must recognize '$phrase'",
+                com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(phrase)
+            )
+            val offlineParsed = offlineEngine.parseCommand(phrase)
+            assertEquals(
+                "OfflineCommandEngine must map '$phrase' to return_to_origin (never close_app)",
+                "return_to_origin",
+                offlineParsed.action
+            )
+            val superTasks = com.example.engine.SuperAgiBrainEngine.extractAllDeviceTasks(app, phrase)
+            assertEquals(1, superTasks.size)
+            assertEquals(com.example.engine.NluTaskType.CUSTOM_ANDROID_INTENT, superTasks.first().taskType)
+            assertEquals("origin_task", superTasks.first().target)
+        }
+
+        // 7b: Simulate user typing "draft 42" in Notepad, followed by transient assistant / keyboard / launcher
+        // windows before "WhatsApp kholo" runs
+        var notepadJourneyState = "NOTEPAD_DRAFT_42"
+        val notepadIconNode = com.omnivoice.agentfix.UiNodeSummary(
+            index = 1,
+            viewId = "com.google.android.apps.nexuslauncher:id/icon_notepad",
+            className = "android.widget.TextView",
+            packageName = "com.google.android.apps.nexuslauncher",
+            text = "Notepad",
+            contentDescription = "Notepad",
+            hintText = "",
+            isClickable = true,
+            isLongClickable = true,
+            isEditable = false,
+            isScrollable = false,
+            isFocused = false,
+            isEnabled = true,
+            bounds = android.graphics.Rect(40, 200, 200, 360)
+        )
+        val whatsappHomeNode = com.omnivoice.agentfix.UiNodeSummary(
+            index = 2,
+            viewId = "com.google.android.apps.nexuslauncher:id/icon_whatsapp",
+            className = "android.widget.TextView",
+            packageName = "com.google.android.apps.nexuslauncher",
+            text = "WhatsApp",
+            contentDescription = "WhatsApp",
+            hintText = "",
+            isClickable = true,
+            isLongClickable = true,
+            isEditable = false,
+            isScrollable = false,
+            isFocused = false,
+            isEnabled = true,
+            bounds = android.graphics.Rect(240, 200, 400, 360)
+        )
+
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (notepadJourneyState) {
+                "NOTEPAD_DRAFT_42" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = 542,
+                    component = "com.example.notes/NoteEditorActivity",
+                    drafts = mapOf("editor_body" to "draft 42"),
+                    visiblePackages = setOf("com.example.notes")
+                )
+                "TRANSIENT_ASSISTANT_WINDOW" -> buildSnapshot(
+                    pkg = app.packageName,
+                    label = "OmniVoice",
+                    taskId = 900,
+                    component = "${app.packageName}/MainActivity",
+                    visiblePackages = setOf(app.packageName)
+                )
+                "TRANSIENT_IME_WINDOW" -> buildSnapshot(
+                    pkg = "com.google.android.inputmethod.latin",
+                    label = "Gboard",
+                    taskId = 901,
+                    component = "com.google.android.inputmethod.latin/InputMethod",
+                    visiblePackages = setOf("com.google.android.inputmethod.latin")
+                )
+                "HOME_LAUNCHER" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    taskId = 1,
+                    component = "com.google.android.apps.nexuslauncher/Launcher",
+                    nodes = listOf(notepadIconNode, whatsappHomeNode),
+                    visiblePackages = setOf("com.google.android.apps.nexuslauncher")
+                )
+                "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = 742,
+                    component = "com.whatsapp/HomeActivity",
+                    visiblePackages = setOf("com.whatsapp")
+                )
+                "NOTEPAD_EMPTY_DRAFT" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = 542,
+                    component = "com.example.notes/NoteEditorActivity",
+                    drafts = emptyMap(),
+                    visiblePackages = setOf("com.example.notes")
+                )
+                "NOTEPAD_WRONG_WINDOW" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = 542,
+                    component = "com.example.notes/NotesListActivity",
+                    drafts = emptyMap(),
+                    visiblePackages = setOf("com.example.notes")
+                )
+                else -> null
+            }
+        }
+
+        // User is in Notepad with "draft 42" observed
+        val initialNotepadSnap = com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)
+        assertNotNull(initialNotepadSnap)
+        assertEquals("com.example.notes", initialNotepadSnap?.packageName)
+        assertEquals("draft 42", initialNotepadSnap?.editableFieldDrafts?.get("editor_body"))
+
+        // Transient assistant & keyboard windows appear when user activates voice command "WhatsApp kholo"
+        notepadJourneyState = "TRANSIENT_ASSISTANT_WINDOW"
+        com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+        notepadJourneyState = "TRANSIENT_IME_WINDOW"
+        com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            notepadJourneyState = "HOME_LAUNCHER"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            when (node.text) {
+                "WhatsApp" -> {
+                    notepadJourneyState = "WHATSAPP_FOREGROUND"
+                    true
+                }
+                "Notepad" -> {
+                    notepadJourneyState = "NOTEPAD_DRAFT_42"
+                    true
+                }
+                else -> false
+            }
+        }
+
+        // Voice command: "WhatsApp kholo" in visible-home mode (Notepad -> Home -> tap WhatsApp icon -> WhatsApp)
+        val openWaFromNotepad = executor.executeDiagnosticTypedCommand(
+            commandText = "WhatsApp kholo",
+            visibleHomeMode = true,
+            coldStartTimeoutMs = 300L
+        )
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, openWaFromNotepad.status)
+        assertEquals("com.whatsapp", openWaFromNotepad.observedPackage)
+        // Transient assistant/IME/launcher windows must have been ignored; saved origin must be Notepad with "draft 42"!
+        val savedOriginAfterWaOpen = com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot
+        assertNotNull("Origin Notepad task must be remembered despite transient windows", savedOriginAfterWaOpen)
+        assertEquals("com.example.notes", savedOriginAfterWaOpen?.packageName)
+        assertEquals(542, savedOriginAfterWaOpen?.taskId)
+        assertEquals("com.example.notes/NoteEditorActivity", savedOriginAfterWaOpen?.activityComponent)
+        assertEquals("draft 42", savedOriginAfterWaOpen?.draftTexts?.get("editor_body"))
+
+        // 7c: Now in WhatsApp, user says "wapas iss window par aao".
+        // Even if a single Back transition leaves WhatsApp onto Home Launcher (because WhatsApp was opened from Home),
+        // supported return navigation must NOT stop on Home Launcher — it must bring Notepad (taskId=542, "draft 42") forward!
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            notepadJourneyState = "HOME_LAUNCHER"
+            true
+        }
+        val returnIssWindowRes = executor.executeDiagnosticTypedCommand(
+            commandText = "wapas iss window par aao",
+            coldStartTimeoutMs = 300L
+        )
+        assertEquals(
+            "wapas iss window par aao must bring Notepad back to foreground and verify draft 42",
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED,
+            returnIssWindowRes.status
+        )
+        assertTrue(returnIssWindowRes.verified)
+        assertEquals("com.example.notes", returnIssWindowRes.observedPackage)
+        assertTrue("draftPreserved must be true when 'draft 42' is observed", returnIssWindowRes.draftPreserved)
+        assertEquals("draft 42", returnIssWindowRes.restoredDrafts["editor_body"])
+
+        // 7d: Guard against close_app / blind gesture routing in ToolDispatcher when utterance is "wapas iss window par aao"
+        notepadJourneyState = "WHATSAPP_FOREGROUND"
+        com.omnivoice.agentfix.AgentSession.onUserUtterance("wapas iss window par aao")
+        val redirectedCloseRes = kotlinx.coroutines.runBlocking {
+            com.omnivoice.agentfix.ToolDispatcher.getInstance(app).dispatch(
+                toolName = "close_app",
+                rawArgs = org.json.JSONObject().put("app_name", "whatsapp")
+            )
+        }
+        assertEquals("return_to_origin", redirectedCloseRes.tool)
+        assertTrue("Redirected close_app must verify Notepad return instead of closing to Home", redirectedCloseRes.verified)
+        assertEquals("com.example.notes", com.omnivoice.agentfix.UiTools.lastCanonicalResult?.observedPackage)
+        assertEquals("draft 42", com.omnivoice.agentfix.UiTools.lastCanonicalResult?.restoredDrafts?.get("editor_body"))
+
+        // 7e: Strict honesty when package matches ("com.example.notes") but "draft 42" is missing:
+        // Never claim the draft survived based on the package name alone!
+        notepadJourneyState = "WHATSAPP_FOREGROUND"
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            notepadJourneyState = "NOTEPAD_EMPTY_DRAFT"
+            true
+        }
+        val missingDraftRes = executor.executeDiagnosticTypedCommand(
+            commandText = "wapas usi window par aao",
+            coldStartTimeoutMs = 300L
+        )
+        assertEquals(
+            "When package is Notepad but 'draft 42' is missing, must return REQUESTED_UNVERIFIED",
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+            missingDraftRes.status
+        )
+        assertFalse("Must never set verified=true when saved draft is missing", missingDraftRes.verified)
+        assertFalse("Must never claim draftPreserved=true based on package name alone", missingDraftRes.draftPreserved)
+        assertEquals("ORIGIN_DRAFT_MISMATCH", missingDraftRes.reasonCode)
+
+        // 7f: Strict honesty when package matches ("com.example.notes") but a different window is open
+        notepadJourneyState = "WHATSAPP_FOREGROUND"
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            notepadJourneyState = "NOTEPAD_WRONG_WINDOW"
+            true
+        }
+        val wrongWindowRes = executor.executeDiagnosticTypedCommand(
+            commandText = "pichli app par wapas jao",
+            coldStartTimeoutMs = 300L
+        )
+        assertEquals(
+            "When exact window cannot be restored, must return REQUESTED_UNVERIFIED",
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+            wrongWindowRes.status
+        )
+        assertFalse(wrongWindowRes.verified)
+        assertEquals("ORIGIN_WINDOW_MISMATCH", wrongWindowRes.reasonCode)
+        assertTrue(wrongWindowRes.message.contains("NotesListActivity"))
+
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+    }
 }
+
+
 
 
 

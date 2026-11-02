@@ -1,142 +1,157 @@
 package com.example.engine
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.util.Log
-import com.example.service.OmniAccessibilityService
-import kotlinx.coroutines.delay
-import java.io.File
-import java.io.FileOutputStream
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
-data class VoiceNoteSendResult(
+data class VoiceNoteOutcome(
     val ok: Boolean,
+    val recipient: String,
+    val audioFilePath: String,
     val method: String,
-    val detail: String
+    val message: String,
+    val detail: String = message
 )
 
 /**
- * WhatsApp Voice Note Controller.
- * Synthesizes or records voice messages and dispatches them directly to WhatsApp contacts
- * without requiring the user to speak into WhatsApp manually.
+ * WhatsApp Voice Note Controller (Phase 01 Hardened):
+ * - Disables the broken voice-note sending path until Phase 11.
+ * - Unresolved or ambiguous contacts stop immediately before any Intent is created or launched.
+ * - Never falls back to a hardcoded phone number.
+ * - Silence, a mic button click, and opening a share sheet (`ACTION_SEND`) are never treated as proof of sending.
  */
 class WhatsAppVoiceNoteController(private val context: Context) {
 
     companion object {
-        private const val TAG = "WhatsAppVoiceNote"
+        private const val TAG = "WhatsAppVoiceNoteCtrl"
+        @Volatile
         private var instance: WhatsAppVoiceNoteController? = null
 
         fun getInstance(context: Context): WhatsAppVoiceNoteController {
-            return instance ?: synchronized(this) {
-                instance ?: WhatsAppVoiceNoteController(context.applicationContext).also {
-                    instance = it
+            return synchronized(this) {
+                val appCtx = context.applicationContext ?: context
+                val existing = instance
+                if (existing == null || existing.context !== appCtx) {
+                    WhatsAppVoiceNoteController(appCtx).also { instance = it }
+                } else {
+                    existing
                 }
             }
         }
     }
 
-    /**
-     * Sends a voice note to a WhatsApp contact.
-     * 1. Resolves contact phone number and opens target chat directly.
-     * 2. Synthesizes voice audio (or attaches pre-recorded audio file).
-     * 3. Uses Accessibility or Android OS intent to send the audio file / press mic button.
-     */
+    private val _lastVoiceNoteStatus = MutableStateFlow("IDLE")
+    val lastVoiceNoteStatus: StateFlow<String> = _lastVoiceNoteStatus.asStateFlow()
+
     suspend fun sendVoiceNote(
         recipientName: String,
-        spokenMessageText: String,
-        phoneOrHandle: String = ""
-    ): VoiceNoteSendResult {
-        Log.i(TAG, "Preparing WhatsApp voice note for '$recipientName' saying: '$spokenMessageText'")
+        spokenMessage: String
+    ): VoiceNoteOutcome {
+        val cleanRecipient = recipientName.trim()
+        val cleanMessage = spokenMessage.trim()
 
-        // 1. Resolve phone
-        val phone = if (phoneOrHandle.isNotBlank()) {
-            SmartContactAndAppRegistry.formatWhatsAppPhone(phoneOrHandle)
-        } else {
-            val contact = SmartContactAndAppRegistry.findContactByName(context, recipientName)
-            if (contact != null) {
-                SmartContactAndAppRegistry.formatWhatsAppPhone(contact.whatsappNumber.ifBlank { contact.phoneNumber })
-            } else {
-                ""
-            }
-        }
-
-        // 2. Open chat deep link
-        val targetPhone = phone.ifBlank { "923001234567" }
-        val chatUri = Uri.parse("https://api.whatsapp.com/send?phone=$targetPhone")
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, chatUri).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                setPackage("com.whatsapp")
-            }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            Log.w(TAG, "Direct WhatsApp intent failed, trying standard view: ${e.message}")
-        }
-
-        delay(1200)
-
-        // 3. Accessibility Voice Note Mic Press or Text Fallback
-        if (OmniAccessibilityService.isConnected()) {
-            val micClicked = OmniAccessibilityService.clickNodeByContentDescription("Voice message") ||
-                OmniAccessibilityService.clickNodeByContentDescription("Record voice message") ||
-                OmniAccessibilityService.clickNodeByViewId("com.whatsapp:id/voice_note_btn")
-            if (micClicked) {
-                return VoiceNoteSendResult(
-                    ok = true,
-                    method = "ACCESSIBILITY_VOICE_NOTE_HOLD",
-                    detail = "WhatsApp voice note record button engaged for $recipientName."
-                )
-            }
-        }
-
-        // 4. Intent Share Audio File
-        val audioFile = createSampleVoiceWavFile(spokenMessageText)
-        if (audioFile != null) {
-            try {
-                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "audio/*"
-                    putExtra(Intent.EXTRA_STREAM, Uri.fromFile(audioFile))
-                    putExtra("jid", "$targetPhone@s.whatsapp.net")
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    setPackage("com.whatsapp")
-                }
-                context.startActivity(shareIntent)
-                return VoiceNoteSendResult(
-                    ok = true,
-                    method = "INTENT_AUDIO_DISPATCH",
-                    detail = "Synthesized voice note audio dispatched to $recipientName via WhatsApp audio stream."
-                )
-            } catch (e: Exception) {
-                Log.w(TAG, "Audio file dispatch error: ${e.message}")
-            }
-        }
-
-        return VoiceNoteSendResult(
-            ok = true,
-            method = "AUTONOMOUS_VOICE_NOTE_TRANSMIT",
-            detail = "Voice note for '$recipientName' prepared and dispatched."
-        )
-    }
-
-    private fun createSampleVoiceWavFile(text: String): File? {
-        return try {
-            val cacheDir = context.cacheDir
-            val file = File(cacheDir, "jarvis_voice_note_${System.currentTimeMillis()}.wav")
-            // Create a valid 44-byte WAV with 1 second of silence/tone
-            val sampleRate = 16000
-            val numSamples = sampleRate
-            val pcmData = ByteArray(numSamples * 2) { 0 }
-            val wavBytes = MultiEngineSpeechManager.buildStandard44ByteRiffWav(
-                pcmData = pcmData,
-                sampleRate = sampleRate,
-                channels = 1,
-                bitsPerSample = 16
+        // 1. Block private/outbound action whenever device is locked
+        if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context)) {
+            val msg = "Blocked: Cannot send a WhatsApp voice note while the phone is locked."
+            _lastVoiceNoteStatus.value = "BLOCKED_DEVICE_LOCKED: $msg"
+            Log.w(TAG, msg)
+            return VoiceNoteOutcome(
+                ok = false,
+                recipient = cleanRecipient,
+                audioFilePath = "",
+                method = "BLOCKED_DEVICE_LOCKED",
+                message = msg
             )
-            FileOutputStream(file).use { it.write(wavBytes) }
-            file
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to create audio WAV: ${e.message}")
-            null
         }
+
+        // 2. Validate recipient and stop BEFORE any intent if unresolved or ambiguous
+        if (cleanRecipient.isBlank()) {
+            val msg = "Cannot send WhatsApp voice note: No recipient contact name was provided. Stopped before any intent."
+            _lastVoiceNoteStatus.value = "MISSING_RECIPIENT: $msg"
+            return VoiceNoteOutcome(
+                ok = false,
+                recipient = "",
+                audioFilePath = "",
+                method = "MISSING_RECIPIENT",
+                message = msg
+            )
+        }
+
+        val resolution = SmartContactAndAppRegistry.resolveContactWithDisambiguation(context, cleanRecipient)
+        val resolvedContactName: String
+        when (resolution) {
+            is ContactResolutionOutcome.NotFound -> {
+                val msg = "Contact '$cleanRecipient' was not found in contacts. Stopped before launching any WhatsApp intent."
+                _lastVoiceNoteStatus.value = "CONTACT_NOT_FOUND: $msg"
+                Log.w(TAG, msg)
+                return VoiceNoteOutcome(
+                    ok = false,
+                    recipient = cleanRecipient,
+                    audioFilePath = "",
+                    method = "CONTACT_NOT_FOUND",
+                    message = msg
+                )
+            }
+            is ContactResolutionOutcome.Ambiguous -> {
+                val names = resolution.candidates.joinToString(", ") { it.name }
+                val msg = "Contact '$cleanRecipient' is ambiguous ($names). Stopped before launching any WhatsApp intent."
+                _lastVoiceNoteStatus.value = "AMBIGUOUS_CONTACT: $msg"
+                Log.w(TAG, msg)
+                return VoiceNoteOutcome(
+                    ok = false,
+                    recipient = cleanRecipient,
+                    audioFilePath = "",
+                    method = "AMBIGUOUS_CONTACT",
+                    message = msg
+                )
+            }
+            is ContactResolutionOutcome.Resolved -> {
+                val phone = SmartContactAndAppRegistry.formatWhatsAppPhone(
+                    resolution.contact.whatsappNumber.ifBlank { resolution.contact.phoneNumber }
+                )
+                if (phone.length < 10) {
+                    val msg = "Contact '${resolution.contact.name}' does not have a valid phone number. Stopped before launching any WhatsApp intent."
+                    _lastVoiceNoteStatus.value = "INVALID_CONTACT_NUMBER: $msg"
+                    return VoiceNoteOutcome(
+                        ok = false,
+                        recipient = resolution.contact.name,
+                        audioFilePath = "",
+                        method = "INVALID_CONTACT_NUMBER",
+                        message = msg
+                    )
+                }
+                resolvedContactName = resolution.contact.name
+            }
+        }
+
+        if (cleanMessage.isBlank()) {
+            val msg = "Cannot send WhatsApp voice note to $resolvedContactName: Message text is empty."
+            _lastVoiceNoteStatus.value = "MISSING_MESSAGE: $msg"
+            return VoiceNoteOutcome(
+                ok = false,
+                recipient = resolvedContactName,
+                audioFilePath = "",
+                method = "MISSING_MESSAGE",
+                message = msg
+            )
+        }
+
+        // 3. Phase 01 Policy: Broken voice-note sending path is disabled until Phase 11.
+        // Silence, a mic click, and opening a share sheet are never proof of sending.
+        val disabledMsg =
+            "WhatsApp voice-note sending to $resolvedContactName is disabled until Phase 11. " +
+                "Silence, a microphone click, or opening a share sheet is not proof of sending, so no voice note was sent."
+        _lastVoiceNoteStatus.value = "DISABLED_UNTIL_PHASE_11: $disabledMsg"
+        Log.i(TAG, disabledMsg)
+
+        return VoiceNoteOutcome(
+            ok = false,
+            recipient = resolvedContactName,
+            audioFilePath = "",
+            method = "DISABLED_UNTIL_PHASE_11",
+            message = disabledMsg
+        )
     }
 }

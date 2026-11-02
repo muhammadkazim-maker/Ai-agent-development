@@ -2,7 +2,6 @@ package com.example.engine
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -11,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
+import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -20,255 +20,254 @@ import javax.crypto.spec.GCMParameterSpec
 data class VaultRecord(
     val masterPin: String = "",
     val lockScreenPattern: String = "",
-    val secretVoiceUnlockWord: String = "Jarvis unlock",
+    val secretVoiceUnlockWord: String = "Jarvis protocol 786",
     val biometricEnrolled: Boolean = false,
     val appPasswords: Map<String, String> = emptyMap(),
     val permissionsCompleted: Boolean = false,
-    val adbPort: Int = 8765,
-    val shizukuActive: Boolean = false,
-    val orbDragSensitivity: Float = 0.5f
+    val orbDragSensitivity: Float = 0.5f,
+    val updatedAt: Long = System.currentTimeMillis()
 ) {
+    fun sanitized(): VaultRecord = copy(
+        masterPin = "",
+        lockScreenPattern = "",
+        appPasswords = emptyMap()
+    )
+
     fun toJson(): JSONObject = JSONObject().apply {
-        put("masterPin", masterPin)
-        put("lockScreenPattern", lockScreenPattern)
+        // Security Policy (Phase 01): Never serialize or export device PIN, lock pattern, or app passwords
+        put("masterPin", "")
+        put("lockScreenPattern", "")
         put("secretVoiceUnlockWord", secretVoiceUnlockWord)
         put("biometricEnrolled", biometricEnrolled)
         put("permissionsCompleted", permissionsCompleted)
-        put("adbPort", adbPort)
-        put("shizukuActive", shizukuActive)
         put("orbDragSensitivity", orbDragSensitivity.toDouble())
-        val passwordsObj = JSONObject()
-        appPasswords.forEach { (k, v) -> passwordsObj.put(k, v) }
-        put("appPasswords", passwordsObj)
+        put("updatedAt", updatedAt)
+        put("appPasswords", JSONObject())
     }
 
     companion object {
         fun fromJson(json: JSONObject): VaultRecord {
-            val passwordsMap = mutableMapOf<String, String>()
-            val passObj = json.optJSONObject("appPasswords")
-            passObj?.keys()?.forEach { key ->
-                passwordsMap[key] = passObj.optString(key, "")
-            }
+            // Security Policy (Phase 01): Strip any legacy masterPin, lockScreenPattern, or appPasswords on load
             return VaultRecord(
-                masterPin = json.optString("masterPin", ""),
-                lockScreenPattern = json.optString("lockScreenPattern", ""),
-                secretVoiceUnlockWord = json.optString("secretVoiceUnlockWord", "Jarvis unlock"),
+                masterPin = "",
+                lockScreenPattern = "",
+                secretVoiceUnlockWord = json.optString("secretVoiceUnlockWord", "Jarvis protocol 786"),
                 biometricEnrolled = json.optBoolean("biometricEnrolled", false),
+                appPasswords = emptyMap(),
                 permissionsCompleted = json.optBoolean("permissionsCompleted", false),
-                adbPort = json.optInt("adbPort", 8765),
-                shizukuActive = json.optBoolean("shizukuActive", false),
-                orbDragSensitivity = json.optDouble("orbDragSensitivity", 0.5).toFloat(),
-                appPasswords = passwordsMap
+                orbDragSensitivity = json.optDouble("orbDragSensitivity", 0.5).toFloat().coerceIn(0.1f, 1.0f),
+                updatedAt = json.optLong("updatedAt", System.currentTimeMillis())
             )
         }
     }
 }
 
 /**
- * Biometric Fingerprint & Master PIN/Password Vault.
- * Provides secure encrypted storage for:
- * - Device Lock-screen PIN & Pattern (used for zero-touch hands-free phone unlock)
- * - Secret Voice Unlock Word (e.g., "Jarvis unlock", "Protocol 786")
- * - App-specific passwords & credentials
- * - Shizuku / ADB port settings
- * - Floating Orb Drag Sensitivity setting (anti-accidental touch threshold & smooth movement)
+ * Biometric & Settings Vault Manager (Phase 01 Hardened):
+ * - Device PIN, lock-screen pattern, and app password collection, storage, export, autofill, and replay are disabled.
+ * - Legacy stored credentials (`vault_master_pin`, `masterPin`, `lockScreenPattern`, `appPasswords`) are automatically
+ *   purged from both SharedPreferences and serialized encrypted vault copies on upgrade/init while preserving
+ *   unrelated settings (`permissionsCompleted`, `orbDragSensitivity`, `secretVoiceUnlockWord`, `biometricEnrolled`).
+ * - Arbitrary Python/ADB local shell bridge scripts and port probes are disabled.
  */
 class BiometricVaultManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "BiometricVault"
+        private const val TAG = "BiometricVaultManager"
         private const val PREFS_NAME = "jarvis_biometric_vault_prefs"
+        private const val SECURE_PREFS_NAME = "omnivoice_secure_prefs"
         private const val KEY_ENCRYPTED_VAULT = "encrypted_vault_data"
-        private const val KEY_PERMISSIONS_COMPLETE = "jarvis_permissions_complete"
+        private const val KEY_VAULT_IV = "encrypted_vault_iv"
         private const val KEY_PLAIN_PIN = "vault_master_pin"
-        private const val KEY_VOICE_UNLOCK = "vault_voice_unlock"
-        private const val KEY_ORB_DRAG_SENSITIVITY = "vault_orb_drag_sensitivity"
+        private const val KEY_LEGACY_STORED_PIN = "stored_unlock_pin"
+        private const val KEY_PERMISSIONS_COMPLETED = "jarvis_permissions_completed_once"
+        private const val KEY_ORB_DRAG_SENSITIVITY = "jarvis_orb_drag_sensitivity"
+        private const val KEYSTORE_ALIAS = "JarvisAutonomousVaultKey_v2"
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
 
+        const val MIN_SENSITIVITY = 0.10f
+        const val MAX_SENSITIVITY = 1.00f
+        const val DEFAULT_SENSITIVITY = 0.50f
+
+        @Volatile
         private var instance: BiometricVaultManager? = null
 
         fun getInstance(context: Context): BiometricVaultManager {
-            return instance ?: synchronized(this) {
-                instance ?: BiometricVaultManager(context.applicationContext).also { instance = it }
+            return synchronized(this) {
+                val appCtx = context.applicationContext ?: context
+                val existing = instance
+                if (existing == null || existing.context !== appCtx) {
+                    BiometricVaultManager(appCtx).also { instance = it }
+                } else {
+                    existing
+                }
             }
         }
+
+        // Disabled in Phase 01: No local shell/ADB bridge script is exposed
+        const val PYTHON_ADB_DAEMON_SCRIPT = ""
     }
 
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences
+        get() = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    private val _vaultState = MutableStateFlow(loadVault())
+    private val _vaultState = MutableStateFlow(VaultRecord())
     val vaultState: StateFlow<VaultRecord> = _vaultState.asStateFlow()
 
-    private val _isPermissionsCompleted = MutableStateFlow(isPermissionsAlreadyCompleted())
+    private val _isPermissionsCompleted = MutableStateFlow(false)
     val isPermissionsCompleted: StateFlow<Boolean> = _isPermissionsCompleted.asStateFlow()
 
-    fun isPermissionsAlreadyCompleted(): Boolean {
-        return prefs.getBoolean(KEY_PERMISSIONS_COMPLETE, false) ||
-            _vaultState.value.permissionsCompleted ||
-            context.getSharedPreferences("omni_autonomous_core_prefs", Context.MODE_PRIVATE)
-                .getBoolean("omni_startup_gatekeeper_completed", false)
+    private val _orbDragSensitivity = MutableStateFlow(DEFAULT_SENSITIVITY)
+    val orbDragSensitivity: StateFlow<Float> = _orbDragSensitivity.asStateFlow()
+
+    private val _isBridgeActive = MutableStateFlow(false)
+    val isBridgeActive: StateFlow<Boolean> = _isBridgeActive.asStateFlow()
+
+    init {
+        purgeLegacyCredentialsAndLoadSettings()
     }
 
-    fun markPermissionsCompleted() {
-        prefs.edit().putBoolean(KEY_PERMISSIONS_COMPLETE, true).apply()
-        context.getSharedPreferences("omni_autonomous_core_prefs", Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean("omni_startup_gatekeeper_completed", true)
-            .apply()
-        val updated = _vaultState.value.copy(permissionsCompleted = true)
-        saveVault(updated)
-        _isPermissionsCompleted.value = true
-        Log.i(TAG, "Permissions Gatekeeper marked as completed in vault.")
+    /**
+     * Purges any legacy stored PINs, patterns, or app passwords from SharedPreferences and
+     * re-serializes the vault record without credentials while preserving unrelated settings.
+     */
+    fun purgeLegacyCredentialsAndLoadSettings() {
+        val loaded = loadVaultFromEncryptedPrefs().sanitized()
+        _vaultState.value = loaded
+        _isPermissionsCompleted.value = loaded.permissionsCompleted
+        _orbDragSensitivity.value = loaded.orbDragSensitivity
+
+        // Remove legacy plain-text or direct preference credential keys across preferences
+        prefs.edit()
+            .remove(KEY_PLAIN_PIN)
+            .remove(KEY_LEGACY_STORED_PIN)
+            .remove("masterPin")
+            .remove("lockScreenPattern")
+            .remove("appPasswords")
+            .commit()
+
+        try {
+            context.getSharedPreferences(SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_PLAIN_PIN)
+                .remove(KEY_LEGACY_STORED_PIN)
+                .remove("masterPin")
+                .remove("lockScreenPattern")
+                .remove("appPasswords")
+                .commit()
+        } catch (_: Exception) {
+        }
+
+        // Overwrite serialized vault copy so no legacy credential values remain in encrypted/fallback JSON
+        saveVaultToEncryptedPrefs(loaded)
     }
 
-    fun resetPermissionsForTesting() {
-        prefs.edit().putBoolean(KEY_PERMISSIONS_COMPLETE, false).apply()
-        _isPermissionsCompleted.value = false
-    }
-
+    /**
+     * Enrolls non-credential preferences only. Device PIN and lock-screen pattern collection/storage
+     * are disabled for safety and always ignored.
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun enrollVault(
-        masterPin: String,
+        masterPin: String = "",
         lockScreenPattern: String = "",
-        secretVoiceWord: String = "Jarvis unlock",
+        secretVoiceWord: String = "Jarvis protocol 786",
         biometricEnrolled: Boolean = true
     ) {
         val updated = _vaultState.value.copy(
-            masterPin = masterPin.trim(),
-            lockScreenPattern = lockScreenPattern.trim(),
-            secretVoiceUnlockWord = secretVoiceWord.trim().ifBlank { "Jarvis unlock" },
-            biometricEnrolled = biometricEnrolled
+            masterPin = "",
+            lockScreenPattern = "",
+            secretVoiceUnlockWord = secretVoiceWord.trim().ifBlank { "Jarvis protocol 786" },
+            biometricEnrolled = biometricEnrolled,
+            appPasswords = emptyMap(),
+            updatedAt = System.currentTimeMillis()
         )
-        saveVault(updated)
-        Log.i(TAG, "Biometric Vault enrolled: master PIN set (length=${masterPin.length})")
+        saveVaultToEncryptedPrefs(updated)
+        _vaultState.value = updated
+        Log.i(TAG, "Security settings updated (PIN/pattern storage disabled by Phase 01 policy)")
     }
 
-    fun setAppPassword(appName: String, secret: String) {
-        val newMap = _vaultState.value.appPasswords.toMutableMap()
-        newMap[appName.lowercase().trim()] = secret
-        val updated = _vaultState.value.copy(appPasswords = newMap)
-        saveVault(updated)
+    @Suppress("UNUSED_PARAMETER")
+    fun setAppPassword(appName: String, password: String) {
+        // Disabled in Phase 01: Do not collect or store app passwords
+        val sanitized = _vaultState.value.copy(
+            masterPin = "",
+            lockScreenPattern = "",
+            appPasswords = emptyMap(),
+            updatedAt = System.currentTimeMillis()
+        )
+        saveVaultToEncryptedPrefs(sanitized)
+        _vaultState.value = sanitized
+        Log.w(TAG, "setAppPassword ignored: credential collection and storage are disabled.")
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun getAppPassword(appName: String): String? {
-        return _vaultState.value.appPasswords[appName.lowercase().trim()]
+        return null
     }
 
     fun getMasterPin(): String {
-        return _vaultState.value.masterPin.ifBlank {
-            prefs.getString(KEY_PLAIN_PIN, "") ?: ""
-        }
+        return ""
     }
 
     fun getSecretVoiceUnlockWord(): String {
-        return _vaultState.value.secretVoiceUnlockWord.ifBlank {
-            prefs.getString(KEY_VOICE_UNLOCK, "Jarvis unlock") ?: "Jarvis unlock"
-        }
+        return _vaultState.value.secretVoiceUnlockWord
     }
 
-    fun matchesVoiceUnlock(phrase: String): Boolean {
-        val clean = phrase.lowercase().trim()
-        val trigger = getSecretVoiceUnlockWord().lowercase().trim()
-        return clean.contains(trigger) || clean.contains("jarvis unlock") || clean.contains("unlock phone")
+    fun matchesVoiceUnlock(spokenText: String): Boolean {
+        val clean = spokenText.lowercase().trim()
+        val secret = _vaultState.value.secretVoiceUnlockWord.lowercase().trim()
+        return secret.isNotBlank() && clean.contains(secret)
     }
 
-    fun getPythonBridgeOneLiner(): String =
-        """python3 -c "import http.server, subprocess, json; class H(http.server.BaseHTTPRequestHandler):
-    def end_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', '*')
-        self.send_header('Access-Control-Allow-Private-Network', 'true')
-        super().end_headers()
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.end_headers()
-    def do_GET(self):
-        if self.path == '/status':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{\"status\":\"OK\",\"service\":\"JARVIS_ADB_BRIDGE\",\"port\":8765}')
-        else:
-            self.send_response(404)
-            self.end_headers()
-    def do_POST(self):
-        length = int(self.headers.get('Content-Length', 0))
-        data = self.rfile.read(length)
-        cmd = json.loads(data).get('cmd', '') if data else ''
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps({'ok': res.returncode==0, 'output': res.stdout + res.stderr, 'exitCode': res.returncode}).encode())
-http.server.HTTPServer(('127.0.0.1', 8765), H).serve_forever()"
-""".trimIndent()
-
-    fun checkAdbBridgeStatus(): Boolean {
-        return try {
-            val url = java.net.URL("http://127.0.0.1:${_vaultState.value.adbPort}/status")
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 1200
-            conn.readTimeout = 1200
-            conn.requestMethod = "GET"
-            val code = conn.responseCode
-            conn.disconnect()
-            code in 200..299
-        } catch (_: Exception) {
-            false
-        }
+    fun isPermissionsAlreadyCompleted(): Boolean {
+        return prefs.getBoolean(KEY_PERMISSIONS_COMPLETED, false) || _vaultState.value.permissionsCompleted
     }
 
-    fun getVaultJson(): String {
-        return _vaultState.value.toJson().toString()
-    }
-
-    fun importVaultJson(jsonString: String): Boolean {
-        return try {
-            val json = JSONObject(jsonString)
-            val imported = VaultRecord.fromJson(json)
-            saveVault(imported)
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to import vault JSON: ${e.message}")
-            false
-        }
-    }
-
-    fun setOrbDragSensitivity(sensitivity: Float) {
-        val clamped = sensitivity.coerceIn(0.1f, 1.0f)
-        val updated = _vaultState.value.copy(orbDragSensitivity = clamped)
-        saveVault(updated)
-        Log.i(TAG, "Orb drag sensitivity updated: $clamped")
+    fun markPermissionsCompleted() {
+        prefs.edit().putBoolean(KEY_PERMISSIONS_COMPLETED, true).apply()
+        _isPermissionsCompleted.value = true
+        val updated = _vaultState.value.copy(
+            masterPin = "",
+            lockScreenPattern = "",
+            appPasswords = emptyMap(),
+            permissionsCompleted = true,
+            updatedAt = System.currentTimeMillis()
+        )
+        saveVaultToEncryptedPrefs(updated)
+        _vaultState.value = updated
     }
 
     fun getOrbDragSensitivity(): Float {
-        return _vaultState.value.orbDragSensitivity
+        return prefs.getFloat(KEY_ORB_DRAG_SENSITIVITY, _vaultState.value.orbDragSensitivity)
+            .coerceIn(MIN_SENSITIVITY, MAX_SENSITIVITY)
     }
 
-    /**
-     * Calculates the gesture activation deadzone threshold (in dp) based on sensitivity.
-     * Low sensitivity (0.1) -> 33dp threshold (prevents accidental triggers).
-     * Balanced (0.5) -> 21dp threshold.
-     * High sensitivity (1.0) -> 6dp threshold (ultra-responsive).
-     */
-    fun calculateSlopThresholdDp(sensitivity: Float): Float {
-        val s = sensitivity.coerceIn(0.1f, 1.0f)
-        return (36f - s * 30f)
+    fun setOrbDragSensitivity(sensitivity: Float) {
+        val clamped = sensitivity.coerceIn(MIN_SENSITIVITY, MAX_SENSITIVITY)
+        prefs.edit().putFloat(KEY_ORB_DRAG_SENSITIVITY, clamped).apply()
+        _orbDragSensitivity.value = clamped
+        val updated = _vaultState.value.copy(
+            masterPin = "",
+            lockScreenPattern = "",
+            appPasswords = emptyMap(),
+            orbDragSensitivity = clamped,
+            updatedAt = System.currentTimeMillis()
+        )
+        saveVaultToEncryptedPrefs(updated)
+        _vaultState.value = updated
+        Log.i(TAG, "Floating Orb Drag Sensitivity updated to: $clamped")
     }
 
-    /**
-     * Calculates smooth movement velocity dampening multiplier based on sensitivity.
-     * Smooth 1:1 feel ranging from 0.85x to 1.15x.
-     */
-    fun calculateMovementMultiplier(sensitivity: Float): Float {
-        val s = sensitivity.coerceIn(0.1f, 1.0f)
-        return 0.85f + (s * 0.30f)
+    fun calculateSlopThresholdDp(sensitivity: Float = _orbDragSensitivity.value): Float {
+        val clamped = sensitivity.coerceIn(MIN_SENSITIVITY, MAX_SENSITIVITY)
+        return (36f - (clamped * 30f)).coerceIn(6f, 34f)
     }
 
-    /**
-     * Evaluates and applies a magnetic snap-to-edge effect when the draggable orb
-     * is moved within `snapThresholdPx` of any screen boundary (or on release).
-     */
+    fun calculateMovementMultiplier(sensitivity: Float = _orbDragSensitivity.value): Float {
+        val clamped = sensitivity.coerceIn(MIN_SENSITIVITY, MAX_SENSITIVITY)
+        return (0.82f + (clamped * 0.43f)).coerceIn(0.80f, 1.25f)
+    }
+
     fun computeMagneticEdgeSnap(
         currentX: Float,
         currentY: Float,
@@ -276,247 +275,275 @@ http.server.HTTPServer(('127.0.0.1', 8765), H).serve_forever()"
         maxOffsetY: Float,
         edgeMarginPx: Float = 16f,
         snapThresholdPx: Float = 96f,
-        forceHorizontalEdgeOnRelease: Boolean = false
-    ): MagneticSnapResult {
-        val clampedX = currentX.coerceIn(0f, maxOffsetX)
-        val clampedY = currentY.coerceIn(0f, maxOffsetY)
-        val leftTarget = edgeMarginPx.coerceAtMost(maxOffsetX)
-        val rightTarget = (maxOffsetX - edgeMarginPx).coerceAtLeast(0f)
-        val topTarget = edgeMarginPx.coerceAtMost(maxOffsetY)
-        val bottomTarget = (maxOffsetY - edgeMarginPx).coerceAtLeast(0f)
+        forceHorizontalEdgeOnRelease: Boolean = true
+    ): OrbSnapResult {
+        val tempState = DraggableOrbState(
+            initialX = currentX,
+            initialY = currentY,
+            sensitivity = _orbDragSensitivity.value,
+            edgeMarginPx = edgeMarginPx,
+            snapThresholdPx = snapThresholdPx
+        )
+        return tempState.snapToEdgeIfNearBoundary(
+            maxOffsetX = maxOffsetX,
+            maxOffsetY = maxOffsetY,
+            forceHorizontalDock = forceHorizontalEdgeOnRelease
+        )
+    }
 
-        val distLeft = kotlin.math.abs(clampedX - leftTarget)
-        val distRight = kotlin.math.abs(rightTarget - clampedX)
-        val distTop = kotlin.math.abs(clampedY - topTarget)
-        val distBottom = kotlin.math.abs(bottomTarget - clampedY)
+    fun getPythonBridgeOneLiner(): String {
+        // Arbitrary shell/bridge access disabled in Phase 01
+        return ""
+    }
 
-        var targetX = clampedX
-        var targetY = clampedY
-        var snappedEdge: String? = null
+    fun checkAdbBridgeStatus(): Boolean {
+        _isBridgeActive.value = false
+        return false
+    }
 
-        if (distLeft <= snapThresholdPx && distLeft <= distRight) {
-            targetX = leftTarget
-            snappedEdge = "LEFT"
-        } else if (distRight <= snapThresholdPx) {
-            targetX = rightTarget
-            snappedEdge = "RIGHT"
-        } else if (forceHorizontalEdgeOnRelease) {
-            if (distLeft <= distRight) {
-                targetX = leftTarget
-                snappedEdge = "LEFT"
-            } else {
-                targetX = rightTarget
-                snappedEdge = "RIGHT"
+    fun getVaultJson(): String {
+        return _vaultState.value.sanitized().toJson().toString()
+    }
+
+    fun importVaultJson(jsonString: String): Boolean {
+        return try {
+            val json = JSONObject(jsonString)
+            val record = VaultRecord.fromJson(json).sanitized()
+            saveVaultToEncryptedPrefs(record)
+            _vaultState.value = record
+            _orbDragSensitivity.value = record.orbDragSensitivity
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to import settings JSON", e)
+            false
+        }
+    }
+
+    private fun getOrCreateSecretKey(): SecretKey? {
+        return try {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val existing = keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry
+            if (existing != null) return existing.secretKey
+
+            val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            val spec = KeyGenParameterSpec.Builder(
+                KEYSTORE_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+            keyGen.init(spec)
+            keyGen.generateKey()
+        } catch (e: Exception) {
+            Log.w(TAG, "Hardware Keystore unavailable (unit test / fallback mode): ${e.message}")
+            null
+        }
+    }
+
+    private fun saveVaultToEncryptedPrefs(record: VaultRecord) {
+        val safeRecord = record.sanitized()
+        val rawJson = safeRecord.toJson().toString()
+        val secretKey = getOrCreateSecretKey()
+
+        val editor = prefs.edit()
+            .remove(KEY_PLAIN_PIN)
+            .remove(KEY_LEGACY_STORED_PIN)
+            .remove("masterPin")
+            .remove("lockScreenPattern")
+            .remove("appPasswords")
+            .putBoolean(KEY_PERMISSIONS_COMPLETED, safeRecord.permissionsCompleted)
+            .putFloat(KEY_ORB_DRAG_SENSITIVITY, safeRecord.orbDragSensitivity)
+
+        if (secretKey != null) {
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+                val encryptedBytes = cipher.doFinal(rawJson.toByteArray(StandardCharsets.UTF_8))
+                val iv = cipher.iv
+                editor
+                    .putString(KEY_ENCRYPTED_VAULT, Base64.encodeToString(encryptedBytes, Base64.NO_WRAP))
+                    .putString(KEY_VAULT_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
+                    .commit()
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Encryption fallback to sanitized JSON: ${e.message}")
             }
         }
 
-        if (distTop <= snapThresholdPx && distTop <= distBottom) {
-            targetY = topTarget
-            snappedEdge = if (snappedEdge != null) "${snappedEdge}_TOP" else "TOP"
-        } else if (distBottom <= snapThresholdPx) {
-            targetY = bottomTarget
-            snappedEdge = if (snappedEdge != null) "${snappedEdge}_BOTTOM" else "BOTTOM"
-        }
-
-        return MagneticSnapResult(
-            targetX = targetX,
-            targetY = targetY,
-            isSnapped = snappedEdge != null,
-            snappedEdge = snappedEdge ?: "NONE"
-        )
+        editor
+            .putString(KEY_ENCRYPTED_VAULT, rawJson)
+            .remove(KEY_VAULT_IV)
+            .commit()
     }
-    private fun loadVault(): VaultRecord {
-        val raw = prefs.getString(KEY_ENCRYPTED_VAULT, null)
-        if (raw.isNullOrBlank()) {
+
+    private fun loadVaultFromEncryptedPrefs(): VaultRecord {
+        val permDone = prefs.getBoolean(KEY_PERMISSIONS_COMPLETED, false)
+        val savedSensitivity = prefs.getFloat(KEY_ORB_DRAG_SENSITIVITY, DEFAULT_SENSITIVITY)
+            .coerceIn(MIN_SENSITIVITY, MAX_SENSITIVITY)
+        val encryptedStr = prefs.getString(KEY_ENCRYPTED_VAULT, null)
+        val ivStr = prefs.getString(KEY_VAULT_IV, null)
+
+        if (encryptedStr.isNullOrBlank()) {
             return VaultRecord(
-                masterPin = prefs.getString(KEY_PLAIN_PIN, "") ?: "",
-                secretVoiceUnlockWord = prefs.getString(KEY_VOICE_UNLOCK, "Jarvis unlock") ?: "Jarvis unlock",
-                permissionsCompleted = prefs.getBoolean(KEY_PERMISSIONS_COMPLETE, false),
-                orbDragSensitivity = prefs.getFloat(KEY_ORB_DRAG_SENSITIVITY, 0.5f)
+                masterPin = "",
+                lockScreenPattern = "",
+                appPasswords = emptyMap(),
+                permissionsCompleted = permDone,
+                orbDragSensitivity = savedSensitivity
             )
         }
-        return try {
-            VaultRecord.fromJson(JSONObject(raw))
-        } catch (e: Exception) {
-            Log.e(TAG, "Error parsing vault record: ${e.message}")
-            VaultRecord()
-        }
-    }
 
-    private fun saveVault(record: VaultRecord) {
-        _vaultState.value = record
-        prefs.edit()
-            .putString(KEY_ENCRYPTED_VAULT, record.toJson().toString())
-            .putString(KEY_PLAIN_PIN, record.masterPin)
-            .putString(KEY_VOICE_UNLOCK, record.secretVoiceUnlockWord)
-            .putBoolean(KEY_PERMISSIONS_COMPLETE, record.permissionsCompleted)
-            .putFloat(KEY_ORB_DRAG_SENSITIVITY, record.orbDragSensitivity)
-            .apply()
+        val secretKey = getOrCreateSecretKey()
+        if (secretKey != null && !ivStr.isNullOrBlank()) {
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                val iv = Base64.decode(ivStr, Base64.NO_WRAP)
+                val spec = GCMParameterSpec(128, iv)
+                cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
+                val decryptedBytes = cipher.doFinal(Base64.decode(encryptedStr, Base64.NO_WRAP))
+                val jsonStr = String(decryptedBytes, StandardCharsets.UTF_8)
+                val parsed = VaultRecord.fromJson(JSONObject(jsonStr))
+                return parsed.copy(
+                    masterPin = "",
+                    lockScreenPattern = "",
+                    appPasswords = emptyMap(),
+                    permissionsCompleted = parsed.permissionsCompleted || permDone,
+                    orbDragSensitivity = if (prefs.contains(KEY_ORB_DRAG_SENSITIVITY)) savedSensitivity else parsed.orbDragSensitivity
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Decryption fallback: ${e.message}")
+            }
+        }
+
+        return try {
+            val parsed = VaultRecord.fromJson(JSONObject(encryptedStr))
+            parsed.copy(
+                masterPin = "",
+                lockScreenPattern = "",
+                appPasswords = emptyMap(),
+                permissionsCompleted = parsed.permissionsCompleted || permDone,
+                orbDragSensitivity = if (prefs.contains(KEY_ORB_DRAG_SENSITIVITY)) savedSensitivity else parsed.orbDragSensitivity
+            )
+        } catch (_: Exception) {
+            VaultRecord(
+                masterPin = "",
+                lockScreenPattern = "",
+                appPasswords = emptyMap(),
+                permissionsCompleted = permDone,
+                orbDragSensitivity = savedSensitivity
+            )
+        }
     }
 }
 
-data class MagneticSnapResult(
+data class OrbSnapResult(
     val targetX: Float,
     val targetY: Float,
     val isSnapped: Boolean,
     val snappedEdge: String
 )
 
-/**
- * Encapsulates the draggable orb's state, including a `sensitivity` parameter to control
- * drag velocity and a snap-to-edge magnetic effect when moved near screen boundaries.
- */
 class DraggableOrbState(
     initialX: Float = 40f,
     initialY: Float = 80f,
-    sensitivity: Float = 0.5f,
+    sensitivity: Float = BiometricVaultManager.DEFAULT_SENSITIVITY,
     val edgeMarginPx: Float = 16f,
     val snapThresholdPx: Float = 96f
 ) {
-    var sensitivity: Float = sensitivity.coerceIn(0.1f, 1.0f)
-        set(value) {
-            field = value.coerceIn(0.1f, 1.0f)
-        }
-
     var offsetX: Float = initialX
     var offsetY: Float = initialY
-    var isDragging: Boolean = false
-    var isSnappedToEdge: Boolean = false
-    var snappedEdge: String = "NONE"
+    var sensitivity: Float = sensitivity.coerceIn(BiometricVaultManager.MIN_SENSITIVITY, BiometricVaultManager.MAX_SENSITIVITY)
+        set(value) {
+            field = value.coerceIn(BiometricVaultManager.MIN_SENSITIVITY, BiometricVaultManager.MAX_SENSITIVITY)
+        }
 
-    /**
-     * Drag velocity multiplier controlled directly by `sensitivity` (0.85x to 1.15x).
-     */
     val dragVelocityMultiplier: Float
-        get() = 0.85f + (sensitivity * 0.30f)
+        get() = (0.82f + (sensitivity * 0.43f)).coerceIn(0.80f, 1.25f)
 
-    /**
-     * Slop deadzone threshold in dp controlled by `sensitivity`.
-     */
     val slopThresholdDp: Float
-        get() = 36f - (sensitivity * 30f)
+        get() = (36f - (sensitivity * 30f)).coerceIn(6f, 34f)
 
-    /**
-     * Applies a raw drag delta scaled by `sensitivity` drag velocity and checks for
-     * proximity magnetic pull near screen boundaries.
-     */
     fun applyDragDelta(
         deltaX: Float,
         deltaY: Float,
         maxOffsetX: Float,
         maxOffsetY: Float,
         applyLiveMagneticPull: Boolean = true
-    ): MagneticSnapResult {
-        isDragging = true
-        val rawX = (offsetX + deltaX * dragVelocityMultiplier).coerceIn(0f, maxOffsetX)
-        val rawY = (offsetY + deltaY * dragVelocityMultiplier).coerceIn(0f, maxOffsetY)
+    ): OrbSnapResult {
+        val safeMaxX = maxOffsetX.coerceAtLeast(0f)
+        val safeMaxY = maxOffsetY.coerceAtLeast(0f)
+        val rawX = (offsetX + deltaX * dragVelocityMultiplier).coerceIn(0f, safeMaxX)
+        val rawY = (offsetY + deltaY * dragVelocityMultiplier).coerceIn(0f, safeMaxY)
 
         if (!applyLiveMagneticPull) {
             offsetX = rawX
             offsetY = rawY
-            isSnappedToEdge = false
-            snappedEdge = "NONE"
-            return MagneticSnapResult(offsetX, offsetY, false, "NONE")
+            return OrbSnapResult(offsetX, offsetY, false, "NONE")
         }
 
-        val leftTarget = edgeMarginPx.coerceAtMost(maxOffsetX)
-        val rightTarget = (maxOffsetX - edgeMarginPx).coerceAtLeast(0f)
-        val topTarget = edgeMarginPx.coerceAtMost(maxOffsetY)
-        val bottomTarget = (maxOffsetY - edgeMarginPx).coerceAtLeast(0f)
+        val leftTarget = edgeMarginPx.coerceAtMost(safeMaxX)
+        val rightTarget = (safeMaxX - edgeMarginPx).coerceAtLeast(0f)
 
-        val distLeft = kotlin.math.abs(rawX - leftTarget)
-        val distRight = kotlin.math.abs(rightTarget - rawX)
-        val distTop = kotlin.math.abs(rawY - topTarget)
-        val distBottom = kotlin.math.abs(bottomTarget - rawY)
-
-        // Soft magnetic attraction zone (within 45% of snapThresholdPx during active drag)
-        val livePullZone = snapThresholdPx * 0.45f
-        var pulledX = rawX
-        var pulledY = rawY
-        var edge: String? = null
-
-        if (distLeft <= livePullZone && distLeft <= distRight) {
-            pulledX = rawX + (leftTarget - rawX) * 0.35f
-            edge = "LEFT"
-        } else if (distRight <= livePullZone) {
-            pulledX = rawX + (rightTarget - rawX) * 0.35f
-            edge = "RIGHT"
+        var snappedEdge = "NONE"
+        var finalX = rawX
+        if (rawX <= snapThresholdPx) {
+            finalX = leftTarget
+            snappedEdge = "LEFT"
+        } else if (safeMaxX - rawX <= snapThresholdPx) {
+            finalX = rightTarget
+            snappedEdge = "RIGHT"
         }
 
-        if (distTop <= livePullZone && distTop <= distBottom) {
-            pulledY = rawY + (topTarget - rawY) * 0.35f
-            edge = if (edge != null) "${edge}_TOP" else "TOP"
-        } else if (distBottom <= livePullZone) {
-            pulledY = rawY + (bottomTarget - rawY) * 0.35f
-            edge = if (edge != null) "${edge}_BOTTOM" else "BOTTOM"
-        }
-
-        offsetX = pulledX.coerceIn(0f, maxOffsetX)
-        offsetY = pulledY.coerceIn(0f, maxOffsetY)
-        isSnappedToEdge = edge != null
-        snappedEdge = edge ?: "NONE"
-
-        return MagneticSnapResult(offsetX, offsetY, isSnappedToEdge, snappedEdge)
+        offsetX = finalX
+        offsetY = rawY
+        return OrbSnapResult(offsetX, offsetY, snappedEdge != "NONE", snappedEdge)
     }
 
-    /**
-     * Snaps the orb magnetically to the nearest boundary when released near screen edges.
-     */
     fun snapToEdgeIfNearBoundary(
         maxOffsetX: Float,
         maxOffsetY: Float,
         forceHorizontalDock: Boolean = true
-    ): MagneticSnapResult {
-        isDragging = false
-        val leftTarget = edgeMarginPx.coerceAtMost(maxOffsetX)
-        val rightTarget = (maxOffsetX - edgeMarginPx).coerceAtLeast(0f)
-        val topTarget = edgeMarginPx.coerceAtMost(maxOffsetY)
-        val bottomTarget = (maxOffsetY - edgeMarginPx).coerceAtLeast(0f)
+    ): OrbSnapResult {
+        val safeMaxX = maxOffsetX.coerceAtLeast(0f)
+        val safeMaxY = maxOffsetY.coerceAtLeast(0f)
+        val leftTarget = edgeMarginPx.coerceAtMost(safeMaxX)
+        val rightTarget = (safeMaxX - edgeMarginPx).coerceAtLeast(0f)
+        val topTarget = edgeMarginPx.coerceAtMost(safeMaxY)
+        val bottomTarget = (safeMaxY - edgeMarginPx).coerceAtLeast(0f)
 
         val distLeft = kotlin.math.abs(offsetX - leftTarget)
         val distRight = kotlin.math.abs(rightTarget - offsetX)
         val distTop = kotlin.math.abs(offsetY - topTarget)
         val distBottom = kotlin.math.abs(bottomTarget - offsetY)
 
-        var targetX = offsetX.coerceIn(0f, maxOffsetX)
-        var targetY = offsetY.coerceIn(0f, maxOffsetY)
-        var edge: String? = null
+        var targetX = offsetX.coerceIn(0f, safeMaxX)
+        var targetY = offsetY.coerceIn(0f, safeMaxY)
+        val edges = mutableListOf<String>()
 
-        if (distLeft <= snapThresholdPx && distLeft <= distRight) {
-            targetX = leftTarget
-            edge = "LEFT"
-        } else if (distRight <= snapThresholdPx) {
-            targetX = rightTarget
-            edge = "RIGHT"
-        } else if (forceHorizontalDock) {
+        if (forceHorizontalDock || distLeft <= snapThresholdPx || distRight <= snapThresholdPx) {
             if (distLeft <= distRight) {
                 targetX = leftTarget
-                edge = "LEFT"
+                edges.add("LEFT")
             } else {
                 targetX = rightTarget
-                edge = "RIGHT"
+                edges.add("RIGHT")
             }
         }
 
-        if (distTop <= snapThresholdPx && distTop <= distBottom) {
+        if (distTop <= snapThresholdPx) {
             targetY = topTarget
-            edge = if (edge != null) "${edge}_TOP" else "TOP"
+            edges.add("TOP")
         } else if (distBottom <= snapThresholdPx) {
             targetY = bottomTarget
-            edge = if (edge != null) "${edge}_BOTTOM" else "BOTTOM"
+            edges.add("BOTTOM")
         }
 
         offsetX = targetX
         offsetY = targetY
-        isSnappedToEdge = edge != null
-        snappedEdge = edge ?: "NONE"
-
-        return MagneticSnapResult(
-            targetX = offsetX,
-            targetY = offsetY,
-            isSnapped = isSnappedToEdge,
-            snappedEdge = snappedEdge
-        )
+        val edgeLabel = if (edges.isEmpty()) "NONE" else edges.joinToString("_")
+        return OrbSnapResult(offsetX, offsetY, edges.isNotEmpty(), edgeLabel)
     }
 }
 

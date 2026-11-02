@@ -1059,16 +1059,27 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     private var nativeSpeechRecognizer: SpeechRecognizer? = null
     private var isNativeRecognizerListening = false
+    private val _liveSessionStartCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val liveSessionStartCount: Int
+        get() = _liveSessionStartCount.get()
+
+    fun resetLiveSessionStartCountForTest() {
+        _liveSessionStartCount.set(0)
+    }
 
     init {
         instance = this
         com.omnivoice.agentfix.AgentBridge.appContext = context.applicationContext
         try {
             OmniAutonomousCoreEngine.initialize(context)
-            androidBridge.getAllContactsJson()
-            JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(context)
-            _smartContacts.value = SmartContactAndAppRegistry.getAllContacts(context)
         } catch (_: Exception) {
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                JarvisHandsFreeEngine.autoInjectBridgeContactsIfPermitted(context)
+                _smartContacts.value = SmartContactAndAppRegistry.getAllContacts(context)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -1186,6 +1197,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             return
         }
         _isSessionActive.value = true
+        _liveSessionStartCount.incrementAndGet()
         _isMicMuted.value = false
         _connectionState.value = LiveConnectionState.CONNECTING
         _liveUserTranscript.value = ""
@@ -1417,6 +1429,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      */
     fun ensureSessionAliveOnResume() {
         if (!_isSessionActive.value) return
+        val hasMicPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMicPerm) return
+
         JarvisHandsFreeEngine.setKeepAliveCarrierActive(true)
         try {
             outputAudioTrack?.play()
@@ -1425,8 +1443,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (outputPlaybackJob?.isActive != true) {
             start24kHzGaplessOutputQueue()
         }
-        if (micStreamingJob?.isActive != true) {
-            start16kHzMicrophonePcmStream()
+        if (!_isMicMuted.value && !isNativeRecognizerListening && micStreamingJob?.isActive != true) {
+            val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (_: Exception) { "" }
+            val hasCloudKey = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.startsWith("YOUR_")
+            if (!hasCloudKey && isNativeSpeechRecognitionAvailableSafe()) {
+                startNativeSpeechRecognizerLoop()
+            } else {
+                start16kHzMicrophonePcmStream()
+            }
         }
         if (inactivityTimerJob?.isActive != true) {
             start60SecondInactivityWatchdog()
@@ -2080,8 +2104,29 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         fnCall: JSONObject
     ) = withContext(Dispatchers.IO) {
         val callId = fnCall.optString("id", "call_${System.currentTimeMillis()}")
-        val fnName = fnCall.optString("name", "")
+        val rawFnName = fnCall.optString("name", "")
         val args = fnCall.optJSONObject("args") ?: JSONObject()
+        val activeUtterance = _liveUserTranscript.value.ifBlank {
+            com.omnivoice.agentfix.AgentSession.lastUserUtterance
+        }
+        val fnName = if (
+            com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(activeUtterance) &&
+            rawFnName in setOf(
+                "close_app",
+                "close_target_app",
+                "perform_gesture",
+                "control_any_app_with_accessibility",
+                "control_app_and_screen_ui",
+                "jarvis_hardware_and_screen_control",
+                "communicate_or_open_app",
+                "open_app"
+            )
+        ) {
+            Log.i(TAG, "Redirecting Live tool '$rawFnName' -> 'return_to_origin' for utterance '$activeUtterance'")
+            "return_to_origin"
+        } else {
+            rawFnName
+        }
 
         OmniAutonomousCoreEngine.resetInactivityTimer()
         _connectionState.value = LiveConnectionState.LIVE_EXECUTING_TOOL
@@ -2090,7 +2135,28 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         var verifiedToolOutcome: JarvisVerifiedToolOutcome? = null
         var customToolResponse: JSONObject? = null
 
-        val resultSummary = if (com.omnivoice.agentfix.ToolDispatcher.isAgentFixTool(fnName)) {
+        val resultSummary = if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context) &&
+            LockScreenUnlockManager.isBlockedWhenDeviceLocked(fnName)
+        ) {
+            val blockedMsg = "Blocked: '$fnName' cannot run while the phone is locked. Please unlock your phone using Android's standard lock screen."
+            customToolResponse = JSONObject().apply {
+                put("status", "BLOCKED")
+                put("ok", false)
+                put("executed", false)
+                put("errorCode", "DEVICE_LOCKED")
+                put("message", blockedMsg)
+                put("result", blockedMsg)
+            }
+            val card = LiveSlideUpCard(
+                functionName = fnName,
+                title = "BLOCKED • DEVICE LOCKED",
+                subtitle = blockedMsg,
+                appName = "Security",
+                isLaunchingApp = false
+            )
+            pushSlideUpCard(card)
+            blockedMsg
+        } else if (com.omnivoice.agentfix.ToolDispatcher.isAgentFixTool(fnName)) {
             val dispatched = toolDispatcher.dispatch(fnName, args, callId)
             customToolResponse = dispatched.toJson()
             val canonical = com.omnivoice.agentfix.ToolDispatcher.canonicalToolName(fnName)
@@ -2705,31 +2771,35 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 )
                 val card = LiveSlideUpCard(
                     functionName = fnName,
-                    title = "Shell Execution",
-                    subtitle = "Method: ${res.methodUsed} • Output: ${res.output.take(120)}",
-                    appName = "Terminal"
+                    title = "Shell Execution Blocked",
+                    subtitle = res.output,
+                    appName = "Security"
                 )
                 pushSlideUpCard(card)
                 customToolResponse = JSONObject().apply {
-                    put("ok", res.ok)
+                    put("status", "BLOCKED")
+                    put("ok", false)
+                    put("executed", false)
                     put("methodUsed", res.methodUsed)
                     put("output", res.output)
                     put("exitCode", res.exitCode)
                 }
-                "Executed shell command via ${res.methodUsed}: ${res.output}"
+                res.output
             }
 
             "unlock_phone_hands_free", "unlock_phone" -> {
                 val unlockRes = OsKernel.getInstance(context).unlockPhoneHandsFree()
                 val card = LiveSlideUpCard(
                     functionName = fnName,
-                    title = "Hands-Free Phone Unlock",
+                    title = "Hands-Free Unlock Blocked",
                     subtitle = unlockRes.output,
                     appName = "Security"
                 )
                 pushSlideUpCard(card)
                 customToolResponse = JSONObject().apply {
-                    put("ok", unlockRes.ok)
+                    put("status", "BLOCKED")
+                    put("ok", false)
+                    put("executed", false)
                     put("methodUsed", unlockRes.methodUsed)
                     put("output", unlockRes.output)
                 }
@@ -2757,30 +2827,36 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 val message = args.optString("message", args.optString("text", "")).trim()
                 val outcome = WhatsAppVoiceNoteController.getInstance(context).sendVoiceNote(
                     recipientName = recipient,
-                    spokenMessageText = message
+                    spokenMessage = message
                 )
                 val card = LiveSlideUpCard(
                     functionName = fnName,
-                    title = "WhatsApp Voice Note",
-                    subtitle = outcome.detail,
-                    appName = "WhatsApp"
+                    title = "WhatsApp Voice Note • ${outcome.method}",
+                    subtitle = outcome.message,
+                    appName = "WhatsApp",
+                    isLaunchingApp = false
                 )
                 pushSlideUpCard(card)
                 customToolResponse = JSONObject().apply {
                     put("status", if (outcome.ok) "SUCCESS" else "FAILED")
-                    put("message", outcome.detail)
+                    put("ok", outcome.ok)
+                    put("executed", outcome.ok)
+                    put("message", outcome.message)
                     put("method", outcome.method)
                 }
-                outcome.detail
+                outcome.message
             }
 
             "answer_incoming_call" -> {
                 val ansRes = AiCallSecretary.getInstance(context).answerAndScreenCall()
+                val msg = if (ansRes) "Call answered" else "Blocked: Unattended call answering is disabled for safety."
                 customToolResponse = JSONObject().apply {
-                    put("status", if (ansRes) "SUCCESS" else "FAILED")
-                    put("message", if (ansRes) "Call answered" else "No active call found")
+                    put("status", if (ansRes) "SUCCESS" else "BLOCKED")
+                    put("ok", ansRes)
+                    put("executed", ansRes)
+                    put("message", msg)
                 }
-                if (ansRes) "Incoming call answered by AI Call Secretary" else "No active incoming call detected"
+                msg
             }
 
             "end_incoming_call", "hangup_call" -> {
@@ -3093,21 +3169,26 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             com.omnivoice.agentfix.AgentSession.onUserUtterance(cleanUtterance)
         }
 
-        val finalSpokenReply = rawResult.spokenReply
-
-        // Speak & show the AI response IMMEDIATELY in parallel with executing device actions (< 5ms perceived latency!)
-        _liveAiTranscript.value = finalSpokenReply
-        _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
-        val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
-        ttsFallback?.onSpeechCompleted = {
-            _connectionState.value = LiveConnectionState.LIVE_LISTENING
-            if (_isSessionActive.value && !_isMicMuted.value && isNativeSpeechRecognitionAvailableSafe()) {
-                startNativeSpeechRecognizerLoop()
-            }
+        val requiresPostExecutionVerification = rawResult.tasksToExecute.any {
+            it.taskType == NluTaskType.OPEN_APP ||
+                (it.taskType == NluTaskType.CUSTOM_ANDROID_INTENT && it.target.equals("origin_task", ignoreCase = true))
         }
-        ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, detectedLang.ttsLocale)
+        var finalSpokenReply = rawResult.spokenReply
 
-        // Execute all explicit tasks in parallel right away
+        if (!requiresPostExecutionVerification) {
+            _liveAiTranscript.value = finalSpokenReply
+            _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
+            val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
+            ttsFallback?.onSpeechCompleted = {
+                _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                if (_isSessionActive.value && !_isMicMuted.value && isNativeSpeechRecognitionAvailableSafe()) {
+                    startNativeSpeechRecognizerLoop()
+                }
+            }
+            ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, detectedLang.ttsLocale)
+        }
+
+        // Execute all explicit tasks
         for (task in rawResult.tasksToExecute) {
             when (task.taskType) {
                 NluTaskType.OPEN_APP -> {
@@ -3241,6 +3322,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     when (task.target.lowercase()) {
                         "screenshot" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_screenshot", target = "screen", spokenResponse = finalSpokenReply))
                         "camera" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_photo", target = "camera", spokenResponse = finalSpokenReply))
+                        "origin_task" -> {
+                            val fnObj = JSONObject().apply {
+                                put("name", "return_to_origin")
+                                put("args", JSONObject())
+                            }
+                            executeLiveFunctionCallAndRespond(null, fnObj)
+                        }
                         "navigation" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "navigate", target = task.actionValue.lowercase(), parameters = mapOf("action" to task.actionValue.lowercase()), spokenResponse = finalSpokenReply))
                         else -> {
                             val fnObj = JSONObject().apply {
@@ -3254,6 +3342,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     }
                 }
             }
+        }
+
+        if (requiresPostExecutionVerification) {
+            val verifiedMsg = com.omnivoice.agentfix.UiTools.lastCanonicalResult?.message
+            if (!verifiedMsg.isNullOrBlank()) {
+                finalSpokenReply = verifiedMsg
+            }
+            _liveAiTranscript.value = finalSpokenReply
+            _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
+            val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
+            ttsFallback?.onSpeechCompleted = {
+                _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                if (_isSessionActive.value && !_isMicMuted.value && isNativeSpeechRecognitionAvailableSafe()) {
+                    startNativeSpeechRecognizerLoop()
+                }
+            }
+            ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, detectedLang.ttsLocale)
         }
 
         mainHandler.post {

@@ -424,6 +424,12 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             OmniAutonomousCoreEngine.resetInactivityTimer()
             return
         }
+        // Prevent duplicate listening session if already listening
+        if (_voiceState.value is VoiceState.ListeningForCommand ||
+            audioStateMachine.currentOwner.value == AudioPipelineOwner.STT_RECORDING
+        ) {
+            return
+        }
         _liveTranscription.value = ""
         _voiceState.value = VoiceState.ListeningForCommand()
         audioStateMachine.transitionTo(AudioPipelineOwner.STT_RECORDING)
@@ -540,6 +546,24 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         processUserCommand(commandText, null)
     }
 
+    fun executeDiagnosticTypedCommand(
+        commandText: String,
+        visibleHomeMode: Boolean = true,
+        coldStartTimeoutMs: Long = com.omnivoice.agentfix.UiTools.defaultColdStartTimeoutMs
+    ): com.omnivoice.agentfix.CanonicalAppLaunchResult {
+        _liveTranscription.value = commandText
+        if (commandText.isNotBlank()) {
+            com.omnivoice.agentfix.AgentSession.onUserUtterance(commandText)
+        }
+        val canonical = actionExecutor.executeDiagnosticTypedCommand(
+            commandText = commandText,
+            visibleHomeMode = visibleHomeMode,
+            coldStartTimeoutMs = coldStartTimeoutMs
+        )
+        _spokenResponse.value = canonical.message
+        return canonical
+    }
+
     private fun processUserCommand(speech: String, voiceAnalysis: MultimodalVoiceAnalysis? = null) {
         _voiceState.value = VoiceState.ProcessingAi(speech)
         _pendingQuery.value = speech
@@ -557,8 +581,8 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                 MultiEngineSpeechManager.isConversationalQuery(contextualSpeech)
             )
 
-            if (!isExplicitConversationOrUnclear) {
-                // 1. Check for matching custom routines first (backed by Room database)
+            if (!isExplicitConversationOrUnclear && !isDeviceLocked()) {
+                // 1. Check for matching custom routines first (backed by Room database) only when unlocked
                 val routine = routineManager.findMatchingRoutineFromDb(contextualSpeech)
                 if (routine != null) {
                     executeRoutine(routine)
@@ -612,6 +636,19 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                     lowerSpeech.contains("dp ") ||
                     lowerSpeech.contains("profile photo") ||
                     (voiceAnalysis?.deterministicTasks?.size ?: 0) > 1
+
+            if (isDeviceLocked() && LockScreenUnlockManager.isBlockedWhenDeviceLocked(action.action)) {
+                val blockedMsg = LanguageProcessor.formatReplyInLanguage(
+                    "Blocked: '${action.action}' cannot run while your phone is locked. Please unlock your phone using Android's standard lock screen.",
+                    "Blocked: Phone lock hone ki wajah se '${action.action}' nahi chal sakta. Pehle Android lock screen se phone unlock karein.",
+                    "بلاک: فون لاک ہونے کی وجہ سے یہ ایکشن نہیں چل سکتا۔ پہلے فون کو ان لاک کریں۔",
+                    lang
+                )
+                _voiceState.value = VoiceState.Error("Blocked While Locked", blockedMsg)
+                speakResponse(blockedMsg)
+                recordLog(action, isLocked = true, passed = false, summary = blockedMsg)
+                return@launch
+            }
 
             if (needsAutonomousMultiStepOrImage) {
                 val wavBytes = if (voiceAnalysis != null) null else sttManager.lastRecordedWavBytes.value
@@ -806,28 +843,28 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
         when (evalResult) {
             is VoiceVerificationResult.Success -> {
-                val successMsg = LanguageProcessor.formatReplyInLanguage(
-                    "Identity verified.",
-                    "Aapki pehchan tasdeeq ho gayi hai.",
-                    "آپ کی شناخت کی تصدیق ہو گئی ہے۔",
-                    _detectedLanguage.value
-                )
-                speakResponse(successMsg) {
-                    viewModelScope.launch {
-                        val pin = _storedPin.value.ifBlank { null }
-                        unlockManager.attemptUnlock(pin)
-
-                        if (action.confirmationRequired) {
-                            _voiceState.value = VoiceState.ConfirmingAction(action, action.spokenResponse)
-                            speakResponse(action.spokenResponse) {
-                                viewModelScope.launch {
-                                    delay(400)
-                                    audioStateMachine.transitionTo(AudioPipelineOwner.STT_RECORDING)
-                                }
+                viewModelScope.launch {
+                    unlockManager.attemptUnlock(null)
+                    if (isDeviceLocked() && LockScreenUnlockManager.isBlockedWhenDeviceLocked(action.action)) {
+                        val lockedMsg = LanguageProcessor.formatReplyInLanguage(
+                            "Identity verified, but your phone is still locked. Private actions are blocked until you unlock Android's standard lock screen.",
+                            "Pehchan tasdeeq ho gayi, lekin phone abhi bhi lock hai. Private actions ke liye pehle phone unlock karein.",
+                            "شناخت کی تصدیق ہو گئی لیکن فون ابھی بھی لاک ہے۔ پرائیویٹ ایکشنز کے لیے پہلے فون ان لاک کریں۔",
+                            _detectedLanguage.value
+                        )
+                        _voiceState.value = VoiceState.Error("Blocked While Locked", lockedMsg)
+                        speakResponse(lockedMsg)
+                        recordLog(action, isLocked = true, passed = false, summary = lockedMsg)
+                    } else if (action.confirmationRequired) {
+                        _voiceState.value = VoiceState.ConfirmingAction(action, action.spokenResponse)
+                        speakResponse(action.spokenResponse) {
+                            viewModelScope.launch {
+                                delay(400)
+                                audioStateMachine.transitionTo(AudioPipelineOwner.STT_RECORDING)
                             }
-                        } else {
-                            executeAndCompleteAction(action, isLockedState = true)
                         }
+                    } else {
+                        executeAndCompleteAction(action, isLockedState = isDeviceLocked())
                     }
                 }
             }
@@ -962,10 +999,10 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         val result = actionExecutor.execute(action)
         when (result) {
             is ExecutionResult.Success -> {
-                val spoken = action.spokenResponse.ifBlank { result.message }
+                val spoken = result.message.ifBlank { action.spokenResponse }
                 speakResponse(spoken)
                 _voiceState.value = VoiceState.Idle
-                recordLog(action, isLocked = isLockedState, passed = true, summary = result.message)
+                recordLog(action, isLocked = isLockedState, passed = true, summary = spoken)
             }
             is ExecutionResult.Failure -> {
                 speakResponse(result.error)
@@ -1123,8 +1160,10 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         speakResponse("Security passphrase successfully saved.")
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun setStoredUnlockPin(pin: String) {
-        _storedPin.value = pin
+        // Phase 01 Security Policy: Device PIN collection, storage, and replay are disabled
+        _storedPin.value = ""
     }
 
     fun enrollVoiceSamples(samples: List<ShortArray>) {
@@ -1371,13 +1410,18 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         sttManager.stopListening()
         ttsManager.stop()
         OmniAutonomousCoreEngine.resetInactivityTimer()
+        if (isLiveSessionActive.value && operatingMode.value != OmniOperatingMode.STATE_SLEEP_STANDBY) {
+            return
+        }
         omniLiveEngine.selectVoice(voice)
         omniLiveEngine.startLiveSession()
     }
 
     fun endGeminiLiveSession() {
         omniLiveEngine.endLiveSession()
-        WakeWordForegroundService.resume(context)
+        if (_isHandsFreeAlwaysOn.value || WakeWordForegroundService.isServiceActive.value) {
+            WakeWordForegroundService.resume(context)
+        }
     }
 
     fun wakeUpAssistantFromStandby() {
@@ -1500,7 +1544,10 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun syncAndroidPhoneContacts(): Int {
-        return omniLiveEngine.syncAndroidPhoneContacts().size
+        viewModelScope.launch(Dispatchers.IO) {
+            omniLiveEngine.syncAndroidPhoneContacts()
+        }
+        return smartContacts.value.size
     }
 
     fun importVCardContacts(vcfText: String): Int {
