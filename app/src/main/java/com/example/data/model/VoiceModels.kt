@@ -26,6 +26,7 @@ sealed class VoiceState {
     data class ConfirmingAction(val action: VoiceAction, val question: String) : VoiceState()
     data class ExecutingAction(val action: VoiceAction) : VoiceState()
     data class Speaking(val text: String) : VoiceState()
+    data class RequestedUnverified(val message: String, val reasonCode: String = "") : VoiceState()
     data class Error(val message: String, val recoverySuggestion: String = "") : VoiceState()
 }
 

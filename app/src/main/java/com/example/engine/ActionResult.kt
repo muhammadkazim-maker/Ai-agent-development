@@ -36,6 +36,11 @@ import java.util.concurrent.ConcurrentHashMap
  */
 sealed class ActionResult {
     data class Success(val detail: String) : ActionResult()
+    data class RequestedUnverified(
+        val detail: String,
+        val reasonCode: String = "",
+        val observedPackage: String? = null
+    ) : ActionResult()
     data class Failed(val reason: String) : ActionResult()
     data class NeedsPermission(val name: String, val instructions: String = "") : ActionResult()
     data class NeedsConfirmation(val msg: String, val actionId: String = "") : ActionResult()
@@ -52,6 +57,14 @@ sealed class ActionResult {
                     put("verified", true)
                     put("detail", r.detail)
                     put("llmInstruction", "Task verified as Success. Confirm to the user in their spoken language: ${r.detail}")
+                }
+                is RequestedUnverified -> {
+                    put("status", "Requested/Unverified")
+                    put("verified", false)
+                    put("detail", r.detail)
+                    if (r.reasonCode.isNotBlank()) put("reasonCode", r.reasonCode)
+                    if (!r.observedPackage.isNullOrBlank()) put("observedPackage", r.observedPackage)
+                    put("llmInstruction", "Task outcome is Requested/Unverified. NEVER claim completion or say 'ho gaya'. Report the exact status: ${r.detail}")
                 }
                 is Failed -> {
                     put("status", "Failed")
@@ -80,6 +93,11 @@ sealed class ActionResult {
     fun toExecutionResult(): ExecutionResult {
         return when (this) {
             is Success -> ExecutionResult.Success(detail)
+            is RequestedUnverified -> ExecutionResult.RequestedUnverified(
+                message = detail,
+                reasonCode = reasonCode,
+                observedPackage = observedPackage
+            )
             is Failed -> ExecutionResult.Failure(reason)
             is NeedsPermission -> ExecutionResult.Failure(
                 "Missing permission: $name. ${instructions.ifBlank { "Please enable $name in Onboarding/Diagnostics." }}"

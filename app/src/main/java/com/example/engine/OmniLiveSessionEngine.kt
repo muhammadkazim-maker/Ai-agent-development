@@ -56,6 +56,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URLEncoder
+import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -838,6 +839,59 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     @Volatile
     private var visionStreamedFrameCount: Long = 0L
 
+    @Volatile
+    var activeCommandId: String = ""
+        private set
+
+    @Volatile
+    var lastCompletedCommandId: String = ""
+        private set
+
+    @Volatile
+    var lastFinalStatusForCurrentCommand: String = ""
+        private set
+
+    @Volatile
+    var lastSpokenReplyForCurrentCommand: String = ""
+        private set
+
+    @Volatile
+    private var awaitingVerifiedToolOutcome: Boolean = false
+
+    fun startNewCommandTurn(
+        commandId: String = "cmd_${System.currentTimeMillis()}_${(1000..9999).random()}",
+        utterance: String = ""
+    ): String {
+        activeCommandId = commandId
+        awaitingVerifiedToolOutcome = false
+        com.omnivoice.agentfix.DuplicateCallGuard.clear()
+        clearPlaybackQueueAndStopImmediately()
+        if (utterance.isNotBlank()) {
+            _liveUserTranscript.value = utterance
+            com.omnivoice.agentfix.AgentSession.onUserUtterance(utterance)
+        }
+        return commandId
+    }
+
+    fun isCompletionClaimBeforeVerifiedResult(text: String): Boolean {
+        val norm = text.trim().lowercase(Locale.ROOT)
+        if (norm.isEmpty()) return false
+        val hasCompletionPhrase = norm.contains("ho gaya") ||
+            norm.contains("hogaya") ||
+            norm.contains("kar diya") ||
+            norm.contains("kardiya") ||
+            norm.contains("khol diya") ||
+            norm.contains("khul gaya") && !norm.contains("confirm nahin hua") ||
+            norm.contains("wapas aa gaye") ||
+            norm.contains("kaam ho gaya") ||
+            norm.contains("done") && !norm.contains("not")
+        if (!hasCompletionPhrase) return false
+        val isVerifiedForCurrentCommand = activeCommandId.isNotBlank() &&
+            lastCompletedCommandId == activeCommandId &&
+            lastFinalStatusForCurrentCommand.equals("VERIFIED", ignoreCase = true)
+        return awaitingVerifiedToolOutcome || !isVerifiedForCurrentCommand
+    }
+
     fun toggleScreenVision(): Boolean {
         val newState = !_isScreenVisionActive.value
         setScreenVisionActive(newState)
@@ -1566,7 +1620,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         OmniAutonomousCoreEngine.resetInactivityTimer()
         OmniAutonomousCoreEngine.analyzeUserMood(trimmed, _inputAudioRms.value)
-        com.omnivoice.agentfix.AgentSession.onUserUtterance(trimmed)
+        val turnCommandId = startNewCommandTurn(utterance = trimmed)
 
         _liveUserTranscript.value = trimmed
         _liveAiTranscript.value = ""
@@ -1587,7 +1641,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             bridge = androidBridge,
             actionExecutor = actionExecutor,
             onAutoResumeCompleted = { _, resumed ->
-                _liveAiTranscript.value = resumed
+                if (activeCommandId == turnCommandId) {
+                    _liveAiTranscript.value = resumed
+                }
             }
         )
         if (prerequisiteReply != null) {
@@ -1604,7 +1660,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         val ws = activeWebSocket
         if (instantDeviceTasks.isNotEmpty() || ws == null || !isWebSocketReady.get() || !OmniAutonomousCoreEngine.refreshOnlineState(context)) {
             scope.launch {
-                processFallbackLiveTurn(trimmed, null)
+                processFallbackLiveTurn(trimmed, null, turnCommandId)
             }
         } else {
             val clientContentMsg = JSONObject().apply {
@@ -1713,6 +1769,16 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 return
             }
 
+            val hasEmbeddedToolCall = root.optJSONObject("toolCall") != null ||
+                root.optJSONObject("serverContent")?.optJSONObject("toolCall") != null ||
+                (root.optJSONObject("serverContent")?.optJSONObject("modelTurn")?.optJSONArray("parts")?.let { partsArr ->
+                    (0 until partsArr.length()).any { idx -> partsArr.optJSONObject(idx)?.optJSONObject("functionCall") != null }
+                } == true)
+            if (hasEmbeddedToolCall) {
+                awaitingVerifiedToolOutcome = true
+                clearPlaybackQueueAndStopImmediately()
+            }
+
             // 2. serverContent (Audio output, input/output transcriptions, interruption, turnComplete)
             val serverContent = root.optJSONObject("serverContent")
             if (serverContent != null) {
@@ -1742,13 +1808,25 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 if (outputTrans != null) {
                     val aiChunk = outputTrans.optString("text", "")
                     if (aiChunk.isNotEmpty()) {
-                        if (_liveAiTranscript.value.contains("Live Connected") ||
+                        val candidateTranscript = if (_liveAiTranscript.value.contains("Live Connected") ||
                             _liveAiTranscript.value.contains("Live Active") ||
                             _liveAiTranscript.value.startsWith("Connecting")
                         ) {
-                            _liveAiTranscript.value = aiChunk.trimStart()
+                            aiChunk.trimStart()
                         } else {
-                            _liveAiTranscript.value = _liveAiTranscript.value + aiChunk
+                            _liveAiTranscript.value + aiChunk
+                        }
+                        if (isCompletionClaimBeforeVerifiedResult(aiChunk) || isCompletionClaimBeforeVerifiedResult(candidateTranscript)) {
+                            clearPlaybackQueueAndStopImmediately()
+                            if (lastCompletedCommandId == activeCommandId &&
+                                lastFinalStatusForCurrentCommand.isNotBlank() &&
+                                !lastFinalStatusForCurrentCommand.equals("VERIFIED", ignoreCase = true) &&
+                                lastSpokenReplyForCurrentCommand.isNotBlank()
+                            ) {
+                                _liveAiTranscript.value = lastSpokenReplyForCurrentCommand
+                            }
+                        } else {
+                            _liveAiTranscript.value = candidateTranscript
                         }
                     }
                 }
@@ -1762,7 +1840,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                         // Inline 24kHz PCM native audio chunk
                         val inlineData = part.optJSONObject("inlineData")
-                        if (inlineData != null) {
+                        if (inlineData != null && !awaitingVerifiedToolOutcome) {
                             val mimeType = inlineData.optString("mimeType", "")
                             val base64Audio = inlineData.optString("data", "")
                             if (mimeType.startsWith("audio/pcm") && base64Audio.isNotEmpty()) {
@@ -1776,13 +1854,27 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         val isThought = part.optBoolean("thought", false)
                         val partText = part.optString("text", "")
                         if (!isThought && partText.isNotEmpty()) {
-                            if (_liveAiTranscript.value.contains("Live Connected") ||
+                            val candidateText = if (_liveAiTranscript.value.contains("Live Connected") ||
                                 _liveAiTranscript.value.contains("Live Active") ||
                                 _liveAiTranscript.value.startsWith("Connecting")
                             ) {
-                                _liveAiTranscript.value = partText
+                                partText
                             } else if (!_liveAiTranscript.value.contains(partText)) {
-                                _liveAiTranscript.value = (_liveAiTranscript.value + partText).trim()
+                                (_liveAiTranscript.value + partText).trim()
+                            } else {
+                                _liveAiTranscript.value
+                            }
+                            if (isCompletionClaimBeforeVerifiedResult(partText) || isCompletionClaimBeforeVerifiedResult(candidateText)) {
+                                clearPlaybackQueueAndStopImmediately()
+                                if (lastCompletedCommandId == activeCommandId &&
+                                    lastFinalStatusForCurrentCommand.isNotBlank() &&
+                                    !lastFinalStatusForCurrentCommand.equals("VERIFIED", ignoreCase = true) &&
+                                    lastSpokenReplyForCurrentCommand.isNotBlank()
+                                ) {
+                                    _liveAiTranscript.value = lastSpokenReplyForCurrentCommand
+                                }
+                            } else {
+                                _liveAiTranscript.value = candidateText
                             }
                         }
 
@@ -2102,10 +2194,42 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     private suspend fun executeLiveFunctionCallAndRespond(
         webSocket: WebSocket?,
         fnCall: JSONObject
-    ) = withContext(Dispatchers.IO) {
+    ): JSONObject = withContext(Dispatchers.IO) {
         val callId = fnCall.optString("id", "call_${System.currentTimeMillis()}")
+        val explicitCommandId = fnCall.optString("commandId", "").trim()
         val rawFnName = fnCall.optString("name", "")
         val args = fnCall.optJSONObject("args") ?: JSONObject()
+
+        // Reject late callback from a previous command ID before executing or announcing anything
+        if (explicitCommandId.isNotEmpty() && activeCommandId.isNotEmpty() && explicitCommandId != activeCommandId) {
+            Log.w(TAG, "Ignoring late callback for stale commandId=$explicitCommandId (activeCommandId=$activeCommandId, fn=$rawFnName)")
+            val stalePayload = JSONObject().apply {
+                put("id", callId)
+                put("commandId", explicitCommandId)
+                put("activeCommandId", activeCommandId)
+                put("status", "STALE_COMMAND_IGNORED")
+                put("canonicalStatus", "Requested/Unverified")
+                put("ok", false)
+                put("verified", false)
+                put("executed", false)
+                put("message", "Ignored late callback from previous command '$explicitCommandId'.")
+                put("result", "Ignored late callback from previous command '$explicitCommandId'.")
+            }
+            return@withContext JSONObject().apply {
+                put("id", callId)
+                put("name", rawFnName)
+                put("response", JSONObject().put("result", stalePayload))
+            }
+        }
+
+        val commandId = when {
+            explicitCommandId.isNotEmpty() -> explicitCommandId
+            activeCommandId.isNotEmpty() -> activeCommandId
+            else -> callId.also { activeCommandId = it }
+        }
+        awaitingVerifiedToolOutcome = true
+        clearPlaybackQueueAndStopImmediately()
+
         val activeUtterance = _liveUserTranscript.value.ifBlank {
             com.omnivoice.agentfix.AgentSession.lastUserUtterance
         }
@@ -2131,10 +2255,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         OmniAutonomousCoreEngine.resetInactivityTimer()
         _connectionState.value = LiveConnectionState.LIVE_EXECUTING_TOOL
-        Log.d(TAG, "Executing Gemini Live function call: $fnName with args=$args")
+        Log.d(TAG, "Executing Gemini Live function call: $fnName (callId=$callId, commandId=$commandId) with args=$args")
 
         var verifiedToolOutcome: JarvisVerifiedToolOutcome? = null
         var customToolResponse: JSONObject? = null
+        var pendingCard: LiveSlideUpCard? = null
 
         val resultSummary = if (LockScreenUnlockManager.isDeviceCurrentlyLocked(context) &&
             LockScreenUnlockManager.isBlockedWhenDeviceLocked(fnName)
@@ -2155,7 +2280,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 appName = "Security",
                 isLaunchingApp = false
             )
-            pushSlideUpCard(card)
+            pendingCard = card
             blockedMsg
         } else if (com.omnivoice.agentfix.ToolDispatcher.isAgentFixTool(fnName)) {
             val dispatched = toolDispatcher.dispatch(fnName, args, callId)
@@ -2168,7 +2293,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 appName = canonical,
                 isLaunchingApp = dispatched.ok && dispatched.verified
             )
-            pushSlideUpCard(card)
+            pendingCard = card
             dispatched.message
         } else when (fnName) {
             "generate_and_use_ai_image", "generate_ai_image_and_apply" -> {
@@ -2269,13 +2394,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     customToolResponse = launchRes.toToolResult("communicate_or_open_app").toJson()
                     val card = LiveSlideUpCard(
                         functionName = fnName,
-                        title = launchRes.resolvedLabel ?: targetApp,
+                        title = "${launchRes.resolvedLabel ?: targetApp} • ${launchRes.status.wireName}",
                         subtitle = launchRes.message,
                         appName = launchRes.resolvedLabel ?: targetApp,
                         targetPackage = launchRes.resolvedPackage.orEmpty(),
                         isLaunchingApp = launchRes.ok && launchRes.verified
                     )
-                    pushSlideUpCard(card)
+                    pendingCard = card
                     launchRes.message
                 } else {
                     val (summary, uri) = executeLiveCommunicationOrApp(
@@ -2283,15 +2408,25 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         contactOrAppName = contactOrAppName,
                         messageOrQuery = messageOrQuery
                     )
+                    customToolResponse = JSONObject().apply {
+                        put("status", "REQUESTED_UNVERIFIED")
+                        put("canonicalStatus", "Requested/Unverified")
+                        put("ok", false)
+                        put("verified", false)
+                        put("executed", false)
+                        put("message", summary)
+                        put("result", summary)
+                        put("deepLinkUri", uri)
+                    }
                     val card = LiveSlideUpCard(
                         functionName = fnName,
-                        title = contactOrAppName.ifBlank { actionType.replace("_", " ").uppercase() },
+                        title = "${contactOrAppName.ifBlank { actionType.replace("_", " ").uppercase() }} • Requested/Unverified",
                         subtitle = summary,
                         deepLinkUri = uri,
                         appName = contactOrAppName.ifBlank { "App" },
-                        isLaunchingApp = true
+                        isLaunchingApp = false
                     )
-                    pushSlideUpCard(card)
+                    pendingCard = card
                     summary
                 }
             }
@@ -2441,13 +2576,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     customToolResponse = launchRes.toToolResult(fnName).toJson()
                     val card = LiveSlideUpCard(
                         functionName = fnName,
-                        title = "Accessibility Control → ${launchRes.resolvedLabel ?: appName}",
+                        title = "Accessibility Control → ${launchRes.resolvedLabel ?: appName} • ${launchRes.status.wireName}",
                         subtitle = launchRes.message,
                         appName = launchRes.resolvedLabel ?: appName,
                         targetPackage = launchRes.resolvedPackage.orEmpty(),
                         isLaunchingApp = launchRes.ok && launchRes.verified
                     )
-                    pushSlideUpCard(card)
+                    pendingCard = card
                     launchRes.message
                 } else {
                     val accessOutcome = JarvisHandsFreeEngine.executeControlAnyAppWithAccessibility(
@@ -2469,7 +2604,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         targetPackage = accessOutcome.targetPackage,
                         isLaunchingApp = accessOutcome.executed
                     )
-                    pushSlideUpCard(card)
+                    pendingCard = card
                     accessOutcome.message
                 }
             }
@@ -2502,7 +2637,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         targetPackage = launchRes.resolvedPackage.orEmpty(),
                         isLaunchingApp = launchRes.ok && launchRes.verified
                     )
-                    pushSlideUpCard(card)
+                    pendingCard = card
                     launchRes.message
                 } else {
                     val outcome = JarvisHandsFreeEngine.executeJarvisAppCommander(
@@ -2955,16 +3090,106 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             delay(35)
         }
 
-        val resultPayload = customToolResponse ?: verifiedToolOutcome?.toJsonObject() ?: JSONObject().apply {
-            put("result", resultSummary)
-            put("status", "SUCCESS")
-            put("executed", true)
+        // Check again if a newer command superseded this commandId while the tool was executing
+        if (activeCommandId.isNotEmpty() && commandId != activeCommandId) {
+            Log.w(TAG, "Discarding late tool completion for commandId=$commandId because activeCommandId=$activeCommandId")
+            val stalePayload = JSONObject().apply {
+                put("id", callId)
+                put("commandId", commandId)
+                put("activeCommandId", activeCommandId)
+                put("status", "STALE_COMMAND_IGNORED")
+                put("canonicalStatus", "Requested/Unverified")
+                put("ok", false)
+                put("verified", false)
+                put("executed", false)
+                put("message", "Ignored late callback from previous command '$commandId'.")
+                put("result", "Ignored late callback from previous command '$commandId'.")
+            }
+            return@withContext JSONObject().apply {
+                put("id", callId)
+                put("name", fnName)
+                put("response", JSONObject().put("result", stalePayload))
+            }
         }
+
+        // NEVER fall back to automatic status="SUCCESS" / executed=true for action tools without a verified outcome!
+        val resultPayload = (customToolResponse ?: verifiedToolOutcome?.toJsonObject() ?: JSONObject().apply {
+            put("result", resultSummary)
+            put("message", resultSummary)
+            put("status", "REQUESTED_UNVERIFIED")
+            put("canonicalStatus", "Requested/Unverified")
+            put("ok", false)
+            put("verified", false)
+            put("executed", false)
+        }).apply {
+            put("id", callId)
+            put("commandId", commandId)
+            if (!has("result")) put("result", resultSummary)
+            if (!has("message")) put("message", resultSummary)
+            val rawStatus = optString("canonicalStatus", optString("status", "REQUESTED_UNVERIFIED"))
+            val isVerifiedOutcome = (optBoolean("verified", false) || optBoolean("executed", false) && verifiedToolOutcome != null) &&
+                (rawStatus.equals("VERIFIED", ignoreCase = true) || rawStatus.equals("SUCCESS", ignoreCase = true))
+            val normalizedFinalStatus = when {
+                isVerifiedOutcome -> "VERIFIED"
+                rawStatus.equals("Requested/Unverified", ignoreCase = true) ||
+                    rawStatus.equals("REQUESTED_UNVERIFIED", ignoreCase = true) ||
+                    rawStatus.equals("SUCCESS", ignoreCase = true) && !isVerifiedOutcome -> "REQUESTED_UNVERIFIED"
+                rawStatus.equals("MissingApp", ignoreCase = true) ||
+                    rawStatus.equals("MISSING_APP", ignoreCase = true) -> "MISSING_APP"
+                rawStatus.equals("NeedsSetup", ignoreCase = true) ||
+                    rawStatus.equals("NEEDS_SETUP", ignoreCase = true) -> "NEEDS_SETUP"
+                rawStatus.equals("Blocked", ignoreCase = true) ||
+                    rawStatus.equals("BLOCKED", ignoreCase = true) -> "BLOCKED"
+                else -> rawStatus.uppercase(Locale.ROOT)
+            }
+            put("finalStatus", normalizedFinalStatus)
+            put("verified", isVerifiedOutcome)
+            put("ok", isVerifiedOutcome)
+            put("executed", isVerifiedOutcome)
+            if (!isVerifiedOutcome && optString("status").equals("SUCCESS", ignoreCase = true)) {
+                put("status", "REQUESTED_UNVERIFIED")
+                put("canonicalStatus", "Requested/Unverified")
+            }
+        }
+
+        val finalStatusForTurn = resultPayload.optString("finalStatus", "REQUESTED_UNVERIFIED")
+        val finalMessageForTurn = resultPayload.optString("message", resultSummary).ifBlank { resultSummary }
+
+        lastCompletedCommandId = commandId
+        lastFinalStatusForCurrentCommand = finalStatusForTurn
+        lastSpokenReplyForCurrentCommand = finalMessageForTurn
+        awaitingVerifiedToolOutcome = false
+
+        // Use the exact same final status and message for the on-screen slide-up card and live transcript
+        val synchronizedCard = (pendingCard ?: LiveSlideUpCard(
+            functionName = fnName,
+            title = "${fnName.replace("_", " ").uppercase(Locale.ROOT)} • $finalStatusForTurn",
+            subtitle = finalMessageForTurn,
+            appName = fnName,
+            isLaunchingApp = finalStatusForTurn == "VERIFIED"
+        )).let { card ->
+            val titleWithStatus = if (card.title.contains(finalStatusForTurn, ignoreCase = true) ||
+                (finalStatusForTurn == "REQUESTED_UNVERIFIED" && card.title.contains("Requested/Unverified", ignoreCase = true))
+            ) {
+                card.title
+            } else {
+                "${card.title} • $finalStatusForTurn"
+            }
+            card.copy(
+                title = titleWithStatus,
+                subtitle = finalMessageForTurn,
+                isLaunchingApp = finalStatusForTurn == "VERIFIED"
+            )
+        }
+        pushSlideUpCard(synchronizedCard)
+        _liveAiTranscript.value = finalMessageForTurn
+
         val responseJson = JSONObject().apply {
             put("result", resultPayload)
         }
         val singleFnResponse = JSONObject().apply {
             put("id", callId)
+            put("commandId", commandId)
             put("name", fnName)
             put("response", responseJson)
         }
@@ -3006,6 +3231,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message.ifBlank { "Flashlight turned ${if (isOn) "ON" else "OFF"}" }
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error.ifBlank { "Flashlight turned ${if (isOn) "ON" else "OFF"}" }
                 }
             }
@@ -3019,6 +3245,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message.ifBlank { "Opened Wi-Fi control panel" }
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error.ifBlank { "Opened Wi-Fi control panel" }
                 }
             }
@@ -3032,6 +3259,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message.ifBlank { "Opened Bluetooth control panel" }
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error.ifBlank { "Opened Bluetooth control panel" }
                 }
             }
@@ -3051,6 +3279,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message.ifBlank { "Adjusted device volume ($direction)" }
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error.ifBlank { "Adjusted device volume ($direction)" }
                 }
             }
@@ -3065,6 +3294,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message.ifBlank { "Set $feature for $effectiveVal" }
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error.ifBlank { "Set $feature for $effectiveVal" }
                 }
             }
@@ -3243,7 +3473,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     // =========================================================================
     // 5. HYBRID LIVE TURN FALLBACK & SUPER-AGI BRAIN EXECUTION
     // =========================================================================
-    private suspend fun processFallbackLiveTurn(textInput: String?, wavBytes: ByteArray?) {
+    private suspend fun processFallbackLiveTurn(
+        textInput: String?,
+        wavBytes: ByteArray?,
+        commandIdOverride: String? = null
+    ) {
         _connectionState.value = LiveConnectionState.CONNECTING
 
         val rawResult = if (!textInput.isNullOrBlank()) {
@@ -3269,19 +3503,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
 
         val cleanUtterance = rawResult.verbatimTranscript.ifBlank { textInput.orEmpty().trim() }
+        val turnCommandId = commandIdOverride?.takeIf { it.isNotBlank() }
+            ?: startNewCommandTurn(utterance = cleanUtterance)
         if (cleanUtterance.isNotBlank()) {
             _liveUserTranscript.value = cleanUtterance
             OmniAutonomousCoreEngine.analyzeUserMood(cleanUtterance, _inputAudioRms.value)
             com.omnivoice.agentfix.AgentSession.onUserUtterance(cleanUtterance)
         }
 
-        val requiresPostExecutionVerification = rawResult.tasksToExecute.any {
-            it.taskType == NluTaskType.OPEN_APP ||
-                (it.taskType == NluTaskType.CUSTOM_ANDROID_INTENT && it.target.equals("origin_task", ignoreCase = true))
-        }
-        var finalSpokenReply = rawResult.spokenReply
+        // Never speak a speculative "ho gaya" reply BEFORE action tasks execute and verify!
+        val hasActionTasks = rawResult.tasksToExecute.isNotEmpty()
+        var finalSpokenReply = if (hasActionTasks) "" else rawResult.spokenReply
 
-        if (!requiresPostExecutionVerification) {
+        if (!hasActionTasks) {
             _liveAiTranscript.value = finalSpokenReply
             _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
             val detectedLang = LanguageProcessor.detectLanguage(finalSpokenReply)
@@ -3294,11 +3528,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, detectedLang.ttsLocale)
         }
 
-        // Execute all explicit tasks
-        for (task in rawResult.tasksToExecute) {
-            when (task.taskType) {
+        // Execute all explicit tasks with turnCommandId correlation
+        var lastToolResponseMessage = ""
+        for ((idx, task) in rawResult.tasksToExecute.withIndex()) {
+            if (activeCommandId.isNotBlank() && activeCommandId != turnCommandId) {
+                Log.w(TAG, "Aborting remaining fallback tasks for superseded turnCommandId=$turnCommandId (active=$activeCommandId)")
+                return
+            }
+            val callId = "${turnCommandId}_step_${idx + 1}"
+            val singleResp: JSONObject? = when (task.taskType) {
                 NluTaskType.OPEN_APP -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "open_app")
                         put("args", JSONObject().apply {
                             put("app_name", task.target)
@@ -3309,6 +3551,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 NluTaskType.WHATSAPP_MESSAGE -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "whatsapp_send_message")
                         put("args", JSONObject().apply {
                             put("contact", task.target)
@@ -3320,6 +3564,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 NluTaskType.WHATSAPP_DELETE_MESSAGE -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "whatsapp_delete_message")
                         put("args", JSONObject().apply {
                             put("message_text", task.target.ifBlank { "last" })
@@ -3331,6 +3577,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 NluTaskType.WHATSAPP_CALL -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "whatsapp_call")
                         put("args", JSONObject().apply {
                             put("contact", task.target)
@@ -3342,6 +3590,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 NluTaskType.UI_CLICK -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "ui_click_text")
                         put("args", JSONObject().apply {
                             put("text", task.target)
@@ -3358,6 +3608,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         "display"
                     }
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "generate_and_use_ai_image")
                         put("args", JSONObject().apply {
                             put("prompt", task.actionValue)
@@ -3370,6 +3622,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 NluTaskType.FLASHLIGHT, NluTaskType.WIFI, NluTaskType.BLUETOOTH,
                 NluTaskType.VOLUME, NluTaskType.ALARM_TIMER, NluTaskType.SYSTEM_SETTING -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "control_phone_hardware")
                         put("args", JSONObject().apply {
                             put("feature", if (task.taskType == NluTaskType.SYSTEM_SETTING) task.target.lowercase() else task.taskType.name.lowercase())
@@ -3382,6 +3636,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 NluTaskType.PHONE_CALL -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "make_direct_phone_call")
                         put("args", JSONObject().apply {
                             put("contactName", task.target)
@@ -3392,6 +3648,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 NluTaskType.YOUTUBE_SEARCH -> {
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "play_video")
                         put("args", JSONObject().apply {
                             put("query", task.actionValue)
@@ -3404,6 +3662,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 NluTaskType.GOOGLE_SEARCH -> {
                     val targetPlatform = task.target.ifBlank { "google" }
                     val fnObj = JSONObject().apply {
+                        put("id", callId)
+                        put("commandId", turnCommandId)
                         put("name", "search_anything")
                         put("args", JSONObject().apply {
                             put("query", task.actionValue)
@@ -3414,30 +3674,64 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
 
                 NluTaskType.SMS -> {
-                    actionExecutor.execute(
+                    val res = actionExecutor.execute(
                         com.example.data.model.VoiceAction(
                             action = "send_sms",
                             target = task.target,
                             parameters = mapOf("contact_name" to task.target, "message" to task.actionValue),
-                            spokenResponse = finalSpokenReply
+                            spokenResponse = ""
                         )
                     )
+                    lastToolResponseMessage = when (res) {
+                        is ExecutionResult.Success -> res.message
+                        is ExecutionResult.RequestedUnverified -> res.message
+                        is ExecutionResult.Failure -> res.error
+                    }
+                    null
                 }
 
                 NluTaskType.CUSTOM_ANDROID_INTENT -> {
                     when (task.target.lowercase()) {
-                        "screenshot" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_screenshot", target = "screen", spokenResponse = finalSpokenReply))
-                        "camera" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_photo", target = "camera", spokenResponse = finalSpokenReply))
+                        "screenshot" -> {
+                            val res = actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_screenshot", target = "screen"))
+                            lastToolResponseMessage = when (res) {
+                                is ExecutionResult.Success -> res.message
+                                is ExecutionResult.RequestedUnverified -> res.message
+                                is ExecutionResult.Failure -> res.error
+                            }
+                            null
+                        }
+                        "camera" -> {
+                            val res = actionExecutor.execute(com.example.data.model.VoiceAction(action = "take_photo", target = "camera"))
+                            lastToolResponseMessage = when (res) {
+                                is ExecutionResult.Success -> res.message
+                                is ExecutionResult.RequestedUnverified -> res.message
+                                is ExecutionResult.Failure -> res.error
+                            }
+                            null
+                        }
                         "origin_task" -> {
                             val fnObj = JSONObject().apply {
+                                put("id", callId)
+                                put("commandId", turnCommandId)
                                 put("name", "return_to_origin")
                                 put("args", JSONObject())
                             }
                             executeLiveFunctionCallAndRespond(null, fnObj)
                         }
-                        "navigation" -> actionExecutor.execute(com.example.data.model.VoiceAction(action = "navigate", target = task.actionValue.lowercase(), parameters = mapOf("action" to task.actionValue.lowercase()), spokenResponse = finalSpokenReply))
+                        "navigation" -> {
+                            val res = actionExecutor.execute(com.example.data.model.VoiceAction(action = "navigate", target = task.actionValue.lowercase(), parameters = mapOf("action" to task.actionValue.lowercase())))
+                            lastToolResponseMessage = when (res) {
+                                is ExecutionResult.Success -> res.message
+                                is ExecutionResult.RequestedUnverified -> res.message
+                                is ExecutionResult.Failure -> res.error
+                            }
+                            null
+                        }
                         else -> {
                             val fnObj = JSONObject().apply {
+                                put("id", callId)
+                                put("commandId", turnCommandId)
                                 put("name", "open_app")
                                 put("args", JSONObject().apply {
                                     put("app_name", task.target.ifBlank { "settings" })
@@ -3448,12 +3742,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     }
                 }
             }
+            val msgFromResp = singleResp?.optJSONObject("response")?.optJSONObject("result")?.optString("message").orEmpty()
+            if (msgFromResp.isNotBlank()) {
+                lastToolResponseMessage = msgFromResp
+            }
         }
 
-        if (requiresPostExecutionVerification) {
-            val verifiedMsg = com.omnivoice.agentfix.UiTools.lastCanonicalResult?.message
-            if (!verifiedMsg.isNullOrBlank()) {
-                finalSpokenReply = verifiedMsg
+        // Ignore late completion if another command started while tasks were running
+        if (activeCommandId.isNotBlank() && activeCommandId != turnCommandId) {
+            return
+        }
+
+        if (hasActionTasks) {
+            finalSpokenReply = when {
+                lastCompletedCommandId == turnCommandId && lastSpokenReplyForCurrentCommand.isNotBlank() ->
+                    lastSpokenReplyForCurrentCommand
+                lastToolResponseMessage.isNotBlank() -> lastToolResponseMessage
+                else -> com.omnivoice.agentfix.UiTools.lastCanonicalResult?.message.orEmpty()
             }
             _liveAiTranscript.value = finalSpokenReply
             _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING

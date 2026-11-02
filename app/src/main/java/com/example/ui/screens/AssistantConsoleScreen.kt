@@ -300,6 +300,7 @@ fun AssistantConsoleScreen(
             is VoiceState.ConfirmingAction -> "Safety Check: Confirm with 'Yes / Haan' or 'No / Nahi'" to Color(0xFFF59E0B)
             is VoiceState.ExecutingAction -> "Executing phone action..." to EmeraldTertiary
             is VoiceState.Speaking -> "Speaking in ${detectedLanguage.label}..." to CyanPrimary
+            is VoiceState.RequestedUnverified -> "Requested/Unverified: ${(voiceState as VoiceState.RequestedUnverified).message}" to Color(0xFFF59E0B)
             is VoiceState.Error -> (voiceState as VoiceState.Error).message to Color(0xFFEF4444)
         }
 

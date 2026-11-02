@@ -72,8 +72,7 @@ data class CanonicalAppLaunchResult(
     val verificationNote: String
 ) {
     val ok: Boolean
-        get() = status == CanonicalAppLaunchStatus.VERIFIED ||
-            status == CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED
+        get() = status == CanonicalAppLaunchStatus.VERIFIED
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("canonicalStatus", status.wireName)
@@ -143,9 +142,14 @@ data class CanonicalAppLaunchResult(
 
     fun toExecutionResult(): com.example.engine.ExecutionResult {
         return when (status) {
-            CanonicalAppLaunchStatus.VERIFIED,
-            CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED ->
+            CanonicalAppLaunchStatus.VERIFIED ->
                 com.example.engine.ExecutionResult.Success(message)
+            CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED ->
+                com.example.engine.ExecutionResult.RequestedUnverified(
+                    message = message,
+                    reasonCode = reasonCode,
+                    observedPackage = observedPackage
+                )
             CanonicalAppLaunchStatus.MISSING_APP,
             CanonicalAppLaunchStatus.NEEDS_SETUP,
             CanonicalAppLaunchStatus.BLOCKED ->
@@ -155,9 +159,14 @@ data class CanonicalAppLaunchResult(
 
     fun toActionResult(): com.example.engine.ActionResult {
         return when (status) {
-            CanonicalAppLaunchStatus.VERIFIED,
-            CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED ->
+            CanonicalAppLaunchStatus.VERIFIED ->
                 com.example.engine.ActionResult.Success(message)
+            CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED ->
+                com.example.engine.ActionResult.RequestedUnverified(
+                    detail = message,
+                    reasonCode = reasonCode,
+                    observedPackage = observedPackage
+                )
             CanonicalAppLaunchStatus.NEEDS_SETUP ->
                 com.example.engine.ActionResult.NeedsConfirmation(
                     msg = message,
@@ -1781,8 +1790,8 @@ object UiTools {
                             draftPreserved = false,
                             restoredDrafts = observedDrafts,
                             reasonCode = "ORIGIN_DRAFT_MISMATCH",
-                            message = "Requested/Unverified: ${savedOrigin.appLabel} (${savedOrigin.packageName}, window='${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}') is in the foreground, but the saved draft ('${expectedDrafts.values.joinToString()}') could not be verified on screen (observed $observedDesc).",
-                            verificationNote = "Expected drafts=${expectedDrafts}, observed editable drafts=${observedDrafts}. Never claiming draft survival from package name alone."
+                            message = "${savedOrigin.appLabel} khul gaya hai, lekin purana draft confirm nahin hua.",
+                            verificationNote = "Expected drafts=${expectedDrafts}, observed $observedDesc. Never claiming draft survival from package name alone."
                         )
                     )
                 }
@@ -1833,11 +1842,33 @@ object UiTools {
             )
         }
 
+        val observedPkg = freshObs.observedPackage ?: returnedSnap?.packageName
+        val isHomeVisible = !observedPkg.isNullOrBlank() && isLauncherPackage(observedPkg)
         val observedSummary = if (returnedSnap != null) {
             "${returnedSnap.appLabel} (${returnedSnap.packageName}, window='${returnedSnap.activityComponent.ifBlank { returnedSnap.titleGuess }}')"
         } else {
-            freshObs.observedPackage ?: "none"
+            observedPkg ?: "none"
         }
+        if (isHomeVisible) {
+            return recordReturnDiagnostics(
+                callerToolName = callerToolName,
+                savedOrigin = savedOrigin,
+                result = CanonicalAppLaunchResult(
+                    status = CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED,
+                    requestedApp = "return_to_previous_app",
+                    resolvedPackage = savedOrigin.packageName,
+                    resolvedLabel = savedOrigin.appLabel,
+                    observedPackage = observedPkg,
+                    verified = false,
+                    launchMethod = navMethod,
+                    preservedOriginTask = savedOrigin,
+                    reasonCode = "HOME_SCREEN_VISIBLE",
+                    message = "Abhi Home screen khuli hai; pichli window par wapsi confirm nahin hui.",
+                    verificationNote = "Home launcher ($observedPkg) is visible instead of origin window (${savedOrigin.packageName})."
+                )
+            )
+        }
+
         return recordReturnDiagnostics(
             callerToolName = callerToolName,
             savedOrigin = savedOrigin,
@@ -1846,13 +1877,13 @@ object UiTools {
                 requestedApp = "return_to_previous_app",
                 resolvedPackage = savedOrigin.packageName,
                 resolvedLabel = savedOrigin.appLabel,
-                observedPackage = freshObs.observedPackage,
+                observedPackage = observedPkg,
                 verified = false,
                 launchMethod = navMethod,
                 preservedOriginTask = savedOrigin,
                 reasonCode = "RETURN_OBSERVATION_UNVERIFIED",
-                message = "Requested/Unverified: Attempted to return to ${savedOrigin.appLabel} (${savedOrigin.packageName}), but it was not observed in the foreground within ${coldStartTimeoutMs}ms (observed=$observedSummary).",
-                verificationNote = "Task-return navigation ($navMethod) dispatched; observedPackage=${freshObs.observedPackage ?: "null"}."
+                message = "Maine koshish ki, lekin wapsi confirm nahin hui.",
+                verificationNote = "Task-return navigation ($navMethod) timed out / unverified within ${coldStartTimeoutMs}ms (observed=$observedSummary, observedPackage=${observedPkg ?: "null"})."
             )
         )
     }

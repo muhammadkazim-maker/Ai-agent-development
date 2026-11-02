@@ -77,6 +77,7 @@ fun VoiceOrb(
         is VoiceState.ConfirmingAction -> listOf(Color(0xFFF59E0B), EmeraldTertiary, CyanPrimary)
         is VoiceState.ExecutingAction -> listOf(EmeraldTertiary, CyanPrimary, VioletSecondary)
         is VoiceState.Speaking -> listOf(VioletSecondary, WaveformViolet, CyanPrimary)
+        is VoiceState.RequestedUnverified -> listOf(Color(0xFFF59E0B), Color(0xFFD97706), VioletSecondary)
         is VoiceState.Error -> listOf(Color(0xFFEF4444), Color(0xFFDC2626), Color(0xFFB91C1C))
         else -> listOf(CyanPrimary.copy(alpha = 0.5f), VioletSecondary.copy(alpha = 0.4f))
     }

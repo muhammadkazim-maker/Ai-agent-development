@@ -661,7 +661,8 @@ object OmniAutonomousCoreEngine {
             if (offlineAction.action != "general_chat") {
                 val execResult = actionExecutor.execute(offlineAction)
                 return when (execResult) {
-                    is ExecutionResult.Success -> offlineAction.spokenResponse.ifBlank { execResult.message }
+                    is ExecutionResult.Success -> execResult.message.ifBlank { offlineAction.spokenResponse }
+                    is ExecutionResult.RequestedUnverified -> execResult.message
                     is ExecutionResult.Failure -> execResult.error
                 }
             }

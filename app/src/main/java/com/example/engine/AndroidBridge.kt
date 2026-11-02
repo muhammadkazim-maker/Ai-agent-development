@@ -654,6 +654,7 @@ class AndroidBridge(
             put("enabled", enabled)
             put("message", when (res) {
                 is ExecutionResult.Success -> res.message
+                is ExecutionResult.RequestedUnverified -> res.message
                 is ExecutionResult.Failure -> res.error
             })
         }.toString()
@@ -1236,6 +1237,7 @@ class AndroidBridge(
                 val res = actionExecutor.executeUpdateWhatsAppDp(imageUri)
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1253,6 +1255,7 @@ class AndroidBridge(
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1265,6 +1268,7 @@ class AndroidBridge(
                 val res = actionExecutor.execute(mappedVoiceAction)
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1286,6 +1290,7 @@ class AndroidBridge(
                 runAccessibilitySteps(steps)
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1305,6 +1310,7 @@ class AndroidBridge(
                 }
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1321,6 +1327,7 @@ class AndroidBridge(
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1372,6 +1379,7 @@ class AndroidBridge(
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1395,6 +1403,7 @@ class AndroidBridge(
                 val imgUri = params.optString("imageUri", params.optString("imageSource", value))
                 when (val res = actionExecutor.executeUpdateWhatsAppDp(imgUri)) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1406,6 +1415,7 @@ class AndroidBridge(
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1414,6 +1424,7 @@ class AndroidBridge(
                 val res = actionExecutor.execute(VoiceAction(action = "call", target = contact))
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1426,6 +1437,7 @@ class AndroidBridge(
                 )
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1440,6 +1452,7 @@ class AndroidBridge(
                 val res = actionExecutor.execute(VoiceAction(action = "open_app", target = target))
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1447,6 +1460,7 @@ class AndroidBridge(
                 val res = actionExecutor.execute(VoiceAction(action = "read_notifications", target = target.ifBlank { "all" }))
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }
@@ -1455,6 +1469,7 @@ class AndroidBridge(
                 val res = actionExecutor.execute(voiceAction)
                 when (res) {
                     is ExecutionResult.Success -> res.message
+                    is ExecutionResult.RequestedUnverified -> res.message
                     is ExecutionResult.Failure -> res.error
                 }
             }

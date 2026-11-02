@@ -109,10 +109,15 @@ class ActionExecutor(private val context: Context) {
                     val res = kotlinx.coroutines.runBlocking {
                         dispatcher.dispatchMap(action.action, params)
                     }
-                    if (res.ok && res.verified) {
-                        ExecutionResult.Success(res.message)
-                    } else {
-                        ExecutionResult.Failure(res.message)
+                    when {
+                        res.ok && res.verified -> ExecutionResult.Success(res.message)
+                        res.status.equals("Requested/Unverified", ignoreCase = true) ||
+                            res.status.equals("REQUESTED_UNVERIFIED", ignoreCase = true) ->
+                            ExecutionResult.RequestedUnverified(
+                                message = res.message,
+                                reasonCode = res.errorCode.orEmpty()
+                            )
+                        else -> ExecutionResult.Failure(res.message)
                     }
                 }
                 "send_whatsapp_message" -> {
@@ -405,7 +410,7 @@ class ActionExecutor(private val context: Context) {
 
         // 4. Execute and verify real device effect
         val execRes = execute(action)
-        if (action.action in setOf("open_app", "launch_app", "start_app", "return_to_origin", "wapas_jao", "go_back", "navigate_back")) {
+        if (action.action in setOf("open_app", "launch_app", "start_app", "return_to_origin", "return_to_previous_app", "wapas_jao", "go_back", "navigate_back")) {
             com.omnivoice.agentfix.UiTools.lastCanonicalResult?.let { return it.toActionResult() }
         }
         return when (execRes) {
@@ -415,6 +420,13 @@ class ActionExecutor(private val context: Context) {
                     "call", "make_call", "make_phone_call" -> ActionVerifier.verifyCallStateOrPermission(context, action.target)
                     else -> ActionResult.Success(execRes.message)
                 }
+            }
+            is ExecutionResult.RequestedUnverified -> {
+                ActionResult.RequestedUnverified(
+                    detail = execRes.message,
+                    reasonCode = execRes.reasonCode,
+                    observedPackage = execRes.observedPackage
+                )
             }
             is ExecutionResult.Failure -> {
                 if (execRes.error.contains("permission", ignoreCase = true) ||
@@ -1302,5 +1314,10 @@ class ActionExecutor(private val context: Context) {
 
 sealed class ExecutionResult {
     data class Success(val message: String) : ExecutionResult()
+    data class RequestedUnverified(
+        val message: String,
+        val reasonCode: String = "",
+        val observedPackage: String? = null
+    ) : ExecutionResult()
     data class Failure(val error: String) : ExecutionResult()
 }

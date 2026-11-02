@@ -3643,6 +3643,243 @@ class ExampleRobolectricTest {
         assertEquals("AMBIGUOUS_RECENTS_TASK", ambiguousRecentsRes.reasonCode)
         assertFalse("Must not guess or tap when multiple Notepad tasks in Recents are ambiguous", tappedAmbiguousCard)
 
+        // =========================================================================
+        // 9. PHASE 02 FALSE SPOKEN COMPLETION REPORT FIX:
+        //    - toExecutionResult() and toActionResult() preserve REQUESTED_UNVERIFIED (never Success)
+        //    - OmniLiveSessionEngine removes automatic SUCCESS/executed=true fallback for unverified tools,
+        //      ignores late callbacks from a previous command ID, blocks pre-result "ho gaya",
+        //      and uses the same final status and message for spoken reply and on-screen result
+        //    - Three "wapas jao" outcomes + Notepad-visible-draft-unverified check:
+        //      (1) Correct draft returns -> VERIFIED
+        //      (2) Home stays visible -> REQUESTED_UNVERIFIED ("Abhi Home screen khuli hai; pichli window par wapsi confirm nahin hui.")
+        //      (3) Observer times out -> REQUESTED_UNVERIFIED ("Maine koshish ki, lekin wapsi confirm nahin hui.")
+        //      (4) Notepad visible but draft unverified -> REQUESTED_UNVERIFIED ("Notepad khul gaya hai, lekin purana draft confirm nahin hua.")
+        // =========================================================================
+        assertFalse(
+            "REQUESTED_UNVERIFIED must have ok=false so only VERIFIED can produce a completion reply",
+            missingDraftRes.ok
+        )
+        assertTrue(
+            "toExecutionResult() must map REQUESTED_UNVERIFIED to ExecutionResult.RequestedUnverified (never Success)",
+            missingDraftRes.toExecutionResult() is com.example.engine.ExecutionResult.RequestedUnverified
+        )
+        assertTrue(
+            "toActionResult() must map REQUESTED_UNVERIFIED to ActionResult.RequestedUnverified (never Success)",
+            missingDraftRes.toActionResult() is com.example.engine.ActionResult.RequestedUnverified
+        )
+        assertEquals(
+            "Notepad khul gaya hai, lekin purana draft confirm nahin hua.",
+            missingDraftRes.message
+        )
+
+        // Reset saved origin to Notepad with "draft 42" for the 3 required outcomes
+        val notepadSavedOriginFor3Outcomes = com.omnivoice.agentfix.OriginTaskSnapshot(
+            packageName = "com.example.notes",
+            appLabel = "Notepad",
+            taskId = -1,
+            windowId = 101,
+            activityComponent = "",
+            draftTexts = mapOf("editor_body" to "draft 42"),
+            capturedElapsedMs = android.os.SystemClock.elapsedRealtime()
+        )
+
+        // --- OUTCOME 1: The correct draft returns ---
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+        registerLaunchablePackage("com.whatsapp", "WhatsApp")
+        registerLaunchablePackage("com.example.notes", "Notepad")
+        com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = notepadSavedOriginFor3Outcomes
+        var outcomePhase = "WHATSAPP_BEFORE_RETURN"
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            val nextStarted = shadowApp.peekNextStartedActivity()
+            val startedPkg = nextStarted?.component?.packageName ?: nextStarted?.`package`
+            if (outcomePhase == "WHATSAPP_BEFORE_RETURN" && startedPkg == "com.example.notes") {
+                shadowApp.nextStartedActivity
+                outcomePhase = "NOTEPAD_WITH_DRAFT_42"
+            }
+            when (outcomePhase) {
+                "WHATSAPP_BEFORE_RETURN" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = -1,
+                    windowId = 155,
+                    titleGuess = "WhatsApp"
+                )
+                "NOTEPAD_WITH_DRAFT_42" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = -1,
+                    windowId = 209,
+                    titleGuess = "Notepad - Draft 42",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                else -> null
+            }
+        }
+        val cmdIdOutcome1 = liveEngine.startNewCommandTurn(commandId = "cmd_outcome_1", utterance = "wapas jao")
+        val respOutcome1 = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_outcome_1")
+                    put("commandId", cmdIdOutcome1)
+                    put("name", "return_to_origin")
+                    put("args", org.json.JSONObject())
+                }
+            )
+        }
+        val resOutcome1 = com.omnivoice.agentfix.UiTools.lastCanonicalResult!!
+        assertEquals("com.example.notes", resOutcome1.observedPackage)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, resOutcome1.status)
+        assertTrue(resOutcome1.ok)
+        assertTrue(resOutcome1.verified)
+        assertTrue(resOutcome1.draftPreserved)
+        assertEquals(
+            "Verified: Returned to saved origin task Notepad (com.example.notes, taskId=-1, window=Notepad - Draft 42) with draft 'draft 42' preserved.",
+            resOutcome1.message
+        )
+        assertTrue(resOutcome1.toExecutionResult() is com.example.engine.ExecutionResult.Success)
+        assertTrue(resOutcome1.toActionResult() is com.example.engine.ActionResult.Success)
+        assertEquals("VERIFIED", liveEngine.lastFinalStatusForCurrentCommand)
+        assertEquals(resOutcome1.message, liveEngine.lastSpokenReplyForCurrentCommand)
+        assertEquals(resOutcome1.message, liveEngine.liveAiTranscript.value)
+        assertEquals(resOutcome1.message, liveEngine.slideUpCards.value.first().subtitle)
+        assertTrue(respOutcome1.getJSONObject("response").getJSONObject("result").optBoolean("verified"))
+
+        // --- OUTCOME 2: Home stays visible ---
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = notepadSavedOriginFor3Outcomes
+        outcomePhase = "HOME_STAYS_VISIBLE"
+        com.omnivoice.agentfix.UiTools.testRecentsActionHandler = { false }
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            outcomePhase = "HOME_STAYS_VISIBLE"
+            true
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            buildSnapshot(
+                pkg = "com.google.android.apps.nexuslauncher",
+                label = "Pixel Launcher",
+                taskId = -1,
+                windowId = 301,
+                titleGuess = "Home screen",
+                nodes = emptyList()
+            )
+        }
+        val cmdIdOutcome2 = liveEngine.startNewCommandTurn(commandId = "cmd_outcome_2", utterance = "wapas jao")
+        val respOutcome2 = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_outcome_2")
+                    put("commandId", cmdIdOutcome2)
+                    put("name", "return_to_origin")
+                    put("args", org.json.JSONObject())
+                }
+            )
+        }
+        val resOutcome2 = com.omnivoice.agentfix.UiTools.lastCanonicalResult!!
+        assertEquals("com.google.android.apps.nexuslauncher", resOutcome2.observedPackage)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED, resOutcome2.status)
+        assertFalse(resOutcome2.ok)
+        assertFalse(resOutcome2.verified)
+        assertEquals("HOME_SCREEN_VISIBLE", resOutcome2.reasonCode)
+        assertEquals(
+            "Abhi Home screen khuli hai; pichli window par wapsi confirm nahin hui.",
+            resOutcome2.message
+        )
+        assertFalse(
+            "When Home is visible, reply must NOT say Notepad opened",
+            resOutcome2.message.contains("Notepad", ignoreCase = true)
+        )
+        assertTrue(resOutcome2.toExecutionResult() is com.example.engine.ExecutionResult.RequestedUnverified)
+        assertTrue(resOutcome2.toActionResult() is com.example.engine.ActionResult.RequestedUnverified)
+        assertEquals("REQUESTED_UNVERIFIED", liveEngine.lastFinalStatusForCurrentCommand)
+        assertEquals(resOutcome2.message, liveEngine.lastSpokenReplyForCurrentCommand)
+        assertEquals(resOutcome2.message, liveEngine.liveAiTranscript.value)
+        assertEquals(resOutcome2.message, liveEngine.slideUpCards.value.first().subtitle)
+        assertTrue(liveEngine.slideUpCards.value.first().title.contains("Requested/Unverified", ignoreCase = true))
+        assertFalse(respOutcome2.getJSONObject("response").getJSONObject("result").optBoolean("executed"))
+
+        // --- OUTCOME 3: The observer times out ---
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = notepadSavedOriginFor3Outcomes
+        com.omnivoice.agentfix.UiTools.testRecentsActionHandler = { false }
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = { false }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            // Observer never observes Notepad; WhatsApp remains visible until timeout
+            buildSnapshot(
+                pkg = "com.whatsapp",
+                label = "WhatsApp",
+                taskId = -1,
+                windowId = 155,
+                titleGuess = "WhatsApp"
+            )
+        }
+        val cmdIdOutcome3 = liveEngine.startNewCommandTurn(commandId = "cmd_outcome_3", utterance = "wapas jao")
+        val respOutcome3 = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_outcome_3")
+                    put("commandId", cmdIdOutcome3)
+                    put("name", "return_to_origin")
+                    put("args", org.json.JSONObject())
+                }
+            )
+        }
+        val resOutcome3 = com.omnivoice.agentfix.UiTools.lastCanonicalResult!!
+        assertEquals("com.whatsapp", resOutcome3.observedPackage)
+        assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED, resOutcome3.status)
+        assertFalse(resOutcome3.ok)
+        assertFalse(resOutcome3.verified)
+        assertEquals("RETURN_OBSERVATION_UNVERIFIED", resOutcome3.reasonCode)
+        assertEquals(
+            "Maine koshish ki, lekin wapsi confirm nahin hui.",
+            resOutcome3.message
+        )
+        assertTrue(resOutcome3.toExecutionResult() is com.example.engine.ExecutionResult.RequestedUnverified)
+        assertTrue(resOutcome3.toActionResult() is com.example.engine.ActionResult.RequestedUnverified)
+        assertEquals("REQUESTED_UNVERIFIED", liveEngine.lastFinalStatusForCurrentCommand)
+        assertEquals("Maine koshish ki, lekin wapsi confirm nahin hui.", liveEngine.lastSpokenReplyForCurrentCommand)
+        assertEquals("Maine koshish ki, lekin wapsi confirm nahin hui.", liveEngine.liveAiTranscript.value)
+        assertEquals("Maine koshish ki, lekin wapsi confirm nahin hui.", liveEngine.slideUpCards.value.first().subtitle)
+        assertFalse(respOutcome3.getJSONObject("response").getJSONObject("result").optBoolean("executed"))
+
+        // --- Verify pre-result "ho gaya" suppression and late callback rejection ---
+        assertTrue(
+            "While command outcome is REQUESTED_UNVERIFIED, 'ho gaya' must be blocked",
+            liveEngine.isCompletionClaimBeforeVerifiedResult("Kaam ho gaya!")
+        )
+        val staleResp = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_stale_from_prev_cmd")
+                    put("commandId", "cmd_outcome_1") // Previous command ID!
+                    put("name", "return_to_origin")
+                    put("args", org.json.JSONObject())
+                }
+            )
+        }
+        val staleResultObj = staleResp.getJSONObject("response").getJSONObject("result")
+        assertEquals("STALE_COMMAND_IGNORED", staleResultObj.optString("status"))
+        assertFalse(staleResultObj.optBoolean("executed"))
+        // Transcript and status for cmd_outcome_3 must remain untouched by the late callback!
+        assertEquals("Maine koshish ki, lekin wapsi confirm nahin hui.", liveEngine.liveAiTranscript.value)
+        assertEquals("REQUESTED_UNVERIFIED", liveEngine.lastFinalStatusForCurrentCommand)
+
+        // Also verify unverified action tool in OmniLiveSessionEngine does NOT get automatic SUCCESS/executed=true
+        val cmdIdUnverifiedAction = liveEngine.startNewCommandTurn(commandId = "cmd_unverified_action", utterance = "unknown action")
+        val unverifiedActionResp = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_unverified_1")
+                    put("commandId", cmdIdUnverifiedAction)
+                    put("name", "unverified_custom_action_tool")
+                    put("args", org.json.JSONObject())
+                }
+            )
+        }
+        val unverifiedPayload = unverifiedActionResp.getJSONObject("response").getJSONObject("result")
+        assertEquals("REQUESTED_UNVERIFIED", unverifiedPayload.optString("finalStatus"))
+        assertFalse("Unverified action tool must never default to executed=true", unverifiedPayload.optBoolean("executed"))
+        assertFalse("Unverified action tool must never default to verified=true", unverifiedPayload.optBoolean("verified"))
+
         com.omnivoice.agentfix.UiTools.resetTestHooks()
     }
 }

@@ -561,6 +561,12 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             coldStartTimeoutMs = coldStartTimeoutMs
         )
         _spokenResponse.value = canonical.message
+        _voiceState.value = when (canonical.status) {
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED -> VoiceState.Idle
+            com.omnivoice.agentfix.CanonicalAppLaunchStatus.REQUESTED_UNVERIFIED ->
+                VoiceState.RequestedUnverified(canonical.message, canonical.reasonCode)
+            else -> VoiceState.Error(canonical.message)
+        }
         return canonical
     }
 
@@ -1002,12 +1008,17 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                 val spoken = result.message.ifBlank { action.spokenResponse }
                 speakResponse(spoken)
                 _voiceState.value = VoiceState.Idle
-                recordLog(action, isLocked = isLockedState, passed = true, summary = spoken)
+                recordLog(action, isLocked = isLockedState, passed = true, summary = spoken, executionStatus = "VERIFIED")
+            }
+            is ExecutionResult.RequestedUnverified -> {
+                speakResponse(result.message)
+                _voiceState.value = VoiceState.RequestedUnverified(result.message, result.reasonCode)
+                recordLog(action, isLocked = isLockedState, passed = false, summary = result.message, executionStatus = "REQUESTED_UNVERIFIED")
             }
             is ExecutionResult.Failure -> {
                 speakResponse(result.error)
                 _voiceState.value = VoiceState.Error(result.error)
-                recordLog(action, isLocked = isLockedState, passed = false, summary = result.error)
+                recordLog(action, isLocked = isLockedState, passed = false, summary = result.error, executionStatus = "FAILED")
             }
         }
     }
@@ -1017,6 +1028,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         val res = actionExecutor.undoAction(last)
         val msg = when (res) {
             is ExecutionResult.Success -> res.message
+            is ExecutionResult.RequestedUnverified -> res.message
             is ExecutionResult.Failure -> res.error
         }
         _lastExecutedAction.value = null
@@ -1053,7 +1065,13 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         ttsManager.speak(text, _config.value.voicePitch, _config.value.voiceSpeed, locale)
     }
 
-    private fun recordLog(action: VoiceAction, isLocked: Boolean, passed: Boolean, summary: String) {
+    private fun recordLog(
+        action: VoiceAction,
+        isLocked: Boolean,
+        passed: Boolean,
+        summary: String,
+        executionStatus: String = if (passed) "SUCCESS" else "FAILED"
+    ) {
         val rawCommand = _pendingQuery.value.ifBlank { action.target }
         val entry = SecurityLogEntry(
             commandText = rawCommand,
@@ -1075,7 +1093,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                         isLockedMode = isLocked,
                         verificationPassed = passed,
                         responseSummary = summary,
-                        executionStatus = if (passed) "SUCCESS" else "FAILED"
+                        executionStatus = executionStatus
                     )
                 )
             } catch (e: Exception) {

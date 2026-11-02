@@ -218,6 +218,7 @@ fun LockScreenAssistantContent(
                 is VoiceState.ConfirmingAction -> "Awaiting confirmation (Yes/No)"
                 is VoiceState.ExecutingAction -> "Executing action..."
                 is VoiceState.Speaking -> "Speaking response..."
+                is VoiceState.RequestedUnverified -> "Requested / Unverified"
                 is VoiceState.Error -> "Verification failed"
                 else -> "Ready"
             }
@@ -225,7 +226,7 @@ fun LockScreenAssistantContent(
             Text(
                 text = stateText,
                 color = when (voiceState) {
-                    is VoiceState.AwaitingPassphrase -> Color(0xFFF59E0B)
+                    is VoiceState.AwaitingPassphrase, is VoiceState.RequestedUnverified -> Color(0xFFF59E0B)
                     is VoiceState.Error -> Color(0xFFEF4444)
                     else -> CyanPrimary
                 },
