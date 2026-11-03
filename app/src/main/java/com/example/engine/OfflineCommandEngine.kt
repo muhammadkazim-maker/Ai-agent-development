@@ -190,6 +190,63 @@ class OfflineCommandEngine {
         val trimmed = clause.trim()
         val lower = trimmed.lowercase()
 
+        // 0A. Return to Saved Origin Task ("wapas iss window par aao", "Uss previous screen par le kar jao jahan main pehle work kar raha tha", "Uss software par le kar jao jahan main pehle kaam kar raha tha", etc.)
+        if (com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(originalRaw) ||
+            com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(trimmed)
+        ) {
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Returning to the previous app window.",
+                "Pichli app window par wapas ja raha hoon.",
+                "پچھلی ایپ ونڈو پر واپس جا رہا ہوں۔",
+                lang
+            )
+            return VoiceAction(
+                action = "return_to_origin",
+                target = "origin_task",
+                parameters = mapOf("navigation" to "return_to_previous_app"),
+                confirmationRequired = false,
+                spokenResponse = reply
+            )
+        }
+
+        // 0B. Explicit "WhatsApp Status kholo" (kept separate from return_to_origin and plain WhatsApp open)
+        if (com.omnivoice.agentfix.UiTools.isExplicitWhatsAppStatusCommand(originalRaw) ||
+            com.omnivoice.agentfix.UiTools.isExplicitWhatsAppStatusCommand(trimmed)
+        ) {
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Opening WhatsApp Status.",
+                "WhatsApp Status khola ja raha hai.",
+                "واٹس ایپ اسٹیٹس کھولا جا رہا ہے۔",
+                lang
+            )
+            return VoiceAction(
+                action = "ui_click_text",
+                target = "Status",
+                parameters = mapOf("text" to "Status", "appName" to "WhatsApp", "tab" to "Status"),
+                confirmationRequired = false,
+                spokenResponse = reply
+            )
+        }
+
+        // 0C_RECENTS. Explicit "recent apps dikhao" (kept separate from return_to_origin)
+        if (com.omnivoice.agentfix.UiTools.isExplicitShowRecentsCommand(originalRaw) ||
+            com.omnivoice.agentfix.UiTools.isExplicitShowRecentsCommand(trimmed)
+        ) {
+            val reply = LanguageProcessor.formatReplyInLanguage(
+                "Showing recent apps.",
+                "Recent apps dikhaye ja rahe hain.",
+                "حالیہ ایپس دکھائی جا رہی ہیں۔",
+                lang
+            )
+            return VoiceAction(
+                action = "navigate",
+                target = "recents",
+                parameters = mapOf("navigation" to "recents"),
+                confirmationRequired = false,
+                spokenResponse = reply
+            )
+        }
+
         // 1A. WhatsApp Message Delete ("iss message ko delete karo", "delete this message", "message mita do", "delete for everyone")
         val isDeleteMsgCmd =
             (Regex("\\b(delete|mitao|mita do|mita dein|hatao|hata do|remove|unsend)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||

@@ -300,6 +300,7 @@ object UiTools {
         defaultColdStartTimeoutMs = 2500L
         lastOriginTaskSnapshot = null
         lastCanonicalResult = null
+        lastCommandRouteTrace = null
         lastPhase02Diagnostics = Phase02JourneyDiagnostics()
         testInstalledVariantsOverride = null
         testHomeActionHandler = null
@@ -449,11 +450,159 @@ object UiTools {
      * - "return to the previous app" / "return to previous app"
      * - "wapas jao" / "peeche jao" / "go back"
      */
-    fun isReturnToPreviousAppCommand(rawText: String?): Boolean {
+    data class CommandRouteTrace(
+        val routeType: String,
+        val recognizedTranscript: String,
+        val matchedIntent: String,
+        val savedOriginPackage: String?,
+        val actualDispatchedTool: String
+    )
+
+    @Volatile
+    var lastCommandRouteTrace: CommandRouteTrace? = null
+        internal set
+
+    /**
+     * Explicitly recognizes commands to open WhatsApp Status / Updates tab
+     * (e.g., "WhatsApp Status kholo", "open WhatsApp status", "واٹس ایپ اسٹیٹس کھولو").
+     * Kept strictly separate from return-to-previous-app / resume-work commands.
+     */
+    fun isExplicitWhatsAppStatusCommand(rawText: String?): Boolean {
         if (rawText.isNullOrBlank()) return false
         val trimmed = rawText.trim()
         val normalized = trimmed.lowercase(Locale.ROOT)
-            .replace(Regex("[^a-z0-9\\u0600-\\u06FF\\s]"), " ")
+            .replace(Regex("[^a-z0-9\\u0600-\\u06FF\\u0900-\\u097F\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (normalized.isEmpty()) return false
+
+        val hasPriorWorkCue = normalized.contains("pehle") ||
+            normalized.contains("pehlay") ||
+            normalized.contains("pahle") ||
+            normalized.contains("previous") ||
+            normalized.contains("pichli") ||
+            normalized.contains("pichle") ||
+            normalized.contains("purani") ||
+            normalized.contains("wapas") ||
+            normalized.contains("wapis") ||
+            normalized.contains("jahan main") ||
+            normalized.contains("jaha mai") ||
+            normalized.contains("kaam kar raha") ||
+            normalized.contains("kam kar raha") ||
+            normalized.contains("work kar raha") ||
+            trimmed.contains("پہلے") ||
+            trimmed.contains("پچھلی") ||
+            trimmed.contains("واپس") ||
+            trimmed.contains("पहले") ||
+            trimmed.contains("पिछली") ||
+            trimmed.contains("वापस")
+        if (hasPriorWorkCue) return false
+
+        val mentionsStatus = normalized.contains("status") ||
+            trimmed.contains("اسٹیٹس") ||
+            trimmed.contains("سٹیٹس") ||
+            trimmed.contains("स्टेटस")
+        if (!mentionsStatus) return false
+
+        val mentionsWhatsAppOrTab = normalized.contains("whatsapp") ||
+            trimmed.contains("واٹس ایپ") ||
+            trimmed.contains("व्हाट्सएप") ||
+            normalized.startsWith("status ") ||
+            normalized.endsWith(" status")
+        val hasOpenOrShowVerb = normalized.contains("kholo") ||
+            normalized.contains("khol do") ||
+            normalized.contains("open") ||
+            normalized.contains("dikhao") ||
+            normalized.contains("dikha do") ||
+            normalized.contains("show") ||
+            normalized.contains("par jao") ||
+            normalized.contains("pe jao") ||
+            trimmed.contains("کھولو") ||
+            trimmed.contains("دکھاؤ") ||
+            trimmed.contains("खोलो") ||
+            trimmed.contains("दिखाओ")
+        return mentionsWhatsAppOrTab && hasOpenOrShowVerb
+    }
+
+    /**
+     * Explicitly recognizes commands to show the Android Recents / Overview screen
+     * (e.g., "recent apps dikhao", "show recent apps", "recents kholo", "ریسنٹ ایپس دکھاؤ").
+     * Kept strictly separate from return-to-previous-app / resume-work commands.
+     */
+    fun isExplicitShowRecentsCommand(rawText: String?): Boolean {
+        if (rawText.isNullOrBlank()) return false
+        val trimmed = rawText.trim()
+        val normalized = trimmed.lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9\\u0600-\\u06FF\\u0900-\\u097F\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (normalized.isEmpty()) return false
+
+        val hasPriorWorkCue = normalized.contains("pehle") ||
+            normalized.contains("pehlay") ||
+            normalized.contains("pahle") ||
+            normalized.contains("previous") ||
+            normalized.contains("pichli") ||
+            normalized.contains("pichle") ||
+            normalized.contains("purani") ||
+            normalized.contains("wapas") ||
+            normalized.contains("wapis") ||
+            normalized.contains("jahan main") ||
+            normalized.contains("jaha mai") ||
+            normalized.contains("kaam kar raha") ||
+            normalized.contains("kam kar raha") ||
+            normalized.contains("work kar raha") ||
+            trimmed.contains("پہلے") ||
+            trimmed.contains("پچھلی") ||
+            trimmed.contains("واپس") ||
+            trimmed.contains("पहले") ||
+            trimmed.contains("पिछली") ||
+            trimmed.contains("वापस")
+        if (hasPriorWorkCue) return false
+
+        if (normalized == "recents" || normalized == "recent apps") return true
+
+        val mentionsRecents = normalized.contains("recent apps") ||
+            normalized.contains("recents") ||
+            normalized.contains("recent screen") ||
+            normalized.contains("overview") ||
+            trimmed.contains("ریسنٹ ایپس") ||
+            trimmed.contains("ریسنٹس") ||
+            trimmed.contains("रीसेंट एप्स") ||
+            trimmed.contains("रीसेंट्स")
+        val hasShowOrOpenVerb = normalized.contains("dikhao") ||
+            normalized.contains("dikha do") ||
+            normalized.contains("kholo") ||
+            normalized.contains("khol do") ||
+            normalized.contains("show") ||
+            normalized.contains("open") ||
+            trimmed.contains("دکھاؤ") ||
+            trimmed.contains("کھولو") ||
+            trimmed.contains("दिखाओ") ||
+            trimmed.contains("खोलो")
+        return mentionsRecents && hasShowOrOpenVerb
+    }
+
+    /**
+     * Recognizes dedicated return-to-previous-app / return-to-origin / "resume the work I was doing
+     * before this app switch" commands across Roman Urdu, Urdu Nastaliq, Devanagari, and mixed English, including:
+     * - "Uss previous screen par le kar jao jahan main pehle work kar raha tha."
+     * - "Uss software par le kar jao jahan main pehle kaam kar raha tha."
+     * - "wapas iss window par aao" / "wapas usi window par aao"
+     * - "pichli app par wapas jao" / "pichli window par wapas aao"
+     * - "return to the previous app" / "resume the work I was doing before"
+     * - "wapas jao" / "peeche jao" / "go back"
+     *
+     * Explicitly excludes "WhatsApp Status kholo" and "recent apps dikhao".
+     */
+    fun isReturnToPreviousAppCommand(rawText: String?): Boolean {
+        if (rawText.isNullOrBlank()) return false
+        if (isExplicitWhatsAppStatusCommand(rawText) || isExplicitShowRecentsCommand(rawText)) {
+            return false
+        }
+        val trimmed = rawText.trim()
+        val normalized = trimmed.lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9\\u0600-\\u06FF\\u0900-\\u097F\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
         if (normalized.isEmpty()) return false
@@ -510,7 +659,11 @@ object UiTools {
             "pichli window pe wapas jao",
             "pichli window pe wapas aao",
             "purani window par wapas aao",
-            "purani app par wapas jao"
+            "purani app par wapas jao",
+            "uss previous screen par le kar jao jahan main pehle work kar raha tha",
+            "us previous screen par le kar jao jahan main pehle work kar raha tha",
+            "uss software par le kar jao jahan main pehle kaam kar raha tha",
+            "us software par le kar jao jahan main pehle kaam kar raha tha"
         )
         if (normalized in exactMatches) return true
 
@@ -519,34 +672,301 @@ object UiTools {
             trimmed.contains("پچھلی ایپ پر واپس جاؤ") ||
             trimmed.contains("پچھلی ایپ پر واپس آؤ") ||
             trimmed.contains("پچھلی ونڈو پر واپس") ||
+            trimmed.contains("پچھلی اسکرین پر") ||
+            trimmed.contains("پچھلی سکرین پر") ||
+            trimmed.contains("پچھلے سافٹ ویئر پر") ||
+            trimmed.contains("اس پریویس اسکرین پر") ||
+            trimmed.contains("اس سافٹ ویئر پر لے کر جاؤ") ||
+            trimmed.contains("اس اسکرین پر لے کر جاؤ") ||
+            trimmed.contains("اس سکرین پر لے کر جاؤ") ||
+            trimmed.contains("جہاں میں پہلے کام کر رہا تھا") ||
+            trimmed.contains("جہاں میں پہلے ورک کر رہا تھا") ||
+            trimmed.contains("جہاں میں کام کر رہا تھا") ||
             trimmed.contains("واپس جاؤ") ||
-            trimmed.contains("پیچھے جاؤ")
+            trimmed.contains("پیچھے جاؤ") ||
+            trimmed.contains("जहां मैं पहले काम कर रहा था") ||
+            trimmed.contains("जहाँ मैं पहले काम कर रहा था") ||
+            trimmed.contains("जहां मैं पहले वर्क कर रहा था") ||
+            trimmed.contains("जहाँ मैं पहले वर्क कर रहा था") ||
+            trimmed.contains("उस प्रीवियस स्क्रीन पर") ||
+            trimmed.contains("उस सॉफ्टवेयर पर ले कर जाओ") ||
+            trimmed.contains("पिछली ऐप पर वापस जाओ") ||
+            trimmed.contains("वापस इस विंडो पर आओ") ||
+            trimmed.contains("वापस जाओ")
         ) {
             return true
         }
 
-        val hasReturnCue = normalized.contains("wapas") ||
+        // Semantic recognition for "resume the work I was doing before this app switch"
+        val hasPriorWorkClause = normalized.contains("jahan main pehle") ||
+            normalized.contains("jahan mai pehle") ||
+            normalized.contains("jahan me pehle") ||
+            normalized.contains("jaha main pehle") ||
+            normalized.contains("jaha mai pehle") ||
+            normalized.contains("jahan main pahle") ||
+            normalized.contains("jahan hum pehle") ||
+            normalized.contains("jis par main pehle") ||
+            normalized.contains("jis pe main pehle") ||
+            normalized.contains("pehle kaam kar raha") ||
+            normalized.contains("pehle kam kar raha") ||
+            normalized.contains("pehle work kar raha") ||
+            normalized.contains("pahle kaam kar raha") ||
+            normalized.contains("pahle kam kar raha") ||
+            normalized.contains("pahle work kar raha") ||
+            normalized.contains("pehle kaam kr rha") ||
+            normalized.contains("pehle work kr rha") ||
+            normalized.contains("pehle kaam kar rahi") ||
+            normalized.contains("pehle work kar rahi") ||
+            normalized.contains("kaam kar raha tha") ||
+            normalized.contains("kam kar raha tha") ||
+            normalized.contains("work kar raha tha") ||
+            normalized.contains("kaam kr rha tha") ||
+            normalized.contains("work kr rha tha") ||
+            normalized.contains("kaam kar rha tha") ||
+            normalized.contains("work kar rha tha") ||
+            normalized.contains("kaam kar rahi thi") ||
+            normalized.contains("work kar rahi thi") ||
+            normalized.contains("likh raha tha") ||
+            normalized.contains("type kar raha tha") ||
+            normalized.contains("where i was working") ||
+            normalized.contains("what i was working on") ||
+            normalized.contains("work i was doing") ||
+            normalized.contains("before this app switch") ||
+            normalized.contains("working on earlier") ||
+            normalized.contains("working on before") ||
+            trimmed.contains("جہاں میں پہلے") ||
+            trimmed.contains("پہلے کام کر رہا") ||
+            trimmed.contains("پہلے ورک کر رہا") ||
+            trimmed.contains("کام کر رہا تھا") ||
+            trimmed.contains("ورک کر رہا تھا") ||
+            trimmed.contains("لکھ رہا تھا") ||
+            trimmed.contains("जहां मैं पहले") ||
+            trimmed.contains("जहाँ मैं पहले") ||
+            trimmed.contains("पहले काम कर रहा") ||
+            trimmed.contains("पहले वर्क कर रहा") ||
+            trimmed.contains("काम कर रहा था") ||
+            trimmed.contains("वर्क कर रहा था")
+
+        val hasReturnCue = hasPriorWorkClause ||
+            normalized.contains("wapas") ||
             normalized.contains("wapis") ||
             normalized.contains("pichli") ||
             normalized.contains("pichle") ||
+            normalized.contains("pichla") ||
             normalized.contains("purani") ||
+            normalized.contains("purana") ||
+            normalized.contains("purane") ||
             normalized.contains("previous") ||
+            normalized.contains("prior") ||
+            normalized.contains("earlier") ||
+            normalized.contains("pehle") ||
+            normalized.contains("pehlay") ||
+            normalized.contains("pahle") ||
+            normalized.contains("jahan main") ||
+            normalized.contains("jahan mai") ||
+            normalized.contains("jaha main") ||
+            normalized.contains("jaha mai") ||
+            normalized.contains("jis par main") ||
+            normalized.contains("jis pe main") ||
             normalized.contains("return to") ||
             normalized.contains("go back to") ||
-            normalized.contains("switch back to")
+            normalized.contains("switch back to") ||
+            normalized.contains("take me back") ||
+            normalized.contains("bring me back") ||
+            normalized.contains("resume") ||
+            Regex("\\b(uss|us|usi|issi)\\s+(previous\\s+)?(window|app|screen|software|program|jagah)\\b").containsMatchIn(normalized) ||
+            trimmed.contains("واپس") ||
+            trimmed.contains("پچھلی") ||
+            trimmed.contains("پچھلے") ||
+            trimmed.contains("پرانی") ||
+            trimmed.contains("پہلے") ||
+            trimmed.contains("پریویس") ||
+            trimmed.contains("جہاں میں") ||
+            trimmed.contains("اس سافٹ ویئر") ||
+            trimmed.contains("اس اسکرین") ||
+            trimmed.contains("اس سکرین") ||
+            trimmed.contains("اس ونڈو") ||
+            trimmed.contains("वापस") ||
+            trimmed.contains("पिछली") ||
+            trimmed.contains("पिछले") ||
+            trimmed.contains("पुरानी") ||
+            trimmed.contains("पहले") ||
+            trimmed.contains("प्रीवियस") ||
+            trimmed.contains("उस सॉफ्टवेयर") ||
+            trimmed.contains("उस स्क्रीन")
+
         val hasWindowOrAppTarget = normalized.contains("window") ||
             normalized.contains("app") ||
+            normalized.contains("application") ||
             normalized.contains("screen") ||
-            normalized.contains("task")
+            normalized.contains("task") ||
+            normalized.contains("software") ||
+            normalized.contains("program") ||
+            normalized.contains("page") ||
+            normalized.contains("jagah") ||
+            normalized.contains("kaam") ||
+            normalized.contains("kam") ||
+            normalized.contains("work") ||
+            normalized.contains("draft") ||
+            normalized.contains("note") ||
+            normalized.contains("notepad") ||
+            trimmed.contains("ونڈو") ||
+            trimmed.contains("ایپ") ||
+            trimmed.contains("اسکرین") ||
+            trimmed.contains("سکرین") ||
+            trimmed.contains("سافٹ ویئر") ||
+            trimmed.contains("پروگرام") ||
+            trimmed.contains("جگہ") ||
+            trimmed.contains("کام") ||
+            trimmed.contains("ورک") ||
+            trimmed.contains("ڈرافٹ") ||
+            trimmed.contains("विंडो") ||
+            trimmed.contains("ऐप") ||
+            trimmed.contains("स्क्रीन") ||
+            trimmed.contains("सॉफ्टवेयर") ||
+            trimmed.contains("काम") ||
+            trimmed.contains("वर्क")
+
         val hasNavigationVerb = normalized.contains("aao") ||
             normalized.contains("jao") ||
             normalized.contains("chalo") ||
+            normalized.contains("le jao") ||
+            normalized.contains("le kar jao") ||
+            normalized.contains("le kr jao") ||
+            normalized.contains("le ke jao") ||
+            normalized.contains("le chalo") ||
+            normalized.contains("kholo") ||
+            normalized.contains("khol do") ||
             normalized.contains("return") ||
             normalized.contains("back") ||
-            normalized.contains("switch")
+            normalized.contains("switch") ||
+            normalized.contains("resume") ||
+            normalized.contains("restore") ||
+            normalized.contains("take me") ||
+            normalized.contains("bring") ||
+            trimmed.contains("آؤ") ||
+            trimmed.contains("جاؤ") ||
+            trimmed.contains("چلو") ||
+            trimmed.contains("لے جاؤ") ||
+            trimmed.contains("لے کر جاؤ") ||
+            trimmed.contains("کھولو") ||
+            trimmed.contains("आओ") ||
+            trimmed.contains("जाओ") ||
+            trimmed.contains("चलो") ||
+            trimmed.contains("ले जाओ") ||
+            trimmed.contains("ले कर जाओ") ||
+            trimmed.contains("खोलो")
 
+        if (hasPriorWorkClause && (hasWindowOrAppTarget || hasNavigationVerb)) {
+            return true
+        }
         if (hasReturnCue && hasWindowOrAppTarget && hasNavigationVerb) {
             return true
+        }
+        return false
+    }
+
+    private val returnInterceptableTools = setOf(
+        "close_app",
+        "close_target_app",
+        "exit_app",
+        "go_home",
+        "perform_gesture",
+        "tap_coordinates",
+        "swipe_screen",
+        "scroll_screen",
+        "global_action",
+        "navigate",
+        "ui_click_text",
+        "click_text",
+        "tap_text",
+        "click_button",
+        "press_button",
+        "press_send_or_confirm_on_screen",
+        "click_or_send_current_screen",
+        "control_any_app_with_accessibility",
+        "control_app_and_screen_ui",
+        "control_social_and_media_apps",
+        "jarvis_app_commander",
+        "jarvis_hardware_and_screen_control",
+        "execute_ui_automation_macro",
+        "communicate_or_open_app",
+        "open_app",
+        "launch_app",
+        "start_app"
+    )
+
+    /**
+     * Determines whether a tool call in the Live voice or ToolDispatcher route should be
+     * intercepted and redirected to `return_to_origin` before any WhatsApp tab click (e.g., Status)
+     * or generic Recents gesture can run.
+     */
+    fun shouldRedirectToolToReturnToOrigin(
+        rawToolName: String,
+        activeUtterance: String?,
+        args: JSONObject? = null
+    ): Boolean {
+        val cleanTool = rawToolName.trim().lowercase(Locale.ROOT)
+        if (cleanTool == "return_to_origin" || cleanTool == "return_to_previous_app" || cleanTool == "wapas_jao") {
+            return false
+        }
+        val canonical = ToolDispatcher.canonicalToolName(cleanTool)
+        if (cleanTool !in returnInterceptableTools && canonical !in returnInterceptableTools) {
+            return false
+        }
+        val utterance = activeUtterance?.trim().orEmpty()
+        val sessionUtterance = AgentSession.lastUserUtterance.trim()
+        if (isExplicitWhatsAppStatusCommand(utterance) || isExplicitShowRecentsCommand(utterance)) {
+            return false
+        }
+        if (utterance.isEmpty() && (isExplicitWhatsAppStatusCommand(sessionUtterance) || isExplicitShowRecentsCommand(sessionUtterance))) {
+            return false
+        }
+        if (isReturnToPreviousAppCommand(utterance) || isReturnToPreviousAppCommand(sessionUtterance)) {
+            return true
+        }
+        if (args != null) {
+            val argKeys = listOf(
+                "utterance",
+                "userUtterance",
+                "taskDescription",
+                "uiAction",
+                "command",
+                "parameter",
+                "queryOrTarget",
+                "searchQueryOrTarget",
+                "messageOrQuery",
+                "target",
+                "app_name",
+                "appName",
+                "contactOrAppName"
+            )
+            for (key in argKeys) {
+                val value = args.optString(key, "").trim()
+                if (value.isNotEmpty() && isReturnToPreviousAppCommand(value)) {
+                    return true
+                }
+            }
+            // If Gemini Live dispatches perform_gesture(gesture_type/action="recents") or
+            // jarvis_hardware_and_screen_control(command="RECENTS") while a saved origin exists and
+            // the user did NOT explicitly ask to show Recents, redirect to return_to_origin even if
+            // inputTranscription was partial or delayed when toolCall arrived.
+            val gestureOrCmd = args.optString(
+                "gesture_type",
+                args.optString("action", args.optString("command", args.optString("target", "")))
+            ).trim().lowercase(Locale.ROOT)
+            val isRecentsToolCall = (canonical == "perform_gesture" ||
+                cleanTool == "perform_gesture" ||
+                cleanTool == "jarvis_hardware_and_screen_control" ||
+                cleanTool == "global_action" ||
+                cleanTool == "navigate") &&
+                (gestureOrCmd == "recents" || gestureOrCmd == "recent_apps" || gestureOrCmd == "overview")
+            if (isRecentsToolCall && lastOriginTaskSnapshot != null) {
+                val combinedUtterance = "$utterance $sessionUtterance".trim()
+                if (!isExplicitShowRecentsCommand(combinedUtterance)) {
+                    return true
+                }
+            }
         }
         return false
     }
@@ -811,6 +1231,45 @@ object UiTools {
         return false
     }
 
+    private fun tapRecentsTaskCardOnce(node: UiNodeSummary): Boolean {
+        testIconTapHandler?.let { handler ->
+            return handler(node)
+        }
+        val svc = AgentBridge.service ?: return false
+        val isSmallHeaderNode = node.bounds.height() in 1..179
+        val cx = node.bounds.centerX().toFloat()
+        val cy = if (isSmallHeaderNode) {
+            // In Android Quickstep/OEM Recents, tapping the small header icon opens the app menu popup;
+            // tap inside the task card snapshot body directly below the header instead.
+            (node.bounds.bottom + 260).toFloat()
+        } else {
+            node.bounds.centerY().toFloat()
+        }
+        if (!isSmallHeaderNode) {
+            val root = ScreenObserver.findApplicationRoot(svc, preferNonSelfPackage = false)
+                ?: svc.rootInActiveWindow
+            val label = node.displayLabel()
+            if (root != null && label.isNotBlank()) {
+                val liveNode = findClickableMatchingNode(root, label, exact = true)
+                    ?: findClickableMatchingNode(root, label, exact = false)
+                if (liveNode != null) {
+                    val liveRect = Rect().also { liveNode.getBoundsInScreen(it) }
+                    if (liveRect.height() >= 180 && performClickOrTap(liveNode)) {
+                        return true
+                    }
+                }
+            }
+        }
+        if (cx > 0f && cy > 0f) {
+            val path = Path().apply { moveTo(cx, cy) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0L, 65L))
+                .build()
+            return svc.dispatchGesture(gesture, null, null)
+        }
+        return tapHomeLauncherIconOnce(node)
+    }
+
     /**
      * Single canonical app launcher used across ActionExecutor.executeOpenApp, UiTools.openApp,
      * ToolDispatcher, OfflineCommandEngine, SuperAgiBrainEngine, OmniLiveSessionEngine, and diagnostic typed commands.
@@ -861,15 +1320,12 @@ object UiTools {
             )
         }
 
-        // 2. Capture the non-transient originating user app before any navigation
-        val initialCapturedOrigin = captureOriginTaskBeforeLeaving(context.packageName)
+        // 2. Preserve any existing saved origin before resolving target package
         val fallbackOrigin = lastOriginTaskSnapshot?.takeIf {
             !ScreenObserver.isTransientNonUserAppPackage(it.packageName, context.packageName)
         }
+        val initialCapturedOrigin = captureOriginTaskBeforeLeaving(context.packageName)
         var preservedOrigin = initialCapturedOrigin ?: fallbackOrigin
-        if (preservedOrigin != null) {
-            lastOriginTaskSnapshot = preservedOrigin
-        }
 
         // 3. Resolve installed package variants and disambiguate personal vs. Business or work profile
         val variants = resolveInstalledVariantsForAppName(context, cleaned)
@@ -916,13 +1372,15 @@ object UiTools {
         val targetPkg = targetVariant.packageName
         val targetLabel = targetVariant.label
 
-        // Ensure preservedOrigin is not overwritten by targetPkg if an earlier origin user app (e.g., Notepad) was remembered
-        val nonTargetOrigin = captureOriginTaskBeforeLeaving(
-            selfPackageName = context.packageName,
-            targetPackageToExclude = targetPkg
-        ) ?: fallbackOrigin?.takeIf { !it.packageName.equals(targetPkg, ignoreCase = true) }
+        // Ensure preservedOrigin is NEVER overwritten by targetPkg if an earlier origin user app (e.g., Notepad) was remembered
+        val nonTargetOrigin = initialCapturedOrigin?.takeIf { !it.packageName.equals(targetPkg, ignoreCase = true) }
+            ?: captureOriginTaskBeforeLeaving(
+                selfPackageName = context.packageName,
+                targetPackageToExclude = targetPkg
+            )
+            ?: fallbackOrigin?.takeIf { !it.packageName.equals(targetPkg, ignoreCase = true) }
+        preservedOrigin = nonTargetOrigin
         if (nonTargetOrigin != null) {
-            preservedOrigin = nonTargetOrigin
             lastOriginTaskSnapshot = nonTargetOrigin
         }
 
@@ -1148,7 +1606,7 @@ object UiTools {
             "app info"
         )
 
-        val candidates = recentsSnapshot.nodes.filter { node ->
+        val rawCandidates = recentsSnapshot.nodes.filter { node ->
             if (!node.isClickable || !node.isEnabled) return@filter false
             if (node.bounds.width() <= 0 || node.bounds.height() <= 0) return@filter false
             val textLower = node.text.trim().lowercase(Locale.ROOT)
@@ -1167,6 +1625,72 @@ object UiTools {
                     descLower.contains(targetPkgLower)
                 )
             matchesLabel || matchesPkg
+        }.ifEmpty {
+            // Fallback for OEM Recents where the app title TextView is non-clickable inside a clickable TaskView card
+            recentsSnapshot.nodes.filter { node ->
+                if (!node.isEnabled || node.bounds.width() <= 0 || node.bounds.height() <= 0) return@filter false
+                val textLower = node.text.trim().lowercase(Locale.ROOT)
+                val descLower = node.contentDescription.trim().lowercase(Locale.ROOT)
+                val combined = "$textLower $descLower".trim()
+                if (combined.isEmpty() || combined in ignoredControlWords) return@filter false
+                val matchesLabel = targetLabelLower.isNotBlank() && (
+                    textLower == targetLabelLower ||
+                        descLower == targetLabelLower ||
+                        textLower.contains(targetLabelLower) ||
+                        descLower.contains(targetLabelLower)
+                    )
+                val matchesPkg = targetPkgLower.isNotBlank() && (
+                    textLower.contains(targetPkgLower) ||
+                        descLower.contains(targetPkgLower)
+                    )
+                matchesLabel || matchesPkg
+            }
+        }
+
+        // Deduplicate nodes that belong to the same physical Recents card (nested, overlapping, or
+        // header icon + header title TextView + TaskView thumbnail aligned in the same card column)
+        val candidates = mutableListOf<UiNodeSummary>()
+        for (node in rawCandidates.sortedByDescending { it.bounds.width() * it.bounds.height() }) {
+            val overlapsExistingCard = candidates.any { existing ->
+                val directOverlap = android.graphics.Rect.intersects(existing.bounds, node.bounds) ||
+                    existing.bounds.contains(node.bounds.centerX(), node.bounds.centerY()) ||
+                    node.bounds.contains(existing.bounds.centerX(), existing.bounds.centerY())
+                if (directOverlap) return@any true
+
+                val existingLabel = existing.displayLabel().trim().lowercase(Locale.ROOT)
+                val nodeLabel = node.displayLabel().trim().lowercase(Locale.ROOT)
+                val sameNormalizedLabel = existingLabel.isEmpty() ||
+                    nodeLabel.isEmpty() ||
+                    existingLabel == nodeLabel ||
+                    existingLabel == targetLabelLower ||
+                    nodeLabel == targetLabelLower
+
+                // Header row above or below the task card thumbnail in the same horizontal card column
+                val horizontalOverlap = maxOf(existing.bounds.left, node.bounds.left) <=
+                    minOf(existing.bounds.right, node.bounds.right) + 80
+                val oneIsHeaderRow = minOf(existing.bounds.height(), node.bounds.height()) <= 180
+                val verticalGap = when {
+                    existing.bounds.bottom <= node.bounds.top -> node.bounds.top - existing.bounds.bottom
+                    node.bounds.bottom <= existing.bounds.top -> existing.bounds.top - node.bounds.bottom
+                    else -> 0
+                }
+                val isHeaderForSameCard = sameNormalizedLabel && horizontalOverlap && oneIsHeaderRow && verticalGap <= 220
+
+                // App icon and title TextView side-by-side on the same header row
+                val bothAreHeaderNodes = existing.bounds.height() <= 180 && node.bounds.height() <= 180
+                val sameHeaderRowY = kotlin.math.abs(existing.bounds.centerY() - node.bounds.centerY()) <= 100
+                val horizontalGap = when {
+                    existing.bounds.right <= node.bounds.left -> node.bounds.left - existing.bounds.right
+                    node.bounds.right <= existing.bounds.left -> existing.bounds.left - node.bounds.right
+                    else -> 0
+                }
+                val isSiblingInSameHeader = sameNormalizedLabel && bothAreHeaderNodes && sameHeaderRowY && horizontalGap <= 260
+
+                isHeaderForSameCard || isSiblingInSameHeader
+            }
+            if (!overlapsExistingCard) {
+                candidates.add(node)
+            }
         }
 
         if (candidates.isEmpty()) {
@@ -1418,7 +1942,14 @@ object UiTools {
             }
             if (openedRecents) {
                 delay(150L)
-                val recentsSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+                var recentsSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+                if (testRecentsActionHandler == null &&
+                    !currentForegroundPkg.isNullOrBlank() &&
+                    recentsSnap?.packageName.equals(currentForegroundPkg, ignoreCase = true)
+                ) {
+                    delay(220L)
+                    recentsSnap = ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = false)
+                }
                 val matchResult = findMatchingTaskInRecents(recentsSnap, savedOrigin)
                 when (matchResult.outcome) {
                     HomeIconMatchOutcome.AMBIGUOUS_ON_PAGE -> {
@@ -1434,7 +1965,7 @@ object UiTools {
                         val targetNode = matchResult.matchedNode
                         if (targetNode != null) {
                             val recentsTapMs = SystemClock.elapsedRealtime()
-                            if (tapHomeLauncherIconOnce(targetNode)) {
+                            if (tapRecentsTaskCardOnce(targetNode)) {
                                 anyDispatched = true
                                 lastMethodUsed = "RECENTS_TASK_SWITCH"
                                 val recentsObs = ScreenObserver.observeFreshTargetPackage(
@@ -1906,7 +2437,15 @@ object UiTools {
         coldStartTimeoutMs: Long = defaultColdStartTimeoutMs
     ): CanonicalAppLaunchResult {
         val trimmed = commandText.trim()
+        AgentSession.onUserUtterance(trimmed)
         if (isReturnToPreviousAppCommand(trimmed)) {
+            lastCommandRouteTrace = CommandRouteTrace(
+                routeType = "TYPED",
+                recognizedTranscript = trimmed,
+                matchedIntent = "return_to_origin",
+                savedOriginPackage = lastOriginTaskSnapshot?.packageName,
+                actualDispatchedTool = "return_to_origin"
+            )
             return returnToOriginCanonical(
                 context = context,
                 coldStartTimeoutMs = coldStartTimeoutMs,
@@ -1918,6 +2457,13 @@ object UiTools {
             rawText = trimmed
         )
         if (offlineAction.action == "return_to_origin" || offlineAction.action == "return_to_previous_app") {
+            lastCommandRouteTrace = CommandRouteTrace(
+                routeType = "TYPED",
+                recognizedTranscript = trimmed,
+                matchedIntent = "return_to_origin",
+                savedOriginPackage = lastOriginTaskSnapshot?.packageName,
+                actualDispatchedTool = "return_to_origin"
+            )
             return returnToOriginCanonical(
                 context = context,
                 coldStartTimeoutMs = coldStartTimeoutMs,
@@ -1930,6 +2476,13 @@ object UiTools {
                     (it.target == "origin_task" || it.target == "previous_app")
             }
         ) {
+            lastCommandRouteTrace = CommandRouteTrace(
+                routeType = "TYPED",
+                recognizedTranscript = trimmed,
+                matchedIntent = "return_to_origin",
+                savedOriginPackage = lastOriginTaskSnapshot?.packageName,
+                actualDispatchedTool = "return_to_origin"
+            )
             return returnToOriginCanonical(
                 context = context,
                 coldStartTimeoutMs = coldStartTimeoutMs,
@@ -1943,6 +2496,13 @@ object UiTools {
                 ?.target
                 ?: trimmed
         }
+        lastCommandRouteTrace = CommandRouteTrace(
+            routeType = "TYPED",
+            recognizedTranscript = trimmed,
+            matchedIntent = "open_app",
+            savedOriginPackage = lastOriginTaskSnapshot?.packageName,
+            actualDispatchedTool = "open_app"
+        )
         return openAppCanonical(
             context = context,
             appName = extractedTarget,

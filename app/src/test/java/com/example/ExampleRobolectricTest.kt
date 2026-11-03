@@ -633,13 +633,14 @@ class ExampleRobolectricTest {
         val funcDecls = toolsArray
             .getJSONObject(0)
             .getJSONArray("functionDeclarations")
-        assertEquals(27, funcDecls.length())
+        assertEquals(28, funcDecls.length())
         val registeredNames = (0 until funcDecls.length()).map { funcDecls.getJSONObject(it).getString("name") }
         assertEquals("describe_screen", registeredNames[0])
         assertEquals("get_device_info", registeredNames[1])
         assertEquals("open_app", registeredNames[2])
         assertEquals("type_in_field", registeredNames[3])
         assertEquals("ui_click_text", registeredNames[4])
+        assertTrue(registeredNames.contains("return_to_origin"))
         assertTrue(registeredNames.contains("search_anything"))
         assertTrue(registeredNames.contains("play_video"))
         assertTrue(registeredNames.contains("whatsapp_send_message"))
@@ -4259,7 +4260,604 @@ class ExampleRobolectricTest {
 
         com.omnivoice.agentfix.UiTools.resetTestHooks()
     }
+
+    @Test
+    fun `Phase 02 first-attempt return to previous work fixes Status click and Recents prompt across voice and typed routes while keeping WhatsApp Status kholo and recent apps dikhao separate`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pm = org.robolectric.Shadows.shadowOf(context.packageManager)
+        val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        val shadowKeyguard = org.robolectric.Shadows.shadowOf(keyguardManager)
+        shadowKeyguard.setIsDeviceLocked(false)
+
+        fun registerTestableLauncherApp(pkg: String, label: String, activityName: String = "$pkg.MainActivity") {
+            val appInfo = android.content.pm.ApplicationInfo().apply {
+                packageName = pkg
+                name = label
+                nonLocalizedLabel = label
+            }
+            val pkgInfo = android.content.pm.PackageInfo().apply {
+                packageName = pkg
+                applicationInfo = appInfo
+            }
+            pm.installPackage(pkgInfo)
+            val component = android.content.ComponentName(pkg, activityName)
+            pm.addActivityIfNotPresent(component)
+            pm.addIntentFilterForActivity(
+                component,
+                android.content.IntentFilter(android.content.Intent.ACTION_MAIN).apply {
+                    addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+                }
+            )
+        }
+
+        registerTestableLauncherApp("com.example.notepad", "Notepad", "com.example.notepad.EditorActivity")
+        registerTestableLauncherApp("com.whatsapp", "WhatsApp", "com.whatsapp.HomeActivity")
+        registerTestableLauncherApp("com.google.android.apps.nexuslauncher", "Pixel Launcher")
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            taskId: Int = -1,
+            windowId: Int = 10,
+            component: String = "",
+            titleGuess: String = label,
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList(),
+            drafts: Map<String, String> = emptyMap(),
+            visiblePackages: Set<String> = setOf(pkg),
+            elapsedOffsetMs: Long = 10L
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + elapsedOffsetMs,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = taskId,
+                activityComponent = component,
+                visibleApplicationPackages = visiblePackages,
+                editableFieldDrafts = drafts
+            )
+        }
+
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notepad",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+        val actionExecutor = com.example.engine.ActionExecutor(context)
+        val androidBridge = com.example.engine.AndroidBridge(context, actionExecutor)
+
+        val liveEngine = com.example.engine.OmniLiveSessionEngine(
+            context = context,
+            actionExecutor = actionExecutor,
+            androidBridge = androidBridge
+        )
+        liveEngine.clearTurnReportsForTest()
+        // Select a specific voice (Puck) BEFORE attaching the mock WebSocket so cycleVoice doesn't reconnect the socket
+        liveEngine.cycleVoice()
+        assertEquals(com.example.engine.GeminiLiveVoice.PUCK, liveEngine.selectedVoice.value)
+        val mockWs = object : okhttp3.WebSocket {
+            override fun request(): okhttp3.Request =
+                okhttp3.Request.Builder().url("wss://generativelanguage.googleapis.com/ws").build()
+            override fun queueSize(): Long = 0L
+            override fun send(text: String): Boolean = true
+            override fun send(bytes: okio.ByteString): Boolean = true
+            override fun close(code: Int, reason: String?): Boolean = true
+            override fun cancel() {}
+        }
+        liveEngine.attachLiveWebSocketForTest(mockWs, ready = true)
+
+        try {
+            val utterance1 = "Uss previous screen par le kar jao jahan main pehle work kar raha tha."
+            val utterance2 = "Uss software par le kar jao jahan main pehle kaam kar raha tha."
+
+            // =========================================================================
+            // 1. Verify semantic recognition across Roman Urdu, Urdu Nastaliq, and mixed English
+            // =========================================================================
+            assertTrue(com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(utterance1))
+            assertTrue(com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(utterance2))
+            assertTrue(
+                com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(
+                    "اس سافٹ ویئر پر لے کر جاؤ جہاں میں پہلے کام کر رہا تھا"
+                )
+            )
+            assertTrue(
+                com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(
+                    "Take me back to the screen where I was working before"
+                )
+            )
+            assertFalse(com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand("WhatsApp Status kholo"))
+            assertFalse(com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand("recent apps dikhao"))
+
+            // =========================================================================
+            // 2. Step 1: User types "draft 42" in Notepad, then says "WhatsApp kholo"
+            // =========================================================================
+            var currentPhase = "NOTEPAD_WITH_DRAFT_42"
+            val whatsAppStatusClicked = false
+            var recentsCardTappedCount = 0
+
+            com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+                currentPhase = "HOME_VISIBLE"
+                true
+            }
+            com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+                if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                    currentPhase = "WHATSAPP_OPEN"
+                    true
+                } else if (node.text.contains("Notepad", ignoreCase = true)) {
+                    recentsCardTappedCount++
+                    currentPhase = "NOTEPAD_WITH_DRAFT_42"
+                    true
+                } else {
+                    false
+                }
+            }
+            com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+                when (currentPhase) {
+                    "NOTEPAD_WITH_DRAFT_42" -> buildSnapshot(
+                        pkg = "com.example.notepad",
+                        label = "Notepad",
+                        windowId = 101,
+                        titleGuess = "Notepad - Untitled",
+                        drafts = mapOf("editor_body" to "draft 42")
+                    )
+                    "HOME_VISIBLE" -> buildSnapshot(
+                        pkg = "com.google.android.apps.nexuslauncher",
+                        label = "Pixel Launcher",
+                        windowId = 202,
+                        titleGuess = "Home",
+                        nodes = listOf(
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 1,
+                                viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                                className = "android.widget.TextView",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "WhatsApp",
+                                contentDescription = "WhatsApp",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(100, 400, 260, 580)
+                            )
+                        )
+                    )
+                    "WHATSAPP_OPEN" -> buildSnapshot(
+                        pkg = "com.whatsapp",
+                        label = "WhatsApp",
+                        windowId = 303,
+                        titleGuess = "WhatsApp",
+                        nodes = listOf(
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 1,
+                                viewId = "com.whatsapp:id/tab_chats",
+                                className = "android.widget.TextView",
+                                packageName = "com.whatsapp",
+                                text = "Chats",
+                                contentDescription = "Chats",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(0, 180, 360, 260)
+                            ),
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 2,
+                                viewId = "com.whatsapp:id/tab_status",
+                                className = "android.widget.TextView",
+                                packageName = "com.whatsapp",
+                                text = "Status",
+                                contentDescription = "Status",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(360, 180, 720, 260)
+                            )
+                        )
+                    )
+                    "RECENTS_SINGLE_NOTEPAD_CARD" -> buildSnapshot(
+                        pkg = "com.google.android.apps.nexuslauncher",
+                        label = "Pixel Launcher",
+                        windowId = 404,
+                        titleGuess = "Recents",
+                        nodes = listOf(
+                            // Realistic Android Quickstep/OEM Recents layout for a SINGLE Notepad task card:
+                            // 1) Header icon (top-left, y=300..360), 2) Header title TextView (next to icon, y=305..355),
+                            // 3) Task snapshot card below header (y=380..1800) — non-overlapping bounds in the same card column:
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 1,
+                                viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                                className = "android.widget.ImageView",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "",
+                                contentDescription = "Notepad",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(120, 300, 180, 360)
+                            ),
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 2,
+                                viewId = "com.google.android.apps.nexuslauncher:id/title",
+                                className = "android.widget.TextView",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "Notepad",
+                                contentDescription = "Notepad",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(195, 305, 420, 355)
+                            ),
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 3,
+                                viewId = "com.google.android.apps.nexuslauncher:id/snapshot",
+                                className = "android.widget.FrameLayout",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "Notepad",
+                                contentDescription = "Notepad",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(100, 380, 980, 1800)
+                            )
+                        )
+                    )
+                    "RECENTS_MULTIPLE_NOTEPAD_CARDS" -> buildSnapshot(
+                        pkg = "com.google.android.apps.nexuslauncher",
+                        label = "Pixel Launcher",
+                        windowId = 405,
+                        titleGuess = "Recents",
+                        nodes = listOf(
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 1,
+                                viewId = "com.google.android.apps.nexuslauncher:id/task_card_1",
+                                className = "android.widget.FrameLayout",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "Notepad - Work Notes",
+                                contentDescription = "Notepad - Work Notes",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(60, 300, 480, 1400)
+                            ),
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 2,
+                                viewId = "com.google.android.apps.nexuslauncher:id/task_card_2",
+                                className = "android.widget.FrameLayout",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "Notepad - Personal Draft",
+                                contentDescription = "Notepad - Personal Draft",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(580, 300, 1000, 1400)
+                            )
+                        )
+                    )
+                    else -> null
+                }
+            }
+
+            // Open WhatsApp from Notepad ("draft 42")
+            val openWaCmd = liveEngine.startNewCommandTurn(commandId = "cmd_open_wa", utterance = "WhatsApp kholo")
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLiveFunctionCallSingle(
+                    org.json.JSONObject().apply {
+                        put("id", "call_open_wa")
+                        put("commandId", openWaCmd)
+                        put("name", "communicate_or_open_app")
+                        put("args", org.json.JSONObject().apply {
+                            put("actionType", "open_app")
+                            put("contactOrAppName", "WhatsApp")
+                        })
+                    }
+                )
+            }
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                org.json.JSONObject().apply {
+                    put("serverContent", org.json.JSONObject().apply {
+                        put("turnComplete", true)
+                    })
+                }.toString()
+            )
+            assertEquals("WHATSAPP_OPEN", currentPhase)
+            assertEquals("com.example.notepad", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName)
+            assertEquals("draft 42", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body"))
+
+            // =========================================================================
+            // 3. Reproduce & verify Phrase 1 through VOICE and TYPED routes:
+            //    "Uss previous screen par le kar jao jahan main pehle work kar raha tha."
+            //    Even when the Live model tries to click WhatsApp "Status" via ui_click_text!
+            // =========================================================================
+            com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+                currentPhase = "NOTEPAD_WITH_DRAFT_42"
+                true
+            }
+            // Simulate real voice streaming inputTranscription arriving after previous turnComplete
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                org.json.JSONObject().apply {
+                    put("serverContent", org.json.JSONObject().apply {
+                        put("inputTranscription", org.json.JSONObject().apply {
+                            put("text", utterance1)
+                        })
+                    })
+                }.toString()
+            )
+            val respPhrase1Voice = kotlinx.coroutines.runBlocking {
+                liveEngine.executeLiveFunctionCallSingle(
+                    org.json.JSONObject().apply {
+                        put("id", "call_phrase1_voice")
+                        put("name", "ui_click_text")
+                        put("args", org.json.JSONObject().apply {
+                            put("text", "Status")
+                        })
+                    }
+                )
+            }
+            val voiceTrace1 = com.omnivoice.agentfix.UiTools.lastCommandRouteTrace
+            assertNotNull(voiceTrace1)
+            assertEquals("VOICE", voiceTrace1!!.routeType)
+            assertEquals(utterance1, voiceTrace1.recognizedTranscript)
+            assertEquals("return_to_origin", voiceTrace1.matchedIntent)
+            assertEquals("com.example.notepad", voiceTrace1.savedOriginPackage)
+            assertEquals("return_to_origin", voiceTrace1.actualDispatchedTool)
+            assertFalse("WhatsApp Status must never be clicked for return-to-work command", whatsAppStatusClicked)
+            assertEquals("NOTEPAD_WITH_DRAFT_42", currentPhase)
+            // Wire function name must remain original for Gemini Live protocol while internal execution ran return_to_origin
+            assertEquals("ui_click_text", respPhrase1Voice.getString("name"))
+            assertEquals("VERIFIED", liveEngine.lastTurnReport?.finalStatus)
+            assertEquals(
+                "Notepad wapas khul gaya hai aur aapka draft mehfooz hai.",
+                liveEngine.lastTurnReport?.spokenReply
+            )
+            assertEquals("GEMINI_LIVE (Puck)", liveEngine.lastTurnReport?.outputEngine)
+
+            // Compare Phrase 1 via TYPED route
+            currentPhase = "WHATSAPP_OPEN"
+            val typedResult1 = kotlinx.coroutines.runBlocking {
+                com.omnivoice.agentfix.UiTools.executeDiagnosticTypedCommand(context, utterance1)
+            }
+            val typedTrace1 = com.omnivoice.agentfix.UiTools.lastCommandRouteTrace
+            assertNotNull(typedTrace1)
+            assertEquals("TYPED", typedTrace1!!.routeType)
+            assertEquals(utterance1, typedTrace1.recognizedTranscript)
+            assertEquals("return_to_origin", typedTrace1.matchedIntent)
+            assertEquals("com.example.notepad", typedTrace1.savedOriginPackage)
+            assertEquals("return_to_origin", typedTrace1.actualDispatchedTool)
+            assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, typedResult1.status)
+            assertTrue(typedResult1.draftPreserved)
+            assertEquals("draft 42", typedResult1.restoredDrafts["editor_body"])
+
+            // =========================================================================
+            // 4. Reproduce & verify Phrase 2 through VOICE and TYPED routes:
+            //    "Uss software par le kar jao jahan main pehle kaam kar raha tha."
+            //    Even when the Live model calls perform_gesture(action="recents") AND
+            //    recovery needs Recents (single Notepad card with overlapping header + body nodes)
+            // =========================================================================
+            currentPhase = "WHATSAPP_OPEN"
+            recentsCardTappedCount = 0
+            // Clear testBackActionHandler and testReturnNavigationHandler so bringSavedOriginTaskForward
+            // exercises the real Recents fallback and automatic single-card selection
+            com.omnivoice.agentfix.UiTools.testBackActionHandler = null
+            com.omnivoice.agentfix.UiTools.testReturnNavigationHandler = null
+            com.omnivoice.agentfix.UiTools.testRecentsActionHandler = {
+                currentPhase = "RECENTS_SINGLE_NOTEPAD_CARD"
+                true
+            }
+
+            // Complete previous turn, then stream Phrase 2 over voice inputTranscription
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                org.json.JSONObject().apply {
+                    put("serverContent", org.json.JSONObject().apply {
+                        put("turnComplete", true)
+                    })
+                }.toString()
+            )
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                org.json.JSONObject().apply {
+                    put("serverContent", org.json.JSONObject().apply {
+                        put("inputTranscription", org.json.JSONObject().apply {
+                            put("text", utterance2)
+                        })
+                    })
+                }.toString()
+            )
+            val respPhrase2Voice = kotlinx.coroutines.runBlocking {
+                liveEngine.executeLiveFunctionCallSingle(
+                    org.json.JSONObject().apply {
+                        put("id", "call_phrase2_voice")
+                        put("name", "perform_gesture")
+                        put("args", org.json.JSONObject().apply {
+                            put("action", "recents")
+                        })
+                    }
+                )
+            }
+            val voiceTrace2 = com.omnivoice.agentfix.UiTools.lastCommandRouteTrace
+            assertNotNull(voiceTrace2)
+            assertEquals("VOICE", voiceTrace2!!.routeType)
+            assertEquals(utterance2, voiceTrace2.recognizedTranscript)
+            assertEquals("return_to_origin", voiceTrace2.matchedIntent)
+            assertEquals("com.example.notepad", voiceTrace2.savedOriginPackage)
+            assertEquals("return_to_origin", voiceTrace2.actualDispatchedTool)
+            assertEquals("perform_gesture", respPhrase2Voice.getString("name"))
+            assertEquals(
+                "Single matching Notepad card in Recents must be automatically selected once without asking",
+                1,
+                recentsCardTappedCount
+            )
+            assertEquals("NOTEPAD_WITH_DRAFT_42", currentPhase)
+            assertEquals("VERIFIED", liveEngine.lastTurnReport?.finalStatus)
+            assertEquals(
+                "Notepad wapas khul gaya hai aur aapka draft mehfooz hai.",
+                liveEngine.lastTurnReport?.spokenReply
+            )
+            assertEquals("GEMINI_LIVE (Puck)", liveEngine.lastTurnReport?.outputEngine)
+
+            // Compare Phrase 2 via TYPED route
+            currentPhase = "WHATSAPP_OPEN"
+            recentsCardTappedCount = 0
+            val typedResult2 = kotlinx.coroutines.runBlocking {
+                com.omnivoice.agentfix.UiTools.executeDiagnosticTypedCommand(context, utterance2)
+            }
+            val typedTrace2 = com.omnivoice.agentfix.UiTools.lastCommandRouteTrace
+            assertNotNull(typedTrace2)
+            assertEquals("TYPED", typedTrace2!!.routeType)
+            assertEquals(utterance2, typedTrace2.recognizedTranscript)
+            assertEquals("return_to_origin", typedTrace2.matchedIntent)
+            assertEquals("com.example.notepad", typedTrace2.savedOriginPackage)
+            assertEquals("return_to_origin", typedTrace2.actualDispatchedTool)
+            assertEquals(com.omnivoice.agentfix.CanonicalAppLaunchStatus.VERIFIED, typedResult2.status)
+            assertEquals("RECENTS_TASK_SWITCH", typedResult2.launchMethod)
+            assertEquals(1, recentsCardTappedCount)
+            assertTrue(typedResult2.draftPreserved)
+            assertEquals("draft 42", typedResult2.restoredDrafts["editor_body"])
+
+            // =========================================================================
+            // 5. Ask one short question ONLY when origin is missing or multiple plausible tasks remain
+            // =========================================================================
+            // 5a. Multiple plausible Notepad tasks in Recents -> AMBIGUOUS_RECENTS_TASK -> one short question
+            currentPhase = "WHATSAPP_OPEN"
+            recentsCardTappedCount = 0
+            com.omnivoice.agentfix.UiTools.testRecentsActionHandler = {
+                currentPhase = "RECENTS_MULTIPLE_NOTEPAD_CARDS"
+                true
+            }
+            val cmdAmbiguous = liveEngine.startNewCommandTurn(commandId = "cmd_ambiguous", utterance = utterance2)
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLiveFunctionCallSingle(
+                    org.json.JSONObject().apply {
+                        put("id", "call_ambiguous")
+                        put("commandId", cmdAmbiguous)
+                        put("name", "return_to_origin")
+                        put("args", org.json.JSONObject())
+                    }
+                )
+            }
+            assertEquals(0, recentsCardTappedCount)
+            assertEquals("REQUESTED_UNVERIFIED", liveEngine.lastTurnReport?.finalStatus)
+            assertEquals(
+                "Recents mein ek se zyada windows hain, aap kis window par wapas jana chahte hain?",
+                liveEngine.lastTurnReport?.spokenReply
+            )
+
+            // 5b. Saved origin is missing -> NO_SAVED_ORIGIN_TASK -> one short question
+            com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = null
+            val cmdMissingOrigin = liveEngine.startNewCommandTurn(commandId = "cmd_missing_origin", utterance = utterance2)
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLiveFunctionCallSingle(
+                    org.json.JSONObject().apply {
+                        put("id", "call_missing_origin")
+                        put("commandId", cmdMissingOrigin)
+                        put("name", "return_to_origin")
+                        put("args", org.json.JSONObject())
+                    }
+                )
+            }
+            assertEquals("NEEDS_SETUP", liveEngine.lastTurnReport?.finalStatus)
+            assertEquals(
+                "Pichli app ka record nahin mila, aap kis app par wapas jana chahte hain?",
+                liveEngine.lastTurnReport?.spokenReply
+            )
+
+            // =========================================================================
+            // 6. Keep explicit commands separate:
+            //    - "WhatsApp Status kholo" opens Status
+            //    - "recent apps dikhao" shows Recents
+            // =========================================================================
+            currentPhase = "WHATSAPP_OPEN"
+            val offlineEngine = com.example.engine.OfflineCommandEngine()
+            val statusAction = offlineEngine.parseCommand("WhatsApp Status kholo")
+            assertEquals("ui_click_text", statusAction.action)
+            assertEquals("Status", statusAction.target)
+            assertFalse(
+                com.omnivoice.agentfix.UiTools.shouldRedirectToolToReturnToOrigin(
+                    "ui_click_text",
+                    "WhatsApp Status kholo",
+                    org.json.JSONObject().put("text", "Status")
+                )
+            )
+
+            val recentsAction = offlineEngine.parseCommand("recent apps dikhao")
+            assertEquals("navigate", recentsAction.action)
+            assertEquals("recents", recentsAction.target)
+            assertFalse(
+                com.omnivoice.agentfix.UiTools.shouldRedirectToolToReturnToOrigin(
+                    "perform_gesture",
+                    "recent apps dikhao",
+                    org.json.JSONObject().put("action", "recents")
+                )
+            )
+
+            // Verify Gemini Live tool declarations include return_to_origin and multi-script speech recognition works
+            val toolsJsonStr = com.example.engine.OmniLiveSessionEngine.buildLiveToolsJson().toString()
+            assertTrue(
+                "Gemini Live functionDeclarations must include return_to_origin",
+                toolsJsonStr.contains("\"name\":\"return_to_origin\"")
+            )
+            assertTrue(
+                com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(
+                    "اس سافٹ ویئر پر لے کر جاؤ جہاں میں پہلے کام کر رہا تھا"
+                )
+            )
+            assertTrue(
+                com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(
+                    "उस प्रीवियस स्क्रीन पर ले कर जाओ जहां मैं पहले वर्क कर रहा था"
+                )
+            )
+        } finally {
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+        }
+    }
 }
+
+
 
 
 

@@ -187,6 +187,24 @@ class ActionExecutor(private val context: Context) {
                         com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(com.omnivoice.agentfix.AgentSession.lastUserUtterance)
                     ) {
                         executeReturnToOrigin()
+                    } else if (navTarget == "recents" || navTarget == "recent_apps" || navTarget == "overview") {
+                        val res = kotlinx.coroutines.runBlocking {
+                            com.omnivoice.agentfix.ToolDispatcher.getInstance(context).dispatchMap(
+                                "perform_gesture",
+                                mapOf("action" to "recents")
+                            )
+                        }
+                        if (res.ok && res.verified) ExecutionResult.Success(res.message)
+                        else ExecutionResult.Failure(res.message)
+                    } else if (navTarget == "home") {
+                        val res = kotlinx.coroutines.runBlocking {
+                            com.omnivoice.agentfix.ToolDispatcher.getInstance(context).dispatchMap(
+                                "perform_gesture",
+                                mapOf("action" to "home")
+                            )
+                        }
+                        if (res.ok && res.verified) ExecutionResult.Success(res.message)
+                        else ExecutionResult.Failure(res.message)
                     } else {
                         executeNavigate(action.target)
                     }

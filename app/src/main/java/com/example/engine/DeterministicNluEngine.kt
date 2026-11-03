@@ -495,7 +495,10 @@ If the user says "You made a mistake, don't do X" or "Remember that when I say [
             val hasPriorityLocalTask = localExtractedTasks.any {
                 it.taskType == NluTaskType.WHATSAPP_CALL ||
                     it.taskType == NluTaskType.WHATSAPP_DELETE_MESSAGE ||
-                    it.taskType == NluTaskType.UI_CLICK
+                    it.taskType == NluTaskType.UI_CLICK ||
+                    (it.taskType == NluTaskType.CUSTOM_ANDROID_INTENT &&
+                        (it.target.equals("origin_task", ignoreCase = true) ||
+                            it.actionValue.equals("RETURN_TO_ORIGIN", ignoreCase = true)))
             }
             if (localExtractedTasks.isNotEmpty() && (response.tasksToExecute.isEmpty() || hasPriorityLocalTask)) {
                 val reply = response.spokenReply.takeIf {

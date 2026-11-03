@@ -30,9 +30,11 @@ class ToolDispatcher(context: Context) {
             )
         )
         val canonical = if (
-            (rawCanonical == "close_app" || rawCanonical == "perform_gesture" || rawCanonical == "open_app") &&
-            (UiTools.isReturnToPreviousAppCommand(AgentSession.lastUserUtterance) ||
-                UiTools.isReturnToPreviousAppCommand(argHint))
+            UiTools.shouldRedirectToolToReturnToOrigin(
+                rawToolName = toolName,
+                activeUtterance = AgentSession.lastUserUtterance.ifBlank { argHint },
+                args = rawArgs
+            )
         ) {
             AgentLog.i(
                 "Dispatcher",
@@ -42,6 +44,13 @@ class ToolDispatcher(context: Context) {
         } else {
             rawCanonical
         }
+        UiTools.lastCommandRouteTrace = UiTools.CommandRouteTrace(
+            routeType = rawArgs.optString("_routeType", "VOICE"),
+            recognizedTranscript = AgentSession.lastUserUtterance.ifBlank { argHint },
+            matchedIntent = if (canonical == "return_to_origin") "return_to_origin" else canonical,
+            savedOriginPackage = UiTools.lastOriginTaskSnapshot?.packageName,
+            actualDispatchedTool = canonical
+        )
         AgentLog.i("Dispatcher", "dispatch($toolName -> $canonical, callId=${callId ?: "none"}, args=$rawArgs)")
 
         if (com.example.engine.LockScreenUnlockManager.isDeviceCurrentlyLocked(appContext) &&
@@ -505,6 +514,17 @@ class ToolDispatcher(context: Context) {
                     put("required", JSONArray(listOf("app_name")))
                 })
             }
+            val returnToOrigin = JSONObject().apply {
+                put("name", "return_to_origin")
+                put(
+                    "description",
+                    "Returns to the saved previous app, window, screen, software, or open draft where the user was working before switching apps (e.g. 'wapas jao', 'wapas iss window par aao', 'pichli app par wapas jao', 'uss previous screen par le kar jao jahan main pehle work kar raha tha', 'uss software par le kar jao jahan main pehle kaam kar raha tha'). Always use this instead of clicking WhatsApp tabs or opening Recents."
+                )
+                put("parameters", JSONObject().apply {
+                    put("type", "OBJECT")
+                    put("properties", JSONObject())
+                })
+            }
             val typeInField = JSONObject().apply {
                 put("name", "type_in_field")
                 put(
@@ -731,7 +751,8 @@ class ToolDispatcher(context: Context) {
                 whatsappSendMessage,
                 whatsappDeleteMessage,
                 whatsappCall,
-                closeApp
+                closeApp,
+                returnToOrigin
             )
         }
 
@@ -846,7 +867,7 @@ class ToolDispatcher(context: Context) {
    - NEVER claim an action succeeded unless `ok == true` AND `verified == true`.
    - If `ok == false`, `verified == false`, `status == "NEEDS_PERMISSION"`, `status == "AMBIGUOUS_CONTACT"`, `status == "NOT_FOUND"`, or `status == "OS_RESTRICTED"`, report the exact reason from `message` honestly to the user.
 2. NO DUPLICATE CALLS:
-   - Call a mutating tool (`whatsapp_send_message`, `whatsapp_send_voice_note`, `whatsapp_delete_message`, `whatsapp_call`, `close_app`, `type_in_field`, `ui_click_text`, `open_app`, `perform_gesture`, `handle_phone_call`) AT MOST ONCE per user request. Never call `ui_click_text("Send")` after `whatsapp_send_message` because `whatsapp_send_message` already clicks Send and verifies it.
+   - Call a mutating tool (`whatsapp_send_message`, `whatsapp_send_voice_note`, `whatsapp_delete_message`, `whatsapp_call`, `close_app`, `type_in_field`, `ui_click_text`, `open_app`, `return_to_origin`, `perform_gesture`, `handle_phone_call`) AT MOST ONCE per user request. Never call `ui_click_text("Send")` after `whatsapp_send_message` because `whatsapp_send_message` already clicks Send and verifies it.
 3. WHATSAPP MESSAGE DELETION & FULL SCREEN ICON AWARENESS:
    - Whenever the user asks to delete a WhatsApp message ("iss message ko delete karo", "delete this message", "message mita do", "delete for everyone"), ALWAYS call `whatsapp_delete_message(message_text="last", scope="everyone")`. It automatically handles already-selected messages, clicks the top Delete trash icon, and confirms 'Delete for everyone' in the popup dialog.
    - `describe_screen` returns `visibleIcons` with semantic meanings and screen zones for every icon on screen. Use `ui_click_text` to click any icon, toolbar button, or dialog button by its label or semantic meaning.
@@ -859,6 +880,11 @@ class ToolDispatcher(context: Context) {
    - To type into a non-search form or chat box, use `type_in_field(text, field_hint, submit=true)`.
    - For swipes, scrolls, coordinate taps, or Home/Back/Recents/Notifications, use `perform_gesture`.
    - When the user teaches a standing rule ("ab se jab bhi...", "from now on whenever..."), call `teach_standing_rule` to persist and verify it.
+6. RETURN TO PREVIOUS APP / WORK / WINDOW vs. WHATSAPP STATUS vs. SHOW RECENTS:
+   - Whenever the user asks in English, Urdu, or Roman Urdu to return to the previous app, window, screen, software, or work they were doing before switching apps (e.g., "wapas jao", "pichli app par wapas jao", "wapas iss window par aao", "wapas usi window par aao", "return to the previous app", "uss previous screen par le kar jao jahan main pehle work kar raha tha", "uss software par le kar jao jahan main pehle kaam kar raha tha"), ALWAYS call `return_to_origin()` directly.
+   - NEVER click WhatsApp tabs like "Status", "Updates", or "Calls" and NEVER call `perform_gesture(gesture_type="recents")` or `close_app` when the user asks to return to their previous screen, software, or work.
+   - Only click "Status" (`ui_click_text(text="Status")`) when the user explicitly asks for WhatsApp Status ("WhatsApp Status kholo", "open WhatsApp Status").
+   - Only open Recents (`perform_gesture(gesture_type="recents")`) when the user explicitly asks to view recent apps ("recent apps dikhao", "show recent apps").
 """
     }
 }

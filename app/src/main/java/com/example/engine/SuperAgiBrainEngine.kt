@@ -102,6 +102,18 @@ object SuperAgiBrainEngine {
             return emptyList()
         }
 
+        // Fast-path: full-sentence Return-to-Previous-App / Origin Window before clause splitting
+        if (com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(trimmed)) {
+            return listOf(
+                DeterministicNluTask(
+                    stepNumber = 1,
+                    taskType = NluTaskType.CUSTOM_ANDROID_INTENT,
+                    target = "origin_task",
+                    actionValue = "RETURN_TO_ORIGIN"
+                )
+            )
+        }
+
         // Split multi-step clauses if the user chained multiple commands
         val clauses = splitMultiStepClauses(trimmed)
         val tasks = mutableListOf<DeterministicNluTask>()
@@ -155,6 +167,32 @@ object SuperAgiBrainEngine {
                     taskType = NluTaskType.CUSTOM_ANDROID_INTENT,
                     target = "origin_task",
                     actionValue = "RETURN_TO_ORIGIN"
+                )
+            )
+            return tasks
+        }
+
+        // 0B. Explicit "WhatsApp Status kholo" -> UI_CLICK Status tab
+        if (com.omnivoice.agentfix.UiTools.isExplicitWhatsAppStatusCommand(clause)) {
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = NluTaskType.UI_CLICK,
+                    target = "Status",
+                    actionValue = "CLICK"
+                )
+            )
+            return tasks
+        }
+
+        // 0C. Explicit "recent apps dikhao" -> Recents navigation
+        if (com.omnivoice.agentfix.UiTools.isExplicitShowRecentsCommand(clause)) {
+            tasks.add(
+                DeterministicNluTask(
+                    stepNumber = step++,
+                    taskType = NluTaskType.CUSTOM_ANDROID_INTENT,
+                    target = "navigation",
+                    actionValue = "recents"
                 )
             )
             return tasks

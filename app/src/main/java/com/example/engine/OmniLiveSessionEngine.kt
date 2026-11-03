@@ -181,7 +181,7 @@ CRITICAL RULES:
    - `whatsapp_delete_message(message_text, scope)`: Deletes a message in the open WhatsApp chat and verifies removal.
    - `describe_screen()`: Captures a fresh live snapshot of the foreground application window.
    - `get_device_info(category)`: Reads live battery %, temperature °C, CPU cores/MHz, RAM MB, storage GB, and network status.
-   - `open_app(app_name)`, `type_in_field(text, field_hint, submit)`, `ui_click_text(text, exact)`, `close_app(app_name, method)`: Verified UI automation tools.
+   - `open_app(app_name)`, `return_to_origin()`, `type_in_field(text, field_hint, submit)`, `ui_click_text(text, exact)`, `close_app(app_name, method)`: Verified UI automation tools. Always call `return_to_origin()` when the user asks to return to the previous app, window, screen, software, or work they were doing before switching apps.
    - `make_phone_call_zero_touch(contactName, phoneNumber)` / `make_direct_phone_call`: Places a direct phone call.
    - `manage_connectivity_and_settings(settingType, action, networkName, passwordOrValue)`: Controls Wi-Fi, Mobile Data, Bluetooth, Hotspot, Flashlight/Torch, Volume, Brightness, DND, and Alarms.
    - `generate_ai_image_and_apply(prompt, targetAction, contactName)`: Generates a high-resolution AI image.
@@ -915,6 +915,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     private var currentTurnHasPendingOrExecutedAction: Boolean = false
 
     @Volatile
+    private var currentVoiceTurnCompleted: Boolean = false
+
+    @Volatile
     var currentTurnCanonicalResult: com.omnivoice.agentfix.CanonicalAppLaunchResult? = null
         private set
 
@@ -991,6 +994,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     ): String {
         activeCommandId = commandId
         awaitingVerifiedToolOutcome = false
+        currentVoiceTurnCompleted = false
         currentTurnCanonicalResult = null
         currentTurnCanonicalResultCommandId = ""
         lastSpokenReplyForCurrentCommand = ""
@@ -1146,6 +1150,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                             useRomanUrdu -> "$originLabel khul gaya hai, lekin purana draft confirm nahin hua."
                             else -> "$originLabel is open, but the previous draft could not be confirmed."
                         }
+                        "AMBIGUOUS_RECENTS_TASK" -> when {
+                            useUrduScript -> "ریسنٹس میں ایک سے زیادہ ونڈوز ہیں — آپ کس ونڈو پر واپس جانا چاہتے ہیں؟"
+                            useRomanUrdu -> "Recents mein ek se zyada windows hain, aap kis window par wapas jana chahte hain?"
+                            else -> "Multiple matching windows are open in Recents—which one would you like to return to?"
+                        }
                         "RETURN_OBSERVATION_UNVERIFIED" -> when {
                             useUrduScript -> "میں نے کوشش کی، لیکن واپسی کنفرم نہیں ہوئی۔"
                             useRomanUrdu -> "Maine koshish ki, lekin wapsi confirm nahin hui."
@@ -1160,9 +1169,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
                 com.omnivoice.agentfix.CanonicalAppLaunchStatus.NEEDS_SETUP -> {
                     when {
-                        useUrduScript -> "واپس جانے کے لیے کوئی پچھلی ونڈو محفوظ نہیں ہے۔"
-                        useRomanUrdu -> "Wapas jane ke liye koi pichli window mehfooz nahin hai."
-                        else -> "There is no saved previous window to return to."
+                        useUrduScript -> "پچھلی ایپ کا ریکارڈ نہیں ملا — آپ کس ایپ پر واپس جانا چاہتے ہیں؟"
+                        useRomanUrdu -> "Pichli app ka record nahin mila, aap kis app par wapas jana chahte hain?"
+                        else -> "No previous app was saved—which app would you like to return to?"
                     }
                 }
                 com.omnivoice.agentfix.CanonicalAppLaunchStatus.BLOCKED -> {
@@ -2180,6 +2189,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     (0 until partsArr.length()).any { idx -> partsArr.optJSONObject(idx)?.optJSONObject("functionCall") != null }
                 } == true)
             if (hasEmbeddedToolCall) {
+                val hasInlineInputTranscription = root.optJSONObject("serverContent")
+                    ?.optJSONObject("inputTranscription")
+                    ?.optString("text", "")
+                    ?.isNotEmpty() == true
+                if (currentVoiceTurnCompleted && !hasInlineInputTranscription) {
+                    startNewCommandTurn()
+                    _liveUserTranscript.value = ""
+                    com.omnivoice.agentfix.AgentSession.onUserUtterance("")
+                }
                 currentTurnHasPendingOrExecutedAction = true
                 awaitingVerifiedToolOutcome = true
                 clearPlaybackQueueAndStopImmediately()
@@ -2204,7 +2222,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 if (inputTrans != null) {
                     val userChunk = inputTrans.optString("text", "")
                     if (userChunk.isNotEmpty()) {
+                        if (currentVoiceTurnCompleted) {
+                            startNewCommandTurn()
+                            _liveUserTranscript.value = ""
+                        }
                         _liveUserTranscript.value = (_liveUserTranscript.value + userChunk).trimStart()
+                        com.omnivoice.agentfix.AgentSession.onUserUtterance(_liveUserTranscript.value)
                         OmniAutonomousCoreEngine.analyzeUserMood(_liveUserTranscript.value, _inputAudioRms.value)
                     }
                 }
@@ -2295,6 +2318,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
 
                 if (serverContent.optBoolean("turnComplete", false)) {
+                    currentVoiceTurnCompleted = true
                     val uText = _liveUserTranscript.value.trim()
                     val aText = _liveAiTranscript.value.trim()
                     if (uText.isNotEmpty()) {
@@ -2667,17 +2691,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             com.omnivoice.agentfix.AgentSession.lastUserUtterance
         }
         val fnName = if (
-            com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(activeUtterance) &&
-            rawFnName in setOf(
-                "close_app",
-                "close_target_app",
-                "perform_gesture",
-                "control_any_app_with_accessibility",
-                "control_app_and_screen_ui",
-                "jarvis_hardware_and_screen_control",
-                "communicate_or_open_app",
-                "open_app"
-            )
+            com.omnivoice.agentfix.UiTools.shouldRedirectToolToReturnToOrigin(rawFnName, activeUtterance, args)
         ) {
             Log.i(TAG, "Redirecting Live tool '$rawFnName' -> 'return_to_origin' for utterance '$activeUtterance'")
             args.put("_redirectedFromTool", rawFnName)
@@ -2685,6 +2699,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         } else {
             rawFnName
         }
+        val matchedIntent = when {
+            fnName == "return_to_origin" || com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(activeUtterance) -> "return_to_origin"
+            com.omnivoice.agentfix.UiTools.isExplicitWhatsAppStatusCommand(activeUtterance) -> "open_whatsapp_status"
+            com.omnivoice.agentfix.UiTools.isExplicitShowRecentsCommand(activeUtterance) -> "show_recents"
+            else -> fnName
+        }
+        com.omnivoice.agentfix.UiTools.lastCommandRouteTrace = com.omnivoice.agentfix.UiTools.CommandRouteTrace(
+            routeType = "VOICE",
+            recognizedTranscript = activeUtterance,
+            matchedIntent = matchedIntent,
+            savedOriginPackage = com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName,
+            actualDispatchedTool = fnName
+        )
 
         OmniAutonomousCoreEngine.resetInactivityTimer()
         _connectionState.value = LiveConnectionState.LIVE_EXECUTING_TOOL
