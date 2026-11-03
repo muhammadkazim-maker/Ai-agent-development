@@ -3492,7 +3492,7 @@ class ExampleRobolectricTest {
         val liveReturnResp = kotlinx.coroutines.runBlocking {
             liveEngine.executeLiveFunctionCallSingle(liveReturnCall)
         }
-        assertEquals("return_to_origin", liveReturnResp.optString("name"))
+        assertEquals("communicate_or_open_app", liveReturnResp.optString("name"))
         val prodReturnRes = com.omnivoice.agentfix.UiTools.lastCanonicalResult
         assertNotNull(prodReturnRes)
         assertEquals(
@@ -3739,9 +3739,23 @@ class ExampleRobolectricTest {
         assertTrue(resOutcome1.toExecutionResult() is com.example.engine.ExecutionResult.Success)
         assertTrue(resOutcome1.toActionResult() is com.example.engine.ActionResult.Success)
         assertEquals("VERIFIED", liveEngine.lastFinalStatusForCurrentCommand)
-        assertEquals(resOutcome1.message, liveEngine.lastSpokenReplyForCurrentCommand)
-        assertEquals(resOutcome1.message, liveEngine.liveAiTranscript.value)
+        assertEquals(
+            "Notepad wapas khul gaya hai aur aapka draft mehfooz hai.",
+            liveEngine.lastSpokenReplyForCurrentCommand
+        )
+        assertEquals(
+            "Notepad wapas khul gaya hai aur aapka draft mehfooz hai.",
+            liveEngine.liveAiTranscript.value
+        )
+        assertEquals(resOutcome1.message, liveEngine.lastDiagnosticTextForCurrentCommand)
         assertEquals(resOutcome1.message, liveEngine.slideUpCards.value.first().subtitle)
+        assertFalse(
+            "Spoken confirmation must never read package names, status labels or navigation methods aloud",
+            liveEngine.lastSpokenReplyForCurrentCommand.contains("com.example.notes") ||
+                liveEngine.lastSpokenReplyForCurrentCommand.contains("Verified:") ||
+                liveEngine.lastSpokenReplyForCurrentCommand.contains("taskId=") ||
+                liveEngine.lastSpokenReplyForCurrentCommand.contains("window=")
+        )
         assertTrue(respOutcome1.getJSONObject("response").getJSONObject("result").optBoolean("verified"))
 
         // --- OUTCOME 2: Home stays visible ---
@@ -3879,6 +3893,369 @@ class ExampleRobolectricTest {
         assertEquals("REQUESTED_UNVERIFIED", unverifiedPayload.optString("finalStatus"))
         assertFalse("Unverified action tool must never default to executed=true", unverifiedPayload.optBoolean("executed"))
         assertFalse("Unverified action tool must never default to verified=true", unverifiedPayload.optBoolean("verified"))
+
+        // =========================================================================
+        // 10. WHATSAPP VOICE-STYLE REGRESSION REPAIR (592d2cc vs 44fad99):
+        //     (A) Serialized WebSocket toolResponse.functionResponses JSON:
+        //         - Sends original function-call id, original wire function name
+        //           (even when redirected e.g. close_app -> return_to_origin), and response
+        //         - Does NOT serialize commandId beside id/name/response
+        //     (B) Separate diagnostic text from spoken text:
+        //         - Never reads package names, status labels, or navigation methods aloud
+        //         - No fallback to previous command's lastCanonicalResult.message;
+        //           says explicitly when current outcome is missing
+        //     (C) Scoped completion guard:
+        //         - Permits quoted words ("done", "ho gaya") in conversation and
+        //           ordinary non-action dialogue, while blocking unverified action claims
+        //     (D) Single speaker per turn across:
+        //         1. Verified launch ("WhatsApp kholo") while Gemini Live connected
+        //         2. Unverified launch ("WhatsApp kholo") while Gemini Live connected
+        //         3. Conversational follow-up while WhatsApp stays foreground
+        //         4. Genuine WebSocket disconnect records close code + reason in Diagnostics
+        //            and speaks in user's language via Android TTS
+        // =========================================================================
+        val sentPayloads = mutableListOf<String>()
+        val fakeLiveSocket = object : okhttp3.WebSocket {
+            override fun request(): okhttp3.Request = okhttp3.Request.Builder().url("wss://example.com/live").build()
+            override fun queueSize(): Long = 0L
+            override fun send(text: String): Boolean {
+                sentPayloads.add(text)
+                return true
+            }
+            override fun send(bytes: okio.ByteString): Boolean = true
+            override fun close(code: Int, reason: String?): Boolean = true
+            override fun cancel() {}
+        }
+
+        // (A) Test redirected tool call preserves original wire name and omits commandId beside id/name/response
+        liveEngine.attachLiveWebSocketForTest(fakeLiveSocket, ready = true)
+        com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot = notepadSavedOriginFor3Outcomes
+        outcomePhase = "WHATSAPP_BEFORE_RETURN"
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            val nextStarted = shadowApp.peekNextStartedActivity()
+            val startedPkg = nextStarted?.component?.packageName ?: nextStarted?.`package`
+            if (outcomePhase == "WHATSAPP_BEFORE_RETURN" && startedPkg == "com.example.notes") {
+                shadowApp.nextStartedActivity
+                outcomePhase = "NOTEPAD_WITH_DRAFT_42"
+            }
+            when (outcomePhase) {
+                "WHATSAPP_BEFORE_RETURN" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = -1,
+                    windowId = 155,
+                    titleGuess = "WhatsApp"
+                )
+                "NOTEPAD_WITH_DRAFT_42" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = -1,
+                    windowId = 209,
+                    titleGuess = "Notepad - Draft 42",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                else -> null
+            }
+        }
+        val cmdRedirect = liveEngine.startNewCommandTurn(
+            commandId = "internal_cmd_redirect_99",
+            utterance = "wapas iss window par aao"
+        )
+        // Model sends wire name "close_app" with id "call_wire_77", which internally redirects to "return_to_origin"
+        liveEngine.simulateLiveWebSocketMessageForTest(
+            org.json.JSONObject().apply {
+                put("toolCall", org.json.JSONObject().apply {
+                    put("functionCalls", org.json.JSONArray().apply {
+                        put(org.json.JSONObject().apply {
+                            put("id", "call_wire_77")
+                            put("commandId", cmdRedirect)
+                            put("name", "close_app")
+                            put("args", org.json.JSONObject())
+                        })
+                    })
+                })
+            }.toString()
+        )
+        // Wait for coroutine tool execution to complete and send over fakeLiveSocket
+        val waitDeadline = android.os.SystemClock.elapsedRealtime() + 2000L
+        while (sentPayloads.isEmpty() && android.os.SystemClock.elapsedRealtime() < waitDeadline) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        assertTrue("Expected toolResponse payload sent over WebSocket", sentPayloads.isNotEmpty())
+        val actualWireJsonStr = sentPayloads.last()
+        val actualWireJson = org.json.JSONObject(actualWireJsonStr)
+        val fnResponsesArr = actualWireJson.getJSONObject("toolResponse").getJSONArray("functionResponses")
+        assertEquals(1, fnResponsesArr.length())
+        val wireFnResp = fnResponsesArr.getJSONObject(0)
+        assertEquals("call_wire_77", wireFnResp.getString("id"))
+        assertEquals(
+            "Redirected tool must preserve the model's original wire name in functionResponses",
+            "close_app",
+            wireFnResp.getString("name")
+        )
+        assertFalse(
+            "commandId must be kept internal and NEVER serialized beside id/name/response",
+            wireFnResp.has("commandId")
+        )
+        val wireFnKeys = mutableSetOf<String>()
+        val keyIter = wireFnResp.keys()
+        while (keyIter.hasNext()) {
+            wireFnKeys.add(keyIter.next())
+        }
+        assertEquals(setOf("id", "name", "response"), wireFnKeys)
+        assertFalse(
+            "Internal commandId must not be serialized inside response.result either",
+            wireFnResp.getJSONObject("response").getJSONObject("result").has("commandId")
+        )
+
+        // (B) Test missing current outcome does NOT fall back to previous command's lastCanonicalResult.message
+        val cmdMissingOutcome = liveEngine.startNewCommandTurn(
+            commandId = "cmd_missing_outcome",
+            utterance = "WhatsApp kholo"
+        )
+        val missingOutcomeResp = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_missing_outcome")
+                    put("commandId", cmdMissingOutcome)
+                    put("name", "open_app")
+                    put("args", org.json.JSONObject().apply {
+                        put("app_name", "WhatsApp")
+                        put("_simulateMissingCurrentOutcome", true)
+                    })
+                }
+            )
+        }
+        assertEquals(
+            "Iss command ka natija abhi mojood nahin hai.",
+            liveEngine.lastSpokenReplyForCurrentCommand
+        )
+        assertEquals(
+            "REQUESTED_UNVERIFIED",
+            missingOutcomeResp.getJSONObject("response").getJSONObject("result").optString("finalStatus")
+        )
+
+        // (C) Test scoped completion guard: permits quoted "done" / "ho gaya" and non-action dialogue,
+        //     blocks unverified action claim
+        assertTrue(
+            "Unquoted completion claim during unverified action turn must be blocked",
+            liveEngine.isCompletionClaimBeforeVerifiedResult("Kaam ho gaya hai")
+        )
+        assertFalse(
+            "Quoted 'ho gaya' or 'done' in conversation must be permitted even during pending/unverified turn",
+            liveEngine.isCompletionClaimBeforeVerifiedResult("Jab kaam pura ho jaye to \"ho gaya\" ya \"done\" kehna.")
+        )
+        liveEngine.startNewCommandTurn(commandId = "cmd_ordinary_chat", utterance = "Mausam kaisa hai aaj?")
+        assertFalse(
+            "Ordinary non-action conversation turn must permit 'done' or 'ho gaya'",
+            liveEngine.isCompletionClaimBeforeVerifiedResult("Aaj ka kaam ho gaya, mausam acha hai.")
+        )
+
+        // (D) Test 3-turn sequence while Gemini Live is connected:
+        //     Turn 1: Verified launch of WhatsApp ("WhatsApp kholo")
+        //     Turn 2: Unverified launch of WhatsApp ("WhatsApp kholo")
+        //     Turn 3: Conversational follow-up while WhatsApp stays in the foreground
+        liveEngine.clearTurnReportsForTest()
+        sentPayloads.clear()
+        liveEngine.attachLiveWebSocketForTest(fakeLiveSocket, ready = true)
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notes",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+
+        // --- TURN 1: Verified launch ("WhatsApp kholo") ---
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        var whatsappTurnPhase = "NOTEPAD_FOREGROUND"
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            whatsappTurnPhase = "LAUNCHER_HOME"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                whatsappTurnPhase = "WHATSAPP_FOREGROUND"
+                true
+            } else {
+                false
+            }
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (whatsappTurnPhase) {
+                "NOTEPAD_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.example.notes",
+                    label = "Notepad",
+                    taskId = -1,
+                    windowId = 101,
+                    titleGuess = "Notepad",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                "LAUNCHER_HOME" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    taskId = -1,
+                    windowId = 202,
+                    titleGuess = "Home",
+                    nodes = listOf(
+                        com.omnivoice.agentfix.UiNodeSummary(
+                            index = 1,
+                            viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                            className = "android.widget.TextView",
+                            packageName = "com.google.android.apps.nexuslauncher",
+                            text = "WhatsApp",
+                            contentDescription = "WhatsApp",
+                            hintText = "",
+                            isClickable = true,
+                            isLongClickable = false,
+                            isEditable = false,
+                            isScrollable = false,
+                            isFocused = false,
+                            isEnabled = true,
+                            bounds = android.graphics.Rect(100, 400, 260, 580)
+                        )
+                    )
+                )
+                "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    taskId = -1,
+                    windowId = 303,
+                    titleGuess = "WhatsApp Chats"
+                )
+                else -> null
+            }
+        }
+        val cmdTurn1 = liveEngine.startNewCommandTurn(commandId = "cmd_turn_1_verified", utterance = "WhatsApp kholo")
+        val respTurn1 = kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_turn_1")
+                    put("commandId", cmdTurn1)
+                    put("name", "communicate_or_open_app")
+                    put("args", org.json.JSONObject().apply {
+                        put("actionType", "open_app")
+                        put("contactOrAppName", "WhatsApp")
+                        put("messageOrQuery", "")
+                    })
+                }
+            )
+        }
+        val turn1Report = liveEngine.lastTurnReport!!
+        assertEquals("VERIFIED", turn1Report.finalStatus)
+        assertEquals("WhatsApp khul gaya hai.", turn1Report.spokenReply)
+        assertTrue(
+            "Diagnostic text must retain technical details while spoken text is clean",
+            turn1Report.diagnosticText.contains("com.whatsapp") &&
+                turn1Report.diagnosticText.contains("VISIBLE_HOME_ICON_TAP")
+        )
+        assertFalse(
+            "Spoken reply must never contain package name or launch method",
+            turn1Report.spokenReply.contains("com.whatsapp") ||
+                turn1Report.spokenReply.contains("VISIBLE_HOME_ICON_TAP") ||
+                turn1Report.spokenReply.contains("Verified:")
+        )
+        assertTrue(turn1Report.outputEngine.startsWith("GEMINI_LIVE"))
+        assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, turn1Report.language)
+        assertTrue(turn1Report.liveConnected)
+        assertEquals("communicate_or_open_app", respTurn1.getString("name"))
+
+        // --- TURN 2: Unverified launch ("WhatsApp kholo" when observer times out) ---
+        while (shadowApp.nextStartedActivity != null) { /* drain */ }
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = { false }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { false }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            // Launcher stays visible; WhatsApp never observed in foreground
+            buildSnapshot(
+                pkg = "com.google.android.apps.nexuslauncher",
+                label = "Pixel Launcher",
+                taskId = -1,
+                windowId = 202,
+                titleGuess = "Home"
+            )
+        }
+        val cmdTurn2 = liveEngine.startNewCommandTurn(commandId = "cmd_turn_2_unverified", utterance = "WhatsApp kholo")
+        kotlinx.coroutines.runBlocking {
+            liveEngine.executeLiveFunctionCallSingle(
+                org.json.JSONObject().apply {
+                    put("id", "call_turn_2")
+                    put("commandId", cmdTurn2)
+                    put("name", "open_app")
+                    put("args", org.json.JSONObject().apply {
+                        put("app_name", "WhatsApp")
+                    })
+                }
+            )
+        }
+        val turn2Report = liveEngine.lastTurnReport!!
+        assertEquals("REQUESTED_UNVERIFIED", turn2Report.finalStatus)
+        assertEquals(
+            "Maine WhatsApp kholne ki koshish ki, lekin abhi khulna confirm nahin hua.",
+            turn2Report.spokenReply
+        )
+        assertFalse(
+            "Unverified spoken reply must not contain status labels or package names",
+            turn2Report.spokenReply.contains("Requested/Unverified") ||
+                turn2Report.spokenReply.contains("com.whatsapp")
+        )
+        assertTrue(turn2Report.outputEngine.startsWith("GEMINI_LIVE"))
+        assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, turn2Report.language)
+        assertTrue(turn2Report.liveConnected)
+
+        // --- TURN 3: Conversational follow-up while WhatsApp stays in the foreground ---
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            buildSnapshot(
+                pkg = "com.whatsapp",
+                label = "WhatsApp",
+                taskId = -1,
+                windowId = 303,
+                titleGuess = "WhatsApp Chats"
+            )
+        }
+        liveEngine.startNewCommandTurn(
+            commandId = "cmd_turn_3_followup",
+            utterance = "Shukriya, ab batao aaj mausam kaisa hai?"
+        )
+        liveEngine.simulateLiveWebSocketMessageForTest(
+            org.json.JSONObject().apply {
+                put("serverContent", org.json.JSONObject().apply {
+                    put("outputTranscription", org.json.JSONObject().apply {
+                        put("text", "Aaj mausam khushgawar hai aur WhatsApp aapke samne khula hai.")
+                    })
+                    put("turnComplete", true)
+                })
+            }.toString()
+        )
+        val turn3Report = liveEngine.lastTurnReport!!
+        val fgDuringFollowUp = com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)
+        assertEquals("com.whatsapp", fgDuringFollowUp?.packageName)
+        assertEquals("CONVERSATIONAL", turn3Report.finalStatus)
+        assertEquals(
+            "Aaj mausam khushgawar hai aur WhatsApp aapke samne khula hai.",
+            turn3Report.spokenReply
+        )
+        assertTrue(
+            "Conversational follow-up after WhatsApp launch must stay on GEMINI_LIVE, not switch to ANDROID_TTS",
+            turn3Report.outputEngine.startsWith("GEMINI_LIVE")
+        )
+        assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, turn3Report.language)
+        assertTrue(turn3Report.liveConnected)
+
+        // Verify genuine Live WebSocket disconnect records close code and reason in Diagnostics
+        liveEngine.recordLiveWebSocketDisconnect(1011, "Upstream quota or server reset")
+        assertEquals(1011, liveEngine.lastWebSocketCloseCode)
+        assertEquals("Upstream quota or server reset", liveEngine.lastWebSocketCloseReason)
+        assertTrue(liveEngine.lastLiveDisconnectDiagnostic.contains("code=1011"))
+        assertTrue(liveEngine.lastLiveDisconnectDiagnostic.contains("Upstream quota or server reset"))
+        assertFalse(liveEngine.isGeminiLiveWebSocketConnected())
 
         com.omnivoice.agentfix.UiTools.resetTestHooks()
     }

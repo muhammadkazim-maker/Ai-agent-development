@@ -1002,23 +1002,69 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         _voiceState.value = VoiceState.ExecutingAction(action)
         _lastExecutedAction.value = action
 
+        val canonicalName = com.omnivoice.agentfix.ToolDispatcher.canonicalToolName(action.action)
+        val isReturnCmd = canonicalName == "return_to_origin" ||
+            (action.action.equals("navigate", ignoreCase = true) &&
+                action.target.lowercase() in setOf("return_to_origin", "previous_app", "origin_task"))
+        val isOpenOrReturnCmd = isReturnCmd || canonicalName == "open_app"
+        if (isOpenOrReturnCmd) {
+            com.omnivoice.agentfix.UiTools.clearLastCanonicalResult()
+        }
+
         val result = actionExecutor.execute(action)
+        val currentOutcome = com.omnivoice.agentfix.UiTools.lastCanonicalResult
+        val utterance = _liveTranscription.value.ifBlank {
+            com.omnivoice.agentfix.AgentSession.lastUserUtterance
+        }
+
         when (result) {
             is ExecutionResult.Success -> {
-                val spoken = result.message.ifBlank { action.spokenResponse }
+                val diagnosticMsg = result.message.ifBlank { action.spokenResponse }
+                val spoken = if (isOpenOrReturnCmd) {
+                    omniLiveEngine.buildSpokenConfirmationForAppCommand(
+                        outcome = currentOutcome,
+                        utterance = utterance,
+                        isReturnCommand = isReturnCmd,
+                        fallbackAppName = action.target
+                    )
+                } else {
+                    omniLiveEngine.sanitizeSpokenText(diagnosticMsg, utterance)
+                }
                 speakResponse(spoken)
                 _voiceState.value = VoiceState.Idle
-                recordLog(action, isLocked = isLockedState, passed = true, summary = spoken, executionStatus = "VERIFIED")
+                recordLog(action, isLocked = isLockedState, passed = true, summary = diagnosticMsg, executionStatus = "VERIFIED")
             }
             is ExecutionResult.RequestedUnverified -> {
-                speakResponse(result.message)
-                _voiceState.value = VoiceState.RequestedUnverified(result.message, result.reasonCode)
-                recordLog(action, isLocked = isLockedState, passed = false, summary = result.message, executionStatus = "REQUESTED_UNVERIFIED")
+                val diagnosticMsg = result.message
+                val spoken = if (isOpenOrReturnCmd) {
+                    omniLiveEngine.buildSpokenConfirmationForAppCommand(
+                        outcome = currentOutcome,
+                        utterance = utterance,
+                        isReturnCommand = isReturnCmd,
+                        fallbackAppName = action.target
+                    )
+                } else {
+                    omniLiveEngine.sanitizeSpokenText(diagnosticMsg, utterance)
+                }
+                speakResponse(spoken)
+                _voiceState.value = VoiceState.RequestedUnverified(diagnosticMsg, result.reasonCode)
+                recordLog(action, isLocked = isLockedState, passed = false, summary = diagnosticMsg, executionStatus = "REQUESTED_UNVERIFIED")
             }
             is ExecutionResult.Failure -> {
-                speakResponse(result.error)
-                _voiceState.value = VoiceState.Error(result.error)
-                recordLog(action, isLocked = isLockedState, passed = false, summary = result.error, executionStatus = "FAILED")
+                val diagnosticMsg = result.error
+                val spoken = if (isOpenOrReturnCmd) {
+                    omniLiveEngine.buildSpokenConfirmationForAppCommand(
+                        outcome = currentOutcome,
+                        utterance = utterance,
+                        isReturnCommand = isReturnCmd,
+                        fallbackAppName = action.target
+                    )
+                } else {
+                    omniLiveEngine.sanitizeSpokenText(diagnosticMsg, utterance)
+                }
+                speakResponse(spoken)
+                _voiceState.value = VoiceState.Error(diagnosticMsg)
+                recordLog(action, isLocked = isLockedState, passed = false, summary = diagnosticMsg, executionStatus = "FAILED")
             }
         }
     }
@@ -1032,16 +1078,19 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             is ExecutionResult.Failure -> res.error
         }
         _lastExecutedAction.value = null
-        speakResponse(msg)
+        speakResponse(omniLiveEngine.sanitizeSpokenText(msg, _liveTranscription.value))
     }
 
     fun speakResponse(text: String, onDone: (() -> Unit)? = null) {
-        _spokenResponse.value = text
+        val cleanText = omniLiveEngine.sanitizeSpokenText(text, _liveTranscription.value)
+        _spokenResponse.value = cleanText
         // Strictly mute microphone while TTS is speaking so the AI never hears its own voice
         sttManager.stopListening()
-        // Single-owner audio rule: if Online Gemini Live WebSocket is actively speaking 24kHz audio,
-        // cancel local TTS so two voices never overlap
-        if (isLiveSessionActive.value && liveConnectionState.value == LiveConnectionState.LIVE_AI_SPEAKING) {
+        // Single-owner audio rule: if Online Gemini Live WebSocket is connected or actively speaking 24kHz audio,
+        // cancel local TTS so two voices never overlap and Live session remains the single speaker
+        if (omniLiveEngine.isGeminiLiveWebSocketConnected() ||
+            (isLiveSessionActive.value && liveConnectionState.value == LiveConnectionState.LIVE_AI_SPEAKING)
+        ) {
             ttsManager.stop()
             onDone?.invoke()
             return
@@ -1062,7 +1111,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                 }
             }
         }
-        ttsManager.speak(text, _config.value.voicePitch, _config.value.voiceSpeed, locale)
+        ttsManager.speak(cleanText, _config.value.voicePitch, _config.value.voiceSpeed, locale)
     }
 
     private fun recordLog(

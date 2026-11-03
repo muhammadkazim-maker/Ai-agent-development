@@ -409,8 +409,15 @@ class ActionExecutor(private val context: Context) {
         }
 
         // 4. Execute and verify real device effect
+        val isOpenOrReturnAction = action.action in setOf(
+            "open_app", "launch_app", "start_app",
+            "return_to_origin", "return_to_previous_app", "wapas_jao", "go_back", "navigate_back"
+        )
+        if (isOpenOrReturnAction) {
+            com.omnivoice.agentfix.UiTools.clearLastCanonicalResult()
+        }
         val execRes = execute(action)
-        if (action.action in setOf("open_app", "launch_app", "start_app", "return_to_origin", "return_to_previous_app", "wapas_jao", "go_back", "navigate_back")) {
+        if (isOpenOrReturnAction) {
             com.omnivoice.agentfix.UiTools.lastCanonicalResult?.let { return it.toActionResult() }
         }
         return when (execRes) {

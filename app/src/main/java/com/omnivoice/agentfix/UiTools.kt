@@ -267,6 +267,10 @@ object UiTools {
     var lastCanonicalResult: CanonicalAppLaunchResult? = null
         internal set
 
+    fun clearLastCanonicalResult() {
+        lastCanonicalResult = null
+    }
+
     @Volatile
     var lastPhase02Diagnostics: Phase02JourneyDiagnostics = Phase02JourneyDiagnostics()
         internal set

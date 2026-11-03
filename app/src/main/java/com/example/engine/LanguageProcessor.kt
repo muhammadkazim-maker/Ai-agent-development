@@ -44,7 +44,9 @@ object LanguageProcessor {
         "bilkul", "zaroor", "foran", "apni", "apne", "aapka", "aapki", "aapke", "bolein", "bolain",
         "likhein", "dekhein", "samajh", "sakta", "sakti", "sakte", "chuka", "chuki", "chukay", "gaya",
         "gayi", "gaye", "liye", "sath", "saath", "walay", "wala", "wali", "lekin", "magar", "kyunke",
-        "bohat", "bahut", "zyada", "kam", "jaldi", "aaram", "sukoon", "pareshan", "khush", "shandar"
+        "bohat", "bahut", "zyada", "kam", "jaldi", "aaram", "sukoon", "pareshan", "khush", "shandar",
+        "wapas", "wapis", "jao", "aao", "pichli", "pichle", "purani", "purana", "peeche", "piche",
+        "par", "pe", "iss", "usi", "khul", "kholen", "mehfooz", "koshish", "wapsi"
     )
 
     private val ROMAN_TO_URDU_CONVERSATIONAL_LEXICON = linkedMapOf(
