@@ -253,6 +253,52 @@ fun JarvisStageFlowScreen(
 
     var showQuickSettingsDialog by remember { mutableStateOf(false) }
     var showExpandedHudDrawer by remember { mutableStateOf(false) }
+    var pendingContextualMicAction by remember { mutableStateOf<String?>(null) }
+
+    val wakeLifecycleState by viewModel.wakeSpeechLifecycleState.collectAsState()
+    val activeMicOwner by viewModel.activeMicOwner.collectAsState()
+    val activeInputRoute by viewModel.activeAudioInputRoute.collectAsState()
+    val isUserArmed by viewModel.isUserArmed.collectAsState()
+
+    val contextualMicPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasMicPermissionActual = granted
+        viewModel.refreshWakeAndSpeechState()
+        val action = pendingContextualMicAction
+        pendingContextualMicAction = null
+        if (granted) {
+            vaultManager.markPermissionsCompleted()
+            when (action) {
+                "START_JARVIS_LIVE" -> {
+                    viewModel.armJarvisWakeAndSpeechSession()
+                    viewModel.startGeminiLiveSession()
+                    currentStage = JarvisStage.STAGE_C_CORNER_ORB
+                }
+                "ARM_WAKE_ONLY" -> {
+                    viewModel.armJarvisWakeAndSpeechSession()
+                }
+                "VOICE_LISTEN_WINDOW" -> {
+                    viewModel.armJarvisWakeAndSpeechSession()
+                    viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
+                }
+            }
+        }
+    }
+
+    val requestMicInContextOrRun: (String, () -> Unit) -> Unit = { actionKey, onPermitted ->
+        val grantedNow = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        hasMicPermissionActual = grantedNow
+        if (grantedNow) {
+            onPermitted()
+        } else {
+            pendingContextualMicAction = actionKey
+            contextualMicPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
     LaunchedEffect(isLiveActive) {
         if (isLiveActive && currentStage != JarvisStage.STAGE_C_CORNER_ORB) {
@@ -277,70 +323,197 @@ fun JarvisStageFlowScreen(
         // Ambient Bioluminescent Spatial Backdrop Canvas
         QuantumSpatialBackdrop()
 
-        when (currentStage) {
-            JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER -> {
-                JarvisStageAPermissionsGatekeeper(
-                    vaultManager = vaultManager,
-                    onAllGranted = {
-                        vaultManager.markPermissionsCompleted()
-                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Visible Listening State, Single-Owner Mic & Working Stop / Re-Arm Control Bar
+            Surface(
+                color = QuantumGlassCard,
+                border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.35f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .testTag("wake_speech_status_banner")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "STATE: ${wakeLifecycleState.badgeLabel} • INPUT: ${activeInputRoute.label.uppercase()}",
+                            fontSize = 9.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isUserArmed) QuantumMint else QuantumAmber,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "MIC OWNER: ${activeMicOwner.displayLabel}",
+                            fontSize = 9.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
-                )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            color = QuantumMint.copy(alpha = 0.16f),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, QuantumMint.copy(alpha = 0.6f)),
+                            modifier = Modifier
+                                .clickable {
+                                    requestMicInContextOrRun("ARM_WAKE_ONLY") {
+                                        viewModel.armJarvisWakeAndSpeechSession()
+                                    }
+                                }
+                                .testTag("btn_arm_or_rearm_jarvis")
+                        ) {
+                            Text(
+                                text = if (wakeLifecycleState.requiresUserActionToArm) "TAP TO RE-ARM" else "ARM JARVIS",
+                                fontSize = 9.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = QuantumMint,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            )
+                        }
+
+                        Surface(
+                            color = QuantumCyan.copy(alpha = 0.14f),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .clickable {
+                                    try {
+                                        val roleIntent = com.example.service.OmniVoiceInteractionService
+                                            .buildRequestAssistantRoleIntent(context)
+                                        context.startActivity(roleIntent)
+                                    } catch (_: Exception) {
+                                    }
+                                }
+                                .testTag("btn_request_assistant_role")
+                        ) {
+                            Text(
+                                text = "ROLE",
+                                fontSize = 9.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = QuantumCyan,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp)
+                            )
+                        }
+
+                        Surface(
+                            color = QuantumCrimson.copy(alpha = 0.18f),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, QuantumCrimson.copy(alpha = 0.65f)),
+                            modifier = Modifier
+                                .clickable {
+                                    viewModel.stopAllWakeAndSpeechAndPinToDevice()
+                                    if (currentStage == JarvisStage.STAGE_C_CORNER_ORB) {
+                                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                                    }
+                                }
+                                .testTag("btn_stop_wake_and_speech")
+                        ) {
+                            Text(
+                                text = "STOP",
+                                fontSize = 9.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                color = QuantumCrimson,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+                }
             }
-            JarvisStage.STAGE_B_MINIMAL_START -> {
-                JarvisStageBMinimalLaunchScreen(
-                    selectedVoice = selectedVoice,
-                    userTranscript = liveUserTranscript,
-                    aiTranscript = liveAiTranscript,
-                    onSelectVoice = { voice -> viewModel.omniLiveEngine.selectVoice(voice) },
-                    onStartJarvis = {
-                        viewModel.startGeminiLiveSession()
-                        currentStage = JarvisStage.STAGE_C_CORNER_ORB
-                    },
-                    onSwitchToLiveHud = {
-                        currentStage = JarvisStage.STAGE_C_CORNER_ORB
-                    },
-                    onTriggerVoiceListen = {
-                        viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
-                    },
-                    onSendPrompt = { queryText ->
-                        viewModel.omniLiveEngine.sendTextMessageToLiveSession(queryText)
-                    },
-                    onOpenSettings = { showQuickSettingsDialog = true },
-                    onOpenAdvancedSettingsHub = onOpenAdvancedSettingsHub,
-                    onTestAccent = { samplePhrase ->
-                        viewModel.ttsManager.speak(samplePhrase)
+
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (currentStage) {
+                    JarvisStage.STAGE_A_PERMISSIONS_GATEKEEPER -> {
+                        JarvisStageAPermissionsGatekeeper(
+                            vaultManager = vaultManager,
+                            onAllGranted = {
+                                vaultManager.markPermissionsCompleted()
+                                viewModel.refreshWakeAndSpeechState()
+                                currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                            }
+                        )
                     }
-                )
-            }
-            JarvisStage.STAGE_C_CORNER_ORB -> {
-                JarvisStageCCornerOrbView(
-                    liveState = liveState,
-                    inputRms = inputRms,
-                    outputRms = outputRms,
-                    actionState = kernelActionState,
-                    actionDetail = lastActionDetail,
-                    userTranscript = liveUserTranscript,
-                    aiTranscript = liveAiTranscript,
-                    vaultManager = vaultManager,
-                    onSendPrompt = { queryText ->
-                        viewModel.omniLiveEngine.sendTextMessageToLiveSession(queryText)
-                    },
-                    onTriggerVoiceListen = {
-                        viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
-                    },
-                    onExpandHud = { showExpandedHudDrawer = true },
-                    onOpenSettings = { showQuickSettingsDialog = true },
-                    onOpenAdvancedSettingsHub = onOpenAdvancedSettingsHub,
-                    onEnterPip = { onEnterPipMode() },
-                    onReturnToHub = {
-                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
-                    },
-                    onStop = {
-                        viewModel.endGeminiLiveSession()
-                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                    JarvisStage.STAGE_B_MINIMAL_START -> {
+                        JarvisStageBMinimalLaunchScreen(
+                            selectedVoice = selectedVoice,
+                            userTranscript = liveUserTranscript,
+                            aiTranscript = liveAiTranscript,
+                            onSelectVoice = { voice -> viewModel.omniLiveEngine.selectVoice(voice) },
+                            onStartJarvis = {
+                                requestMicInContextOrRun("START_JARVIS_LIVE") {
+                                    viewModel.armJarvisWakeAndSpeechSession()
+                                    viewModel.startGeminiLiveSession()
+                                    currentStage = JarvisStage.STAGE_C_CORNER_ORB
+                                }
+                            },
+                            onSwitchToLiveHud = {
+                                currentStage = JarvisStage.STAGE_C_CORNER_ORB
+                            },
+                            onTriggerVoiceListen = {
+                                requestMicInContextOrRun("VOICE_LISTEN_WINDOW") {
+                                    viewModel.armJarvisWakeAndSpeechSession()
+                                    viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
+                                }
+                            },
+                            onSendPrompt = { queryText ->
+                                viewModel.omniLiveEngine.sendTextMessageToLiveSession(queryText)
+                            },
+                            onOpenSettings = { showQuickSettingsDialog = true },
+                            onOpenAdvancedSettingsHub = onOpenAdvancedSettingsHub,
+                            onTestAccent = { samplePhrase ->
+                                viewModel.ttsManager.speak(samplePhrase)
+                            }
+                        )
                     }
-                )
+                    JarvisStage.STAGE_C_CORNER_ORB -> {
+                        JarvisStageCCornerOrbView(
+                            liveState = liveState,
+                            inputRms = inputRms,
+                            outputRms = outputRms,
+                            actionState = kernelActionState,
+                            actionDetail = lastActionDetail,
+                            userTranscript = liveUserTranscript,
+                            aiTranscript = liveAiTranscript,
+                            vaultManager = vaultManager,
+                            onSendPrompt = { queryText ->
+                                viewModel.omniLiveEngine.sendTextMessageToLiveSession(queryText)
+                            },
+                            onTriggerVoiceListen = {
+                                requestMicInContextOrRun("VOICE_LISTEN_WINDOW") {
+                                    viewModel.armJarvisWakeAndSpeechSession()
+                                    viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
+                                }
+                            },
+                            onExpandHud = { showExpandedHudDrawer = true },
+                            onOpenSettings = { showQuickSettingsDialog = true },
+                            onOpenAdvancedSettingsHub = onOpenAdvancedSettingsHub,
+                            onEnterPip = { onEnterPipMode() },
+                            onReturnToHub = {
+                                currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                            },
+                            onStop = {
+                                viewModel.stopAllWakeAndSpeechAndPinToDevice()
+                                currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                            }
+                        )
+                    }
+                }
             }
         }
 

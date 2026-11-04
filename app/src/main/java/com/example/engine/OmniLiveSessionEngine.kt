@@ -1606,7 +1606,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     /**
      * Starts the Gemini Live bidirectional voice streaming session.
-     * Enforces single-owner audio pipeline by immediately stopping local TTS.
+     * Enforces single-owner audio pipeline by immediately stopping local TTS and acquiring
+     * single-owner microphone arbitration via [AssistantAudioStateMachine.shared].
      */
     fun startLiveSession() {
         val hasMicPerm = ContextCompat.checkSelfPermission(
@@ -1615,8 +1616,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         ) == PackageManager.PERMISSION_GRANTED
         if (!hasMicPerm) {
             Log.w(TAG, "Cannot start Gemini Live without RECORD_AUDIO permission")
+            AssistantAudioStateMachine.shared.inspectWakeAndAssistantReadiness(context)
             return
         }
+
+        val coord = AssistantAudioStateMachine.shared
+        coord.armUserSessionAndPersist(context, "START_GEMINI_LIVE_SESSION")
 
         // Single audio pipeline rule: cancel local TTS immediately so it never talks over Gemini Live
         ttsFallback?.stop()
@@ -1644,8 +1649,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (_: Exception) { "" }
         val hasCloudKey = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.startsWith("YOUR_")
         if (!hasCloudKey && isNativeSpeechRecognitionAvailableSafe()) {
+            // Open an explicit bounded command window for single-turn recognition (NEVER a continuous SpeechRecognizer loop!)
+            coord.openCommandWindow(reason = "START_SESSION_BOUNDED_COMMAND_WINDOW")
             startNativeSpeechRecognizerLoop()
         } else {
+            coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
+                releaseMicAudioRecord()
+                stopNativeSpeechRecognizerLoop()
+            }
             start16kHzMicrophonePcmStream()
         }
         start60SecondInactivityWatchdog()
@@ -1660,13 +1671,33 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     }
 
     /**
-     * Starts on-device Android SpeechRecognizer on the main thread when cloud Gemini API key
-     * is not set, ensuring spoken commands in Roman Urdu / Urdu / English are accurately
-     * transcribed into text and executed by SuperAgiBrainEngine without holding AudioRecord lock.
+     * Starts a single-turn, bounded command-window Android SpeechRecognizer session on the main thread
+     * when explicitly triggered by the user or a local wake event ("Jarvis").
+     *
+     * CRITICAL ARCHITECTURE INVARIANT:
+     * A continuously restarted SpeechRecognizer session is NOT a wake detector.
+     * This method runs ONLY for an active command window, never auto-restarts on error or silence,
+     * and returns microphone ownership to wake-only listening (`WakeWordForegroundService`) upon completion or timeout.
      */
     fun startNativeSpeechRecognizerLoop() {
         mainHandler.post {
-            if (!_isSessionActive.value || _isMicMuted.value) return@post
+            val coord = AssistantAudioStateMachine.shared
+            if (!_isSessionActive.value ||
+                _isMicMuted.value ||
+                coord.isStoppedByUserInMemory() ||
+                coord.isDeviceMutedInMemory() ||
+                coord.isSelfTriggerSuppressed()
+            ) {
+                return@post
+            }
+            if (!coord.isCommandWindowOpen()) {
+                coord.openCommandWindow(reason = "EXPLICIT_COMMAND_WINDOW_STT")
+            }
+            val acquired = coord.acquireMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
+                stopNativeSpeechRecognizerLoop()
+            }
+            if (!acquired) return@post
+
             try {
                 if (nativeSpeechRecognizer == null) {
                     nativeSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
@@ -1697,10 +1728,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                             override fun onError(error: Int) {
                                 isNativeRecognizerListening = false
                                 _inputAudioRms.value = 0f
-                                if (_isSessionActive.value && !_isMicMuted.value &&
-                                    _connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING
-                                ) {
-                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 160L)
+                                // NEVER auto-restart SpeechRecognizer in a loop!
+                                // Return cleanly to wake-only listening when the bounded command window ends or errors.
+                                coord.returnToWakeOnlyListening("STT_BOUNDED_WINDOW_ERROR_$error")
+                                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                                    com.example.service.WakeWordForegroundService.resume(context)
                                 }
                             }
 
@@ -1711,10 +1743,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                 val topText = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
                                 if (topText.isNotBlank()) {
                                     scope.launch {
-                                        processFallbackLiveTurn(topText, null)
+                                        processConsentedVoiceAudioTurn(topText)
                                     }
-                                } else if (_isSessionActive.value && !_isMicMuted.value) {
-                                    mainHandler.postDelayed({ startNativeSpeechRecognizerLoop() }, 140L)
+                                } else {
+                                    coord.returnToWakeOnlyListening("STT_EMPTY_RESULT_RETURN_TO_WAKE")
+                                    if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                                        com.example.service.WakeWordForegroundService.resume(context)
+                                    }
                                 }
                             }
 
@@ -1767,6 +1802,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             } catch (_: Exception) {
             } finally {
                 nativeSpeechRecognizer = null
+                AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
             }
         }
     }
@@ -1860,12 +1896,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      * and reconnects the Gemini Live WebSocket if Android paused or dropped it while in WhatsApp.
      */
     fun ensureSessionAliveOnResume() {
-        if (!_isSessionActive.value) return
+        val coord = AssistantAudioStateMachine.shared
+        // Respect user's armed/stopped/muted choice on resume!
+        if (!_isSessionActive.value ||
+            coord.isStoppedByUserPersisted(context) ||
+            !coord.isUserArmedPersisted(context) ||
+            coord.isDeviceMutedPersisted(context)
+        ) {
+            return
+        }
         val hasMicPerm = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
-        if (!hasMicPerm) return
+        if (!hasMicPerm) {
+            coord.inspectWakeAndAssistantReadiness(context)
+            return
+        }
 
         JarvisHandsFreeEngine.setKeepAliveCarrierActive(true)
         try {
@@ -1878,9 +1925,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (!_isMicMuted.value && !isNativeRecognizerListening && micStreamingJob?.isActive != true) {
             val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (_: Exception) { "" }
             val hasCloudKey = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.startsWith("YOUR_")
-            if (!hasCloudKey && isNativeSpeechRecognitionAvailableSafe()) {
-                startNativeSpeechRecognizerLoop()
-            } else {
+            if (hasCloudKey) {
+                coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
+                    releaseMicAudioRecord()
+                    stopNativeSpeechRecognizerLoop()
+                }
                 start16kHzMicrophonePcmStream()
             }
         }
@@ -1921,6 +1970,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         micStreamingJob = null
         releaseMicAudioRecord()
         stopNativeSpeechRecognizerLoop()
+        AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE)
+        AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
 
         clearPlaybackQueueAndStopImmediately()
         outputPlaybackJob?.cancel()
@@ -1929,13 +1980,16 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     }
 
     /**
-     * Toggles Pause/Mute on the 16kHz live microphone stream.
+     * Toggles Pause/Mute on the 16kHz live microphone stream and pins mute state to the device.
      */
     fun toggleMuteMic(): Boolean {
         val nextMute = !_isMicMuted.value
         _isMicMuted.value = nextMute
+        AssistantAudioStateMachine.shared.setDeviceMutedPinned(context, nextMute, "LIVE_MUTE_TOGGLE")
         if (nextMute) {
             _inputAudioRms.value = 0f
+            releaseMicAudioRecord()
+            stopNativeSpeechRecognizerLoop()
         }
         return nextMute
     }
@@ -1986,21 +2040,63 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
+        // Handle "stop listening" / "jarvis band karo" to disarm and pin stop to device
+        if (AssistantAudioStateMachine.isFullStopListeningPhrase(trimmed)) {
+            clearPlaybackQueueAndStopImmediately()
+            endLiveSession()
+            com.example.service.WakeWordForegroundService.stop(context, pinUserStop = true)
+            _liveUserTranscript.value = trimmed
+            _liveAiTranscript.value = "Listening stopped."
+            return
+        }
+
+        // Handle "bas / stop / cancel" to abort pending action / TTS and return to wake-only listening
+        if (AssistantAudioStateMachine.matchesCancelOrStopPhrase(trimmed)) {
+            clearPlaybackQueueAndStopImmediately()
+            activeCommandId = ""
+            awaitingVerifiedToolOutcome = false
+            currentTurnHasPendingOrExecutedAction = false
+            AssistantAudioStateMachine.shared.returnToWakeOnlyListening("USER_CANCEL_BAS_STOP")
+            if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                com.example.service.WakeWordForegroundService.resume(context)
+            }
+            _liveUserTranscript.value = trimmed
+            _liveAiTranscript.value = "Theek hai, ruk gaya hoon."
+            return
+        }
+
         // If in Standby Mode, check if user said/typed wake word or wake up automatically
         if (OmniAutonomousCoreEngine.operatingMode.value == OmniOperatingMode.STATE_SLEEP_STANDBY) {
-            if (OmniAutonomousCoreEngine.matchesCustomWakeWord(trimmed)) {
-                wakeUpFromStandby()
+            if (OmniAutonomousCoreEngine.matchesCustomWakeWord(trimmed) ||
+                AssistantAudioStateMachine.matchesWakePhrase(trimmed)
+            ) {
+                val remainder = AssistantAudioStateMachine.extractCommandAfterWakePhrase(trimmed)
+                wakeUpFromStandby(remainder)
                 return
             } else {
                 wakeUpFromStandby()
             }
         }
 
-        OmniAutonomousCoreEngine.resetInactivityTimer()
-        OmniAutonomousCoreEngine.analyzeUserMood(trimmed, _inputAudioRms.value)
-        val turnCommandId = startNewCommandTurn(utterance = trimmed)
+        // Strip leading wake word ("Jarvis, WhatsApp kholo" -> "WhatsApp kholo") if present
+        val effectiveUtterance = if (AssistantAudioStateMachine.matchesWakePhrase(trimmed)) {
+            val afterWake = AssistantAudioStateMachine.extractCommandAfterWakePhrase(trimmed)
+            if (afterWake.isBlank()) {
+                AssistantAudioStateMachine.shared.openCommandWindow(reason = "WAKE_WORD_JARVIS")
+                _liveUserTranscript.value = trimmed
+                _liveAiTranscript.value = "Jee, main sun raha hoon."
+                return
+            }
+            afterWake
+        } else {
+            trimmed
+        }
 
-        _liveUserTranscript.value = trimmed
+        OmniAutonomousCoreEngine.resetInactivityTimer()
+        OmniAutonomousCoreEngine.analyzeUserMood(effectiveUtterance, _inputAudioRms.value)
+        val turnCommandId = startNewCommandTurn(utterance = effectiveUtterance)
+
+        _liveUserTranscript.value = effectiveUtterance
         _liveAiTranscript.value = ""
         clearPlaybackQueueAndStopImmediately()
 
@@ -2426,6 +2522,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
 
                 micAudioRecord = recorder
+                AssistantAudioStateMachine.shared.applyPreferredInputDevice(context, recorder)
                 attachHardwareAudioFilters(recorder.audioSessionId)
                 recorder.startRecording()
 
@@ -2442,8 +2539,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 while (isActive && _isSessionActive.value) {
                     val read = recorder.read(shortBuffer, 0, shortBuffer.size)
                     if (read > 0) {
-                        if (_isMicMuted.value) {
+                        if (_isMicMuted.value ||
+                            AssistantAudioStateMachine.shared.isDeviceMutedInMemory() ||
+                            AssistantAudioStateMachine.shared.isStoppedByUserInMemory() ||
+                            AssistantAudioStateMachine.shared.isSelfTriggerSuppressed()
+                        ) {
                             _inputAudioRms.value = 0f
+                            fallbackSpeechActive = false
+                            fallbackTurnPcmBuffer.reset()
                             delay(40)
                             continue
                         }
@@ -4018,11 +4121,75 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     // =========================================================================
     // 5. HYBRID LIVE TURN FALLBACK & SUPER-AGI BRAIN EXECUTION
     // =========================================================================
+    /**
+     * Evaluates a consented voice utterance through the wake/command-window/self-suppression/chatter gate
+     * in [AssistantAudioStateMachine.shared] and executes ONLY verified commands.
+     */
+    suspend fun processConsentedVoiceAudioTurn(
+        recognizedTranscript: String,
+        nowMs: Long = System.currentTimeMillis(),
+        expectedWakeInTestAudio: Boolean? = null,
+        expectedCommandExecutionInTestAudio: Boolean? = null
+    ): WakeSpeechEvaluationResult {
+        val coord = AssistantAudioStateMachine.shared
+        val eval = coord.evaluateAudioCandidate(
+            context = context,
+            transcript = recognizedTranscript,
+            nowMs = nowMs,
+            expectedWakeInTestAudio = expectedWakeInTestAudio,
+            expectedCommandExecutionInTestAudio = expectedCommandExecutionInTestAudio
+        )
+        when (eval.decision) {
+            WakeSpeechCandidateDecision.STOP_AND_DISARM_PINNED -> {
+                clearPlaybackQueueAndStopImmediately()
+                endLiveSession()
+                com.example.service.WakeWordForegroundService.stop(context, pinUserStop = true)
+            }
+            WakeSpeechCandidateDecision.CANCEL_OR_STOP_COMMAND_WINDOW -> {
+                clearPlaybackQueueAndStopImmediately()
+                activeCommandId = ""
+                awaitingVerifiedToolOutcome = false
+                currentTurnHasPendingOrExecutedAction = false
+                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                    com.example.service.WakeWordForegroundService.resume(context)
+                }
+            }
+            WakeSpeechCandidateDecision.WAKE_WORD_DETECTED_OPEN_WINDOW -> {
+                _liveUserTranscript.value = recognizedTranscript
+                _liveAiTranscript.value = "Jee, hukum karein."
+            }
+            WakeSpeechCandidateDecision.WAKE_AND_INLINE_COMMAND_ACCEPTED,
+            WakeSpeechCandidateDecision.COMMAND_ACCEPTED_IN_WINDOW -> {
+                if (eval.shouldExecuteCommand && eval.extractedCommandText.isNotBlank()) {
+                    processFallbackLiveTurn(eval.extractedCommandText, null, nowMs = nowMs)
+                }
+                coord.returnToWakeOnlyListening("COMMAND_TURN_FINISHED")
+                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                    com.example.service.WakeWordForegroundService.resume(context)
+                }
+            }
+            else -> {
+                // Suppressed during TTS/notification, or ignored background conversation / TV audio / stopped
+            }
+        }
+        return eval
+    }
+
     private suspend fun processFallbackLiveTurn(
         textInput: String?,
         wavBytes: ByteArray?,
-        commandIdOverride: String? = null
+        commandIdOverride: String? = null,
+        nowMs: Long = System.currentTimeMillis()
     ) {
+        val coord = AssistantAudioStateMachine.shared
+        if (coord.isStoppedByUserInMemory() || coord.isDeviceMutedInMemory()) {
+            return
+        }
+        if (!textInput.isNullOrBlank() && coord.isEchoOfAssistantOrNotificationSpeech(textInput, nowMs)) {
+            coord.recordSuppressedSelfTrigger("Blocked TTS/notification echo in processFallbackLiveTurn")
+            return
+        }
+
         if (!isGeminiLiveWebSocketConnected()) {
             _connectionState.value = LiveConnectionState.CONNECTING
         }
@@ -4040,11 +4207,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             DeterministicNluEngine.analyzeTextDeterministicallyLocal(context, "")
         }
 
-        // CRITICAL FIX: Never endlessly speak "Jee main sun raha hoon, hukum karein." on unverified silence/background noise!
+        // CRITICAL FIX: Never endlessly speak "Jee main sun raha hoon, hukum karein." on unverified silence/background noise,
+        // and NEVER restart SpeechRecognizer in a continuous wake loop!
         if (rawResult.verbatimTranscript.isBlank() && textInput.isNullOrBlank()) {
             _connectionState.value = LiveConnectionState.LIVE_LISTENING
-            if (!isGeminiLiveWebSocketConnected() && isNativeSpeechRecognitionAvailableSafe()) {
-                startNativeSpeechRecognizerLoop()
+            coord.returnToWakeOnlyListening("SILENT_TURN_RETURN_TO_WAKE")
+            if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                com.example.service.WakeWordForegroundService.resume(context)
             }
             return
         }
@@ -4059,7 +4228,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
 
         // Never speak a speculative "ho gaya" reply BEFORE action tasks execute and verify!
-        val hasActionTasks = rawResult.tasksToExecute.isNotEmpty()
+        val isReturnToOriginCommand = com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(cleanUtterance)
+        val hasActionTasks = isReturnToOriginCommand || rawResult.tasksToExecute.isNotEmpty()
         currentTurnHasPendingOrExecutedAction = hasActionTasks
         var finalSpokenReply = if (hasActionTasks) "" else sanitizeSpokenText(rawResult.spokenReply, cleanUtterance)
         val userLang = LanguageProcessor.detectLanguage(cleanUtterance.ifBlank { finalSpokenReply })
@@ -4102,8 +4272,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
                 ttsFallback?.onSpeechCompleted = {
                     _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                    if (_isSessionActive.value && !_isMicMuted.value && !isGeminiLiveWebSocketConnected() && isNativeSpeechRecognitionAvailableSafe()) {
-                        startNativeSpeechRecognizerLoop()
+                    coord.returnToWakeOnlyListening("TTS_CONVERSATIONAL_TURN_COMPLETED")
+                    if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                        com.example.service.WakeWordForegroundService.resume(context)
                     }
                 }
                 ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, userLang.ttsLocale)
@@ -4123,7 +4294,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         // Execute all explicit tasks with turnCommandId correlation
         var lastToolResponseMessage = ""
         val activeLiveWs = activeWebSocket?.takeIf { isWebSocketReady.get() }
-        for ((idx, task) in rawResult.tasksToExecute.withIndex()) {
+        if (isReturnToOriginCommand) {
+            val fnObj = JSONObject().apply {
+                put("id", "${turnCommandId}_return_origin")
+                put("commandId", turnCommandId)
+                put("name", "return_to_origin")
+                put("args", JSONObject())
+            }
+            val singleResp = executeLiveFunctionCallAndRespond(activeLiveWs, fnObj)
+            val msgFromResp = singleResp?.optJSONObject("response")?.optJSONObject("result")?.optString("spokenMessage")
+                ?.takeIf { it.isNotBlank() }
+                ?: singleResp?.optJSONObject("response")?.optJSONObject("result")?.optString("message").orEmpty()
+            if (msgFromResp.isNotBlank()) {
+                lastToolResponseMessage = msgFromResp
+            }
+        }
+        val tasksToRun = if (isReturnToOriginCommand) emptyList() else rawResult.tasksToExecute
+        for ((idx, task) in tasksToRun.withIndex()) {
             if (activeCommandId.isNotBlank() && activeCommandId != turnCommandId) {
                 Log.w(TAG, "Aborting remaining fallback tasks for superseded turnCommandId=$turnCommandId (active=$activeCommandId)")
                 return
@@ -4365,12 +4552,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             // Local execution of "WhatsApp kholo" must NOT switch the current or next conversation turn to Android TTS!
             if (isGeminiLiveWebSocketConnected()) {
                 _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                coord.returnToWakeOnlyListening("LIVE_ACTION_TURN_COMPLETED")
             } else {
                 _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
                 ttsFallback?.onSpeechCompleted = {
                     _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                    if (_isSessionActive.value && !_isMicMuted.value && !isGeminiLiveWebSocketConnected() && isNativeSpeechRecognitionAvailableSafe()) {
-                        startNativeSpeechRecognizerLoop()
+                    coord.returnToWakeOnlyListening("TTS_ACTION_TURN_COMPLETED")
+                    if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                        com.example.service.WakeWordForegroundService.resume(context)
                     }
                 }
                 ttsFallback?.speak(finalSpokenReply, 1.05f, 1.0f, userLang.ttsLocale)

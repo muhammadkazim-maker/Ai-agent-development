@@ -111,6 +111,7 @@ class TextToSpeechManager(
                         }
 
                         override fun onDone(utteranceId: String?) {
+                            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded()
                             val currentTurn = AudioOutputManager.activeTurnId.value
                             if (currentTurn != null) {
                                 AudioOutputManager.completeTurnOutput(currentTurn)
@@ -120,6 +121,7 @@ class TextToSpeechManager(
 
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) {
+                            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded()
                             val currentTurn = AudioOutputManager.activeTurnId.value
                             if (currentTurn != null) {
                                 AudioOutputManager.completeTurnOutput(currentTurn)
@@ -224,7 +226,13 @@ class TextToSpeechManager(
                 (effectiveDetectedLang == DetectedLanguage.URDU_NASTALIQ)
         )
 
+        AssistantAudioStateMachine.shared.notifyAssistantSpeechStarted(
+            spokenText = normalized.speechText.ifBlank { rawReply },
+            source = "LOCAL_TTS"
+        )
+
         if (!isInitialized || normalized.speechText.isBlank()) {
+            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded()
             onSpeechCompleted?.invoke()
             return normalized
         }
@@ -402,6 +410,7 @@ class TextToSpeechManager(
     }
 
     fun stop() {
+        AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded()
         try {
             tts?.stop()
         } catch (_: Exception) {
@@ -409,6 +418,7 @@ class TextToSpeechManager(
     }
 
     fun shutdown() {
+        AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded()
         try {
             tts?.stop()
             tts?.shutdown()

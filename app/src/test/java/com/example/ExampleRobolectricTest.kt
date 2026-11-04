@@ -4855,6 +4855,523 @@ class ExampleRobolectricTest {
             com.omnivoice.agentfix.UiTools.resetTestHooks()
         }
     }
+
+    @Test
+    fun `Wake and Speech Path Repair enforces single-owner mic, Jarvis command window, timeout, bas-stop-cancel, TTS and TV suppression, headset routing, and post-stop-reboot-revocation state`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val app = context as android.app.Application
+        val shadowApp = org.robolectric.Shadows.shadowOf(app)
+        shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            taskId: Int = -1,
+            windowId: Int = 10,
+            component: String = "",
+            titleGuess: String = label,
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList(),
+            drafts: Map<String, String> = emptyMap(),
+            visiblePackages: Set<String> = setOf(pkg),
+            elapsedOffsetMs: Long = 10L
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + elapsedOffsetMs,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = taskId,
+                activityComponent = component,
+                visibleApplicationPackages = visiblePackages,
+                editableFieldDrafts = drafts
+            )
+        }
+
+        val coord = com.example.engine.AssistantAudioStateMachine.shared
+        val ttsManager = com.example.engine.TextToSpeechManager(context)
+        val executor = com.example.engine.ActionExecutor(context)
+        val bridge = com.example.engine.AndroidBridge(context, executor)
+        val liveEngine = com.example.engine.OmniLiveSessionEngine(
+            context = context,
+            androidBridge = bridge,
+            actionExecutor = executor,
+            ttsFallback = ttsManager
+        )
+
+        var currentForegroundPkg = "com.example.notepad"
+
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notepad",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            currentForegroundPkg = "com.google.android.apps.nexuslauncher"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            currentForegroundPkg = "com.example.notepad"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                currentForegroundPkg = "com.whatsapp"
+                true
+            } else if (node.text.contains("Notepad", ignoreCase = true)) {
+                currentForegroundPkg = "com.example.notepad"
+                true
+            } else {
+                false
+            }
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (currentForegroundPkg) {
+                "com.whatsapp" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    windowId = 502,
+                    titleGuess = "WhatsApp"
+                )
+                "com.google.android.apps.nexuslauncher" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    windowId = 101,
+                    titleGuess = "Home",
+                    nodes = listOf(
+                        com.omnivoice.agentfix.UiNodeSummary(
+                            index = 1,
+                            viewId = "com.google.android.apps.nexuslauncher:id/icon_wa",
+                            className = "android.widget.TextView",
+                            packageName = "com.google.android.apps.nexuslauncher",
+                            text = "WhatsApp",
+                            contentDescription = "WhatsApp",
+                            hintText = "",
+                            isClickable = true,
+                            isLongClickable = false,
+                            isEditable = false,
+                            isScrollable = false,
+                            isFocused = false,
+                            isEnabled = true,
+                            bounds = android.graphics.Rect(100, 400, 260, 580)
+                        ),
+                        com.omnivoice.agentfix.UiNodeSummary(
+                            index = 2,
+                            viewId = "com.google.android.apps.nexuslauncher:id/icon_notes",
+                            className = "android.widget.TextView",
+                            packageName = "com.google.android.apps.nexuslauncher",
+                            text = "Notepad",
+                            contentDescription = "Notepad",
+                            hintText = "",
+                            isClickable = true,
+                            isLongClickable = false,
+                            isEditable = false,
+                            isScrollable = false,
+                            isFocused = false,
+                            isEnabled = true,
+                            bounds = android.graphics.Rect(300, 400, 460, 580)
+                        )
+                    )
+                )
+                else -> buildSnapshot(
+                    pkg = "com.example.notepad",
+                    label = "Notepad",
+                    windowId = 401,
+                    titleGuess = "Notepad - Draft 42",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+            }
+        }
+
+        try {
+            // Reset state & telemetry counters cleanly
+            com.example.service.WakeWordForegroundService.stop(context, pinUserStop = true)
+            coord.resetTelemetryCounters()
+            coord.setSimulatedHeadsetRouteForTest(null)
+
+            // =========================================================================
+            // 0. VERIFY INITIAL DISARMED STATE & RESPECT FOR USER CHOICE EVEN WITH PERMISSION GRANTED
+            // =========================================================================
+            val initialReadiness = coord.inspectWakeAndAssistantReadiness(context)
+            assertTrue(initialReadiness.hasRecordAudioPermission)
+            assertFalse(
+                "Even when RECORD_AUDIO is granted, assistant must respect disarmed/stopped choice until user arms it",
+                initialReadiness.isUserArmedPersisted
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.DISARMED_STOPPED,
+                initialReadiness.actualLifecycleState
+            )
+            assertEquals(com.example.engine.MicComponentOwner.NONE, coord.activeMicOwner.value)
+            assertEquals(0, coord.getActiveMicOwnerCount())
+
+            // BootReceiver must NOT auto-start WakeWordForegroundService when disarmed/stopped
+            val bootReceiver = com.example.service.BootReceiver()
+            bootReceiver.onReceive(context, android.content.Intent(android.content.Intent.ACTION_BOOT_COMPLETED))
+            assertFalse(com.example.service.WakeWordForegroundService.isServiceActive.value)
+            assertEquals(com.example.engine.MicComponentOwner.NONE, coord.activeMicOwner.value)
+
+            // =========================================================================
+            // 1. ARM VISIBLE SESSION & VERIFY SINGLE-OWNER MICROPHONE HANDOFF
+            // =========================================================================
+            val started = com.example.service.WakeWordForegroundService.start(context, userInitiatedArm = true)
+            assertTrue("User-initiated arm must start WakeWordForegroundService", started)
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.WAKE_ONLY_LISTENING,
+                coord.lifecycleState.value
+            )
+            assertEquals(
+                com.example.engine.MicComponentOwner.WAKE_WORD_SERVICE,
+                coord.activeMicOwner.value
+            )
+            assertEquals(1, coord.getActiveMicOwnerCount())
+
+            // Verify Headset Input Routing (Wired & Bluetooth Headset)
+            coord.setSimulatedHeadsetRouteForTest(com.example.engine.AudioInputRouteType.BLUETOOTH_HEADSET)
+            assertEquals(
+                com.example.engine.AudioInputRouteType.BLUETOOTH_HEADSET,
+                coord.detectActiveAudioInputRoute(context)
+            )
+            coord.setSimulatedHeadsetRouteForTest(com.example.engine.AudioInputRouteType.WIRED_HEADSET)
+            assertEquals(
+                com.example.engine.AudioInputRouteType.WIRED_HEADSET,
+                coord.detectActiveAudioInputRoute(context)
+            )
+
+            // =========================================================================
+            // 2. SCENARIO A — FROM NOTES (`com.example.notepad` in foreground):
+            //    Wake word "Jarvis" opens explicit command window -> executes command -> returns to wake-only
+            // =========================================================================
+            currentForegroundPkg = "com.example.notepad"
+            val baseTimeMs = 1_000_000L
+
+            // Step A1: User says "Jarvis" while in Notes -> opens bounded command window & hands off mic ownership
+            val wakeInNotes = com.example.service.WakeWordForegroundService.processConsentedWakeCandidate(
+                context = context,
+                candidateTranscript = "Jarvis",
+                nowMs = baseTimeMs,
+                expectedWakeInTestAudio = true,
+                expectedCommandExecutionInTestAudio = false
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.WAKE_WORD_DETECTED_OPEN_WINDOW,
+                wakeInNotes.decision
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.COMMAND_WINDOW_OPEN,
+                coord.lifecycleState.value
+            )
+            assertEquals(
+                com.example.engine.MicComponentOwner.COMMAND_WINDOW_CAPTURE,
+                coord.activeMicOwner.value
+            )
+            assertEquals(
+                "At most 1 component may own the microphone at any instant",
+                1,
+                coord.getMaxConcurrentMicOwnersObserved()
+            )
+
+            // Step A2: Inside the open command window, user says "WhatsApp kholo" -> opens WhatsApp & returns to wake-only
+            val openWaTurn = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "WhatsApp kholo",
+                    nowMs = baseTimeMs + 1_500L,
+                    expectedWakeInTestAudio = false,
+                    expectedCommandExecutionInTestAudio = true
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.COMMAND_ACCEPTED_IN_WINDOW,
+                openWaTurn.decision
+            )
+            assertTrue(openWaTurn.shouldExecuteCommand)
+            assertEquals("com.whatsapp", currentForegroundPkg)
+            assertEquals(
+                "com.example.notepad",
+                com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName
+            )
+            // After command completes, must return to wake-only listening owned by WAKE_WORD_SERVICE
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.WAKE_ONLY_LISTENING,
+                coord.lifecycleState.value
+            )
+            assertEquals(
+                com.example.engine.MicComponentOwner.WAKE_WORD_SERVICE,
+                coord.activeMicOwner.value
+            )
+
+            // Step A3: Single-phrase "Jarvis wapas iss window par aao" restores Notepad Draft 42 and returns to wake-only
+            val returnToNotesTurn = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "Jarvis wapas iss window par aao",
+                    nowMs = baseTimeMs + 4_000L,
+                    expectedWakeInTestAudio = true,
+                    expectedCommandExecutionInTestAudio = true
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.WAKE_AND_INLINE_COMMAND_ACCEPTED,
+                returnToNotesTurn.decision
+            )
+            assertTrue(returnToNotesTurn.shouldExecuteCommand)
+            assertEquals("com.example.notepad", currentForegroundPkg)
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.WAKE_ONLY_LISTENING,
+                coord.lifecycleState.value
+            )
+
+            // =========================================================================
+            // 3. SCENARIO B — ON THE HOME SCREEN:
+            //    Wake word "Jarvis", command window timeout, and "bas/stop/cancel"
+            // =========================================================================
+            currentForegroundPkg = "com.google.android.apps.nexuslauncher"
+            val homeTimeMs = 2_000_000L
+
+            // Step B1: Wake word "Jarvis" on Home screen opens command window
+            val wakeOnHome = com.example.service.WakeWordForegroundService.processConsentedWakeCandidate(
+                context = context,
+                candidateTranscript = "Hey Jarvis",
+                nowMs = homeTimeMs,
+                expectedWakeInTestAudio = true,
+                expectedCommandExecutionInTestAudio = false
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.WAKE_WORD_DETECTED_OPEN_WINDOW,
+                wakeOnHome.decision
+            )
+            assertTrue(coord.isCommandWindowOpen(homeTimeMs + 1_000L))
+
+            // Step B2: Command window times out after 8,000ms -> returns to wake-only listening automatically
+            val timedOut = coord.checkCommandWindowTimeout(homeTimeMs + 8_500L)
+            assertTrue("Command window must time out after 8 seconds of no command", timedOut)
+            assertFalse(coord.isCommandWindowOpen(homeTimeMs + 8_500L))
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.WAKE_ONLY_LISTENING,
+                coord.lifecycleState.value
+            )
+            assertEquals(
+                com.example.engine.MicComponentOwner.WAKE_WORD_SERVICE,
+                coord.activeMicOwner.value
+            )
+
+            // Step B3: Re-open command window with "Jarvis", then say "bas" / "cancel" -> cancels and returns to wake-only
+            com.example.service.WakeWordForegroundService.processConsentedWakeCandidate(
+                context = context,
+                candidateTranscript = "Jarvis",
+                nowMs = homeTimeMs + 10_000L,
+                expectedWakeInTestAudio = true
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.COMMAND_WINDOW_OPEN,
+                coord.lifecycleState.value
+            )
+            val cancelTurn = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "bas",
+                    nowMs = homeTimeMs + 11_000L,
+                    expectedWakeInTestAudio = false,
+                    expectedCommandExecutionInTestAudio = false
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.CANCEL_OR_STOP_COMMAND_WINDOW,
+                cancelTurn.decision
+            )
+            assertFalse(cancelTurn.shouldExecuteCommand)
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.WAKE_ONLY_LISTENING,
+                coord.lifecycleState.value
+            )
+
+            // =========================================================================
+            // 4. SCENARIO C — DURING TTS & NOTIFICATION ANNOUNCEMENTS:
+            //    Suppress self-triggering from TTS and notification readouts
+            // =========================================================================
+            val ttsTimeMs = 3_000_000L
+            coord.notifyAssistantSpeechStarted(
+                spokenText = "Jarvis notification: WhatsApp message from Ali, say Jarvis WhatsApp kholo",
+                source = "NOTIFICATION_ANNOUNCEMENT"
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.SPEAKING_SUPPRESSED,
+                coord.lifecycleState.value
+            )
+
+            val selfEchoDuringTts = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "Jarvis WhatsApp kholo",
+                    nowMs = ttsTimeMs + 100L,
+                    expectedWakeInTestAudio = false,
+                    expectedCommandExecutionInTestAudio = false
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.SUPPRESSED_DURING_TTS_OR_NOTIFICATION,
+                selfEchoDuringTts.decision
+            )
+            assertFalse("TTS/notification announcement must NEVER self-trigger a command", selfEchoDuringTts.shouldExecuteCommand)
+            assertEquals("com.google.android.apps.nexuslauncher", currentForegroundPkg)
+
+            // End TTS speech and verify acoustic tail cooldown (within 500ms) also suppresses echo
+            coord.notifyAssistantSpeechEnded(nowMs = ttsTimeMs + 500L)
+            val tailEcho = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "Jarvis WhatsApp kholo",
+                    nowMs = ttsTimeMs + 750L,
+                    expectedWakeInTestAudio = false,
+                    expectedCommandExecutionInTestAudio = false
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.SUPPRESSED_DURING_TTS_OR_NOTIFICATION,
+                tailEcho.decision
+            )
+            assertFalse(tailEcho.shouldExecuteCommand)
+
+            // =========================================================================
+            // 5. SCENARIO D — WITH OTHER PEOPLE TALKING & TV AUDIO:
+            //    Never execute ordinary conversation or TV audio as a command
+            // =========================================================================
+            val chatterTimeMs = 4_000_000L
+            coord.notifyAssistantSpeechEnded(nowMs = chatterTimeMs - 5_000L, immediateCooldownClear = true)
+
+            val otherPeopleTalking = listOf(
+                "Yaar aaj match bohot acha tha, kal office jaldi jana hai",
+                "Aaj khane mein kya pakaya hai, chai bana do",
+                "Breaking news tonight at nine, stay tuned after the commercial break",
+                "Did you see the game on TV? Pass me the remote"
+            )
+            for ((idx, phrase) in otherPeopleTalking.withIndex()) {
+                val evalWakeOnly = kotlinx.coroutines.runBlocking {
+                    liveEngine.processConsentedVoiceAudioTurn(
+                        recognizedTranscript = phrase,
+                        nowMs = chatterTimeMs + (idx * 500L),
+                        expectedWakeInTestAudio = false,
+                        expectedCommandExecutionInTestAudio = false
+                    )
+                }
+                assertEquals(
+                    com.example.engine.WakeSpeechCandidateDecision.IGNORED_UNADDRESSED_IN_WAKE_ONLY,
+                    evalWakeOnly.decision
+                )
+                assertFalse("Background conversation/TV audio must never execute in wake-only mode", evalWakeOnly.shouldExecuteCommand)
+            }
+
+            // Even if the command window is open when TV audio or background conversation is heard,
+            // non-command TV/conversation chatter must be ignored without executing any tool
+            coord.openCommandWindow(nowMs = chatterTimeMs + 5_000L, reason = "TEST_OPEN_WINDOW_TV_AUDIO")
+            val tvDuringOpenWindow = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "Breaking news tonight at nine, stay tuned after the commercial break",
+                    nowMs = chatterTimeMs + 5_500L,
+                    expectedWakeInTestAudio = false,
+                    expectedCommandExecutionInTestAudio = false
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.IGNORED_ORDINARY_CONVERSATION_OR_TV_AUDIO,
+                tvDuringOpenWindow.decision
+            )
+            assertFalse("TV audio inside command window must never execute a tool", tvDuringOpenWindow.shouldExecuteCommand)
+            coord.returnToWakeOnlyListening("TEST_FINISHED_TV_CHECK")
+
+            // =========================================================================
+            // 6. SCENARIO E — AFTER STOPPING, REBOOT, PERMISSION REVOCATION & FORCE-STOP:
+            //    Pin local stop/mute to device, release mic, ignore audio after stop,
+            //    and show actual state + Tap to Re-Arm / Assistant Role affordance
+            // =========================================================================
+            val stopTimeMs = 5_000_000L
+            com.example.service.WakeWordForegroundService.stop(context, pinUserStop = true)
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.DISARMED_STOPPED,
+                coord.lifecycleState.value
+            )
+            assertEquals(com.example.engine.MicComponentOwner.NONE, coord.activeMicOwner.value)
+            assertEquals(0, coord.getActiveMicOwnerCount())
+            assertTrue(coord.isStoppedByUserPersisted(context))
+            assertFalse(coord.isUserArmedPersisted(context))
+
+            // Speaking "Jarvis WhatsApp kholo" after stopping must be completely ignored
+            val afterStopAttempt = kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn(
+                    recognizedTranscript = "Jarvis WhatsApp kholo",
+                    nowMs = stopTimeMs + 500L,
+                    expectedWakeInTestAudio = false,
+                    expectedCommandExecutionInTestAudio = false
+                )
+            }
+            assertEquals(
+                com.example.engine.WakeSpeechCandidateDecision.IGNORED_WHILE_STOPPED_OR_MUTED,
+                afterStopAttempt.decision
+            )
+            assertFalse(afterStopAttempt.shouldExecuteCommand)
+
+            // Simulate user re-arming, then simulate force-stop / reboot where service is not running:
+            coord.armUserSessionAndPersist(context, "USER_ARMED_BEFORE_REBOOT")
+            val postForceStopReadiness = coord.inspectWakeAndAssistantReadiness(context)
+            assertEquals(
+                "After reboot or force-stop when service is not running, actual state must be NEEDS_TAP_TO_REARM",
+                com.example.engine.WakeSpeechLifecycleState.NEEDS_TAP_TO_REARM,
+                postForceStopReadiness.actualLifecycleState
+            )
+            assertTrue(postForceStopReadiness.requiresTapToRearm)
+
+            // Verify system assistant role intent affordance is available
+            val roleIntent = com.example.service.OmniVoiceInteractionService.buildRequestAssistantRoleIntent(context)
+            assertNotNull(roleIntent)
+
+            // Simulate RECORD_AUDIO permission revocation -> must show PERMISSION_REVOKED
+            shadowApp.denyPermissions(android.Manifest.permission.RECORD_AUDIO)
+            val postRevocationReadiness = coord.inspectWakeAndAssistantReadiness(context)
+            assertFalse(postRevocationReadiness.hasRecordAudioPermission)
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.PERMISSION_REVOKED,
+                postRevocationReadiness.actualLifecycleState
+            )
+            assertEquals(com.example.engine.MicComponentOwner.NONE, coord.activeMicOwner.value)
+
+            // Restore permission for clean test exit
+            shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+
+            // =========================================================================
+            // 7. VERIFY SEPARATE TELEMETRY COUNTERS:
+            //    falseWakes == 0, missedWakes == 0, unintendedExecutions == 0
+            // =========================================================================
+            val telemetry = coord.getTelemetrySnapshot()
+            println("WAKE_SPEECH_DIAGNOSTIC: ${telemetry.toCopyableDiagnosticLine()}")
+            assertEquals("False wakes count must be 0", 0, telemetry.falseWakesCount)
+            assertEquals("Missed wakes count must be 0", 0, telemetry.missedWakesCount)
+            assertEquals("Unintended executions count must be 0", 0, telemetry.unintendedExecutionsCount)
+            assertTrue("Valid wakes count must be >= 4", telemetry.validWakesCount >= 4)
+            assertTrue("Suppressed self-triggers count must be >= 2", telemetry.suppressedSelfTriggersCount >= 2)
+            assertTrue("Ignored background conversation/TV count must be >= 5", telemetry.ignoredBackgroundConversationCount >= 5)
+            assertEquals("Max concurrent mic owners observed must never exceed 1", 1, telemetry.maxConcurrentMicOwnersObserved)
+            assertFalse(
+                "A continuously restarted SpeechRecognizer session must never be used as a wake detector",
+                telemetry.continuousSpeechRecognizerLoopUsedAsWakeDetector
+            )
+        } finally {
+            coord.setSimulatedHeadsetRouteForTest(null)
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+            ttsManager.shutdown()
+        }
+    }
 }
 
 

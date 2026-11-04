@@ -261,11 +261,22 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     val learnedRules: StateFlow<List<LearnedUserRule>> = _learnedRules.asStateFlow()
 
     val isServiceRunning: StateFlow<Boolean> = WakeWordForegroundService.isServiceActive
+    val wakeSpeechLifecycleState: StateFlow<com.example.engine.WakeSpeechLifecycleState> =
+        AssistantAudioStateMachine.shared.lifecycleState
+    val activeMicOwner: StateFlow<com.example.engine.MicComponentOwner> =
+        AssistantAudioStateMachine.shared.activeMicOwner
+    val activeAudioInputRoute: StateFlow<com.example.engine.AudioInputRouteType> =
+        AssistantAudioStateMachine.shared.activeInputRoute
+    val isUserArmed: StateFlow<Boolean> = AssistantAudioStateMachine.shared.isUserArmedFlow
+    val isStoppedByUser: StateFlow<Boolean> = AssistantAudioStateMachine.shared.isStoppedByUserFlow
+    val isDeviceMuted: StateFlow<Boolean> = AssistantAudioStateMachine.shared.isDeviceMutedFlow
+    val isCommandWindowOpen: StateFlow<Boolean> = AssistantAudioStateMachine.shared.isCommandWindowOpenFlow
 
     private var lockoutCountdownJob: Job? = null
 
     init {
         com.omnivoice.agentfix.AgentBridge.appContext = context.applicationContext
+        AssistantAudioStateMachine.shared.inspectWakeAndAssistantReadiness(context)
         setupSttCallbacks()
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -406,10 +417,24 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
     fun onWakeWordTriggered(wakeWord: String) {
         Log.i("VoiceAssistantViewModel", "Wake-word triggered in ViewModel: $wakeWord")
+        val coord = AssistantAudioStateMachine.shared
+        if (coord.isSelfTriggerSuppressed() || coord.isStoppedByUserInMemory() || coord.isDeviceMutedInMemory()) {
+            return
+        }
+        val inlineCmd = if (wakeWord.contains(":")) {
+            wakeWord.substringAfter(":").trim()
+        } else {
+            AssistantAudioStateMachine.extractCommandAfterWakePhrase(wakeWord)
+        }
+        if (inlineCmd.isNotBlank()) {
+            omniLiveEngine.sendTextMessageToLiveSession(inlineCmd)
+            return
+        }
         if (operatingMode.value == OmniOperatingMode.STATE_SLEEP_STANDBY) {
             wakeUpAssistantFromStandby()
             return
         }
+        coord.openCommandWindow(reason = "WAKE_WORD_TRIGGERED_JARVIS")
         if (isLiveSessionActive.value) {
             OmniAutonomousCoreEngine.resetInactivityTimer()
             return
@@ -418,6 +443,9 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun startListeningForCommand() {
+        val coord = AssistantAudioStateMachine.shared
+        coord.armUserSessionAndPersist(context, "USER_START_LISTENING_FOR_COMMAND")
+        coord.openCommandWindow(reason = "EXPLICIT_USER_COMMAND_WINDOW")
         // Single-owner microphone rule: never start legacy STT recording while Gemini Live WebSocket owns the mic
         if (isLiveSessionActive.value) {
             sttManager.stopListening()
@@ -432,6 +460,9 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         }
         _liveTranscription.value = ""
         _voiceState.value = VoiceState.ListeningForCommand()
+        coord.acquireMicrophoneOwnership(com.example.engine.MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
+            sttManager.stopListening()
+        }
         audioStateMachine.transitionTo(AudioPipelineOwner.STT_RECORDING)
     }
 
@@ -1472,8 +1503,43 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
     // --- Official Gemini Live Session Control Methods ---
 
+    fun refreshWakeAndSpeechState(): com.example.engine.WakeAndAssistantReadinessReport {
+        return AssistantAudioStateMachine.shared.inspectWakeAndAssistantReadiness(context)
+    }
+
+    /**
+     * Arms the visible "Jarvis" wake-only background service after user action/consent.
+     */
+    fun armJarvisWakeAndSpeechSession(): Boolean {
+        val started = WakeWordForegroundService.start(context, userInitiatedArm = true)
+        if (started) {
+            _isHandsFreeAlwaysOn.value = true
+            audioStateMachine.armWakeWordListening()
+        }
+        refreshWakeAndSpeechState()
+        return started
+    }
+
+    /**
+     * Working Stop Action: stops Gemini Live, stops STT, stops TTS, stops WakeWordForegroundService,
+     * releases microphone ownership, and pins `isStoppedByUser = true, isUserArmed = false` to device storage.
+     */
+    fun stopAllWakeAndSpeechAndPinToDevice() {
+        _isHandsFreeAlwaysOn.value = false
+        _isMicLockedAlwaysListening.value = false
+        sttManager.setContinuousLockMode(false)
+        sttManager.stopListening()
+        ttsManager.stop()
+        omniLiveEngine.endLiveSession()
+        WakeWordForegroundService.stop(context, pinUserStop = true)
+        audioStateMachine.disarmWakeWordListening()
+        _voiceState.value = VoiceState.Idle
+        refreshWakeAndSpeechState()
+    }
+
     fun startGeminiLiveSession(voice: GeminiLiveVoice = selectedLiveVoice.value) {
-        WakeWordForegroundService.pause(context)
+        AssistantAudioStateMachine.shared.armUserSessionAndPersist(context, "USER_STARTED_GEMINI_LIVE")
+        WakeWordForegroundService.pause(context, pinDeviceMute = false)
         sttManager.stopListening()
         ttsManager.stop()
         OmniAutonomousCoreEngine.resetInactivityTimer()
@@ -1485,10 +1551,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     }
 
     fun endGeminiLiveSession() {
-        omniLiveEngine.endLiveSession()
-        if (_isHandsFreeAlwaysOn.value || WakeWordForegroundService.isServiceActive.value) {
-            WakeWordForegroundService.resume(context)
-        }
+        stopAllWakeAndSpeechAndPinToDevice()
     }
 
     fun wakeUpAssistantFromStandby() {
@@ -1515,7 +1578,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             ruleOrPreference = "Assistant renamed to $cleaned",
             newAssistantName = cleaned
         )
-        WakeWordForegroundService.configuredWakeWord = "Wake up $cleaned"
+        WakeWordForegroundService.configuredWakeWord = cleaned
     }
 
     fun completeStartupPermissionsAndContactsGatekeeper() {

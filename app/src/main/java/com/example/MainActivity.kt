@@ -117,6 +117,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         JarvisHandsFreeEngine.setFloatingPipActive(false)
+        viewModel.refreshWakeAndSpeechState()
         viewModel.omniLiveEngine.ensureSessionAliveOnResume()
     }
 
@@ -148,8 +149,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.getBooleanExtra("EXTRA_START_LISTENING", false) == true) {
-            viewModel.startListeningForCommand()
+        if (intent?.getBooleanExtra("EXTRA_REARM_WAKE_SERVICE", false) == true) {
+            viewModel.armJarvisWakeAndSpeechSession()
+        }
+        if (intent?.getBooleanExtra("EXTRA_WAKE_WORD_TRIGGERED", false) == true ||
+            intent?.getBooleanExtra("EXTRA_START_LISTENING", false) == true
+        ) {
+            val hasPerm = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (hasPerm) {
+                viewModel.startListeningForCommand()
+            } else {
+                viewModel.refreshWakeAndSpeechState()
+            }
         }
     }
 }

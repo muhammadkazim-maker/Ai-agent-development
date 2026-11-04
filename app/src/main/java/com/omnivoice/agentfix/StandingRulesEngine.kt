@@ -293,6 +293,12 @@ object StandingRulesEngine {
                 Txt.containsAllTokens(combinedSource, filterLower)
 
             if (matchesFilter) {
+                if (rule.actionType == "speak_aloud") {
+                    com.example.engine.AssistantAudioStateMachine.shared.notifyAssistantSpeechStarted(
+                        spokenText = "$title $text ${rule.actionPayload}",
+                        source = "NOTIFICATION_ANNOUNCEMENT"
+                    )
+                }
                 val summary = "StandingRule[${rule.id}] triggered on notification from $packageName ($title: $text) -> ${rule.actionType}: ${rule.actionPayload}"
                 val record = StandingRuleExecutionRecord(
                     ruleId = rule.id,
