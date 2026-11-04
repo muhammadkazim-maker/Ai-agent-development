@@ -5372,11 +5372,609 @@ class ExampleRobolectricTest {
             ttsManager.shutdown()
         }
     }
+
+    @Test
+    fun `Stage 03 audible reply and audio coordination repair`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val app = context as android.app.Application
+        val shadowApp = org.robolectric.Shadows.shadowOf(app)
+        shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+        val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        org.robolectric.Shadows.shadowOf(keyguardManager).setIsDeviceLocked(false)
+
+        val coord = com.example.engine.AssistantAudioStateMachine.shared
+        coord.resetTelemetryCounters()
+        coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+        coord.armUserSessionAndPersist(context, "STAGE_03_TEST_ARM")
+        com.example.engine.AudioOutputManager.resetAll()
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+
+        val ttsEvents = mutableListOf<com.example.engine.TtsLifecycleEvent>()
+        val spokenEngineCalls = mutableListOf<Triple<String, String, Int>>()
+        var simulateSpeakReturnCode = android.speech.tts.TextToSpeech.SUCCESS
+
+        val ttsManager = com.example.engine.TextToSpeechManager(context)
+        ttsManager.setInitializedStateForTest(initialized = true)
+        ttsManager.onLifecycleEvent = { ev -> ttsEvents.add(ev) }
+        ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+            spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+            simulateSpeakReturnCode
+        }
+
+        val executor = com.example.engine.ActionExecutor(context)
+        val bridge = com.example.engine.AndroidBridge(context, executor)
+        val liveEngine = com.example.engine.OmniLiveSessionEngine(
+            context = context,
+            androidBridge = bridge,
+            actionExecutor = executor,
+            ttsFallback = ttsManager
+        )
+        liveEngine.clearTurnReportsForTest()
+        liveEngine.selectVoice(com.example.engine.GeminiLiveVoice.PUCK)
+
+        val sentWsMessages = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var wsSendShouldSucceed = true
+        fun createFakeSocket(): okhttp3.WebSocket {
+            return object : okhttp3.WebSocket {
+                override fun request(): okhttp3.Request =
+                    okhttp3.Request.Builder().url("wss://example.com/live").build()
+                override fun queueSize(): Long = 0L
+                override fun send(text: String): Boolean {
+                    if (!wsSendShouldSucceed) return false
+                    sentWsMessages.add(text)
+                    return true
+                }
+                override fun send(bytes: okio.ByteString): Boolean = wsSendShouldSucceed
+                override fun close(code: Int, reason: String?): Boolean = true
+                override fun cancel() {}
+            }
+        }
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            windowId: Int,
+            titleGuess: String,
+            drafts: Map<String, String> = emptyMap(),
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList()
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + 10L,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = -1,
+                activityComponent = "$pkg.MainActivity",
+                visibleApplicationPackages = setOf(pkg),
+                editableFieldDrafts = drafts
+            )
+        }
+
+        try {
+            com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+                com.omnivoice.agentfix.InstalledAppVariant(
+                    packageName = "com.whatsapp",
+                    label = "WhatsApp",
+                    profileType = "personal",
+                    isBusinessVariant = false
+                ),
+                com.omnivoice.agentfix.InstalledAppVariant(
+                    packageName = "com.example.notepad",
+                    label = "Notepad",
+                    profileType = "personal",
+                    isBusinessVariant = false
+                )
+            )
+
+            var screenPhase = "NOTEPAD_DRAFT_42"
+            var openAppExecutionCount = 0
+            com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+                screenPhase = "HOME_SCREEN"
+                true
+            }
+            com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+                if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                    openAppExecutionCount += 1
+                    screenPhase = "WHATSAPP_FOREGROUND"
+                    true
+                } else {
+                    false
+                }
+            }
+            com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+                screenPhase = "NOTEPAD_DRAFT_42"
+                true
+            }
+            com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+                when (screenPhase) {
+                    "NOTEPAD_DRAFT_42" -> buildSnapshot(
+                        pkg = "com.example.notepad",
+                        label = "Notepad",
+                        windowId = 101,
+                        titleGuess = "Notepad - Draft 42",
+                        drafts = mapOf("editor_body" to "draft 42")
+                    )
+                    "HOME_SCREEN" -> buildSnapshot(
+                        pkg = "com.google.android.apps.nexuslauncher",
+                        label = "Pixel Launcher",
+                        windowId = 202,
+                        titleGuess = "Home",
+                        nodes = listOf(
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 1,
+                                viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                                className = "android.widget.TextView",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "WhatsApp",
+                                contentDescription = "WhatsApp",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(100, 400, 260, 580)
+                            )
+                        )
+                    )
+                    "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                        pkg = "com.whatsapp",
+                        label = "WhatsApp",
+                        windowId = 303,
+                        titleGuess = "WhatsApp Chats"
+                    )
+                    else -> null
+                }
+            }
+
+            // =========================================================================
+            // 1. REQUIREMENT 1: Exactly ONE toolResponse per server call ID & preserve
+            //    original server function name on internal return_to_origin redirect
+            // =========================================================================
+            val socket1 = createFakeSocket()
+            val gen1 = liveEngine.attachLiveWebSocketForTest(socket1, ready = true)
+            sentWsMessages.clear()
+
+            val serverOpenCmd = liveEngine.startNewCommandTurn(
+                commandId = "cmd_server_open_wa",
+                utterance = "WhatsApp kholo"
+            )
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                org.json.JSONObject().apply {
+                    put("toolCall", org.json.JSONObject().apply {
+                        put("functionCalls", org.json.JSONArray().apply {
+                            put(org.json.JSONObject().apply {
+                                put("id", "server_call_open_1")
+                                put("commandId", serverOpenCmd)
+                                put("name", "communicate_or_open_app")
+                                put("args", org.json.JSONObject().apply {
+                                    put("actionType", "open_app")
+                                    put("contactOrAppName", "WhatsApp")
+                                })
+                            })
+                        })
+                    })
+                }.toString()
+            )
+            val waitDeadline1 = android.os.SystemClock.elapsedRealtime() + 2000L
+            while (sentWsMessages.isEmpty() && android.os.SystemClock.elapsedRealtime() < waitDeadline1) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(15)
+            }
+            val toolResponseMessages1 = sentWsMessages.filter { it.contains("\"toolResponse\"") }
+            assertEquals(
+                "Top-level toolCall handler must send EXACTLY ONE toolResponse (not duplicate)",
+                1,
+                toolResponseMessages1.size
+            )
+            assertEquals("WHATSAPP_FOREGROUND", screenPhase)
+            assertEquals("com.example.notepad", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName)
+            assertEquals("draft 42", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body"))
+
+            // Attempting to transmit the same server callId a second time must be rejected
+            val dupOutcome = com.example.engine.ExecutedToolCallResult(
+                callId = "server_call_open_1",
+                commandId = serverOpenCmd,
+                wireFunctionName = "communicate_or_open_app",
+                executedFunctionName = "communicate_or_open_app",
+                isServerOriginCall = true,
+                finalStatus = "VERIFIED",
+                spokenMessage = "WhatsApp khul gaya hai.",
+                diagnosticMessage = "Verified",
+                resultPayload = org.json.JSONObject()
+            )
+            assertFalse(
+                "Duplicate server callId transmission must be blocked",
+                liveEngine.transmitServerToolResponseBatchOnce(socket1, listOf(dupOutcome))
+            )
+            assertEquals(1, sentWsMessages.filter { it.contains("\"toolResponse\"") }.size)
+
+            // Server toolCall that redirects "close_app" -> "return_to_origin" preserves wire name & sends once
+            sentWsMessages.clear()
+            val serverReturnCmd = liveEngine.startNewCommandTurn(
+                commandId = "cmd_server_return_notes",
+                utterance = "Uss previous screen par le kar jao jahan main pehle work kar raha tha."
+            )
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                org.json.JSONObject().apply {
+                    put("toolCall", org.json.JSONObject().apply {
+                        put("functionCalls", org.json.JSONArray().apply {
+                            put(org.json.JSONObject().apply {
+                                put("id", "server_call_redirect_2")
+                                put("commandId", serverReturnCmd)
+                                put("name", "close_app")
+                                put("args", org.json.JSONObject())
+                            })
+                        })
+                    })
+                }.toString()
+            )
+            val waitDeadline2 = android.os.SystemClock.elapsedRealtime() + 2000L
+            while (sentWsMessages.isEmpty() && android.os.SystemClock.elapsedRealtime() < waitDeadline2) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(15)
+            }
+            val toolResponseMessages2 = sentWsMessages.filter { it.contains("\"toolResponse\"") }
+            assertEquals(1, toolResponseMessages2.size)
+            val fnResp2 = org.json.JSONObject(toolResponseMessages2.single())
+                .getJSONObject("toolResponse")
+                .getJSONArray("functionResponses")
+                .getJSONObject(0)
+            assertEquals("server_call_redirect_2", fnResp2.getString("id"))
+            assertEquals("close_app", fnResp2.getString("name"))
+            assertEquals("NOTEPAD_DRAFT_42", screenPhase)
+
+            // =========================================================================
+            // 2. REQUIREMENT 2 & 3: Local fast-path action ("WhatsApp kholo") never sends
+            //    invented toolResponse; requests spoken acknowledgement over clientContent;
+            //    recovers once via local TTS on send=false / timeout / disconnect without
+            //    re-executing open_app; suppresses late duplicate Live PCM audio.
+            // =========================================================================
+            sentWsMessages.clear()
+            spokenEngineCalls.clear()
+            openAppExecutionCount = 0
+            screenPhase = "NOTEPAD_DRAFT_42"
+
+            // Case 2A: Live connected, local fast-path executes "WhatsApp kholo", sends clientContent (0 toolResponses),
+            // and when Live sends no audio / times out (or send=false), bounded recovery speaks once via TTS!
+            wsSendShouldSucceed = false // Simulate WebSocket send returning false on ack request
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = "cmd_local_fastpath_send_false"
+                )
+            }
+            val sentToolResponsesForLocal = sentWsMessages.filter { it.contains("\"toolResponse\"") }
+            assertEquals(
+                "Local fast-path action must NEVER transmit invented toolResponse over WebSocket",
+                0,
+                sentToolResponsesForLocal.size
+            )
+            assertEquals("WhatsApp must be opened exactly once", 1, openAppExecutionCount)
+            val diagSendFalse = liveEngine.getCommandAudioDiagnostic("cmd_local_fastpath_send_false")
+            assertNotNull(diagSendFalse)
+            assertTrue("Bounded recovery must trigger when WebSocket send=false", diagSendFalse!!.recoveryTriggered)
+            assertEquals("WhatsApp khul gaya hai.", liveEngine.lastSpokenReplyForCurrentCommand)
+            assertTrue(
+                "Local TTS recovery must speak the verified WhatsApp confirmation",
+                spokenEngineCalls.any {
+                    it.first.contains("WhatsApp", ignoreCase = true) &&
+                        it.second == "cmd_local_fastpath_send_false"
+                }
+            )
+            val spokenCountAfterRecovery = spokenEngineCalls.size
+            val openCountAfterRecovery = openAppExecutionCount
+
+            // Finish the TTS utterance callback for cmd_local_fastpath_send_false
+            val recoveryUtteranceId = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(recoveryUtteranceId)
+            ttsManager.handleUtteranceDone(recoveryUtteranceId)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.COMPLETED,
+                liveEngine.getCommandAudioDiagnostic("cmd_local_fastpath_send_false")?.outputState
+            )
+            // Calling triggerBoundedSpeechRecoveryForCommand again for the same commandId must be a no-op
+            assertFalse(
+                "Bounded recovery must run at most once per commandId",
+                liveEngine.triggerBoundedSpeechRecoveryForCommand("cmd_local_fastpath_send_false", "DUPLICATE_RECOVERY")
+            )
+            assertEquals("Action must never be repeated when speech recovers", openCountAfterRecovery, openAppExecutionCount)
+            assertEquals(spokenCountAfterRecovery, spokenEngineCalls.size)
+
+            // Late duplicate Live PCM arriving after recovery for cmd_local_fastpath_send_false must be suppressed
+            val dummyPcm = ByteArray(480) { 2 }
+            val acceptedLate = liveEngine.enqueue24kHzPcmChunk(dummyPcm, commandId = "cmd_local_fastpath_send_false")
+            assertFalse("Late duplicate Live PCM after TTS recovery must be suppressed", acceptedLate)
+            assertTrue(
+                (liveEngine.getCommandAudioDiagnostic("cmd_local_fastpath_send_false")?.lateDuplicateFramesSuppressed ?: 0) >= 1
+            )
+
+            // Case 2B: Disconnect-after-action triggers bounded TTS recovery once without repeating action
+            wsSendShouldSucceed = true
+            sentWsMessages.clear()
+            spokenEngineCalls.clear()
+            screenPhase = "NOTEPAD_DRAFT_42"
+            liveEngine.liveAudioDeliveryTimeoutMs = 5_000L // Long timeout so disconnect triggers recovery first
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = "cmd_local_disconnect_after_action"
+                )
+            }
+            assertEquals(
+                "Local fast-path must send 0 toolResponses even when ws.send succeeds",
+                0,
+                sentWsMessages.count { it.contains("\"toolResponse\"") }
+            )
+            assertEquals(
+                "Local fast-path must send 1 clientContent acknowledgement request when Live is connected",
+                1,
+                sentWsMessages.count { it.contains("\"clientContent\"") }
+            )
+            val openCountBeforeDisconnect = openAppExecutionCount
+            // Now simulate WebSocket disconnecting before any Live PCM audio frames are played
+            liveEngine.recordLiveWebSocketDisconnect(1011, "Server reset after action", socket1, gen1)
+            val diagDisconnect = liveEngine.getCommandAudioDiagnostic("cmd_local_disconnect_after_action")
+            assertNotNull(diagDisconnect)
+            assertTrue("Disconnect after action before audio must trigger bounded recovery", diagDisconnect!!.recoveryTriggered)
+            assertEquals(1011, diagDisconnect.wsCloseCode)
+            assertEquals(openCountBeforeDisconnect, openAppExecutionCount)
+            assertTrue(
+                spokenEngineCalls.any {
+                    it.first.contains("WhatsApp", ignoreCase = true) &&
+                        it.second == "cmd_local_disconnect_after_action"
+                }
+            )
+            val discUtteranceId = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(discUtteranceId)
+            ttsManager.handleUtteranceDone(discUtteranceId)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+
+            // =========================================================================
+            // 3. REQUIREMENT 7: Guard WebSocket callbacks with socket identity / generation
+            //    so stale callbacks from socket1 (gen1) cannot disconnect socket2 (gen2)
+            // =========================================================================
+            val socket2 = createFakeSocket()
+            val gen2 = liveEngine.attachLiveWebSocketForTest(socket2, ready = true)
+            assertTrue(gen2 > gen1)
+            assertTrue(liveEngine.isGeminiLiveWebSocketConnected())
+
+            val staleDisconnectAccepted = liveEngine.simulateWebSocketDisconnectFromSocketForTest(
+                webSocket = socket1,
+                socketGeneration = gen1,
+                code = 1006,
+                reason = "Late close from old socket1"
+            )
+            assertFalse("Stale socket disconnect callback must be ignored", staleDisconnectAccepted)
+            assertTrue("Newer WebSocket session must remain connected", liveEngine.isGeminiLiveWebSocketConnected())
+            assertTrue(liveEngine.staleWebSocketCallbacksIgnoredCount >= 1)
+
+            // =========================================================================
+            // 4. REQUIREMENT 4: Live PCM playback owns speaking suppression and ends
+            //    suppression ONLY after actual hardware playback drain (not merely empty queue),
+            //    while user stop/cancel still interrupts immediately.
+            // =========================================================================
+            val pcmCmd = liveEngine.startNewCommandTurn(
+                commandId = "cmd_live_pcm_drain",
+                utterance = "WhatsApp kholo"
+            )
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+            val pcmFrame1 = ByteArray(480) { 4 }
+            val pcmFrame2 = ByteArray(480) { 6 }
+            assertTrue(liveEngine.enqueue24kHzPcmChunk(pcmFrame1, pcmCmd))
+            assertTrue(liveEngine.enqueue24kHzPcmChunk(pcmFrame2, pcmCmd))
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.QUEUED,
+                liveEngine.getCommandAudioDiagnostic(pcmCmd)?.outputState
+            )
+            assertTrue("Speaking suppression must be active while Live PCM is queued", coord.isSelfTriggerSuppressed())
+
+            // Drain application queue into simulated AudioTrack hardware buffer:
+            // Application queue is now empty, but hardware drain is STILL in progress!
+            val writtenFrames = liveEngine.drainApplicationPcmQueueToHardwareBufferForTest()
+            assertEquals(2, writtenFrames)
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.STARTED,
+                liveEngine.getCommandAudioDiagnostic(pcmCmd)?.outputState
+            )
+            assertTrue(
+                "Speaking suppression must remain active while AudioTrack hardware buffer is still draining",
+                coord.isSelfTriggerSuppressed()
+            )
+
+            // Complete actual hardware drain -> suppression ends and state becomes COMPLETED
+            liveEngine.completeHardwarePcmPlaybackDrainForTest(pcmCmd)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = pcmCmd)
+            assertFalse("Speaking suppression must end after actual hardware playback drain", coord.isSelfTriggerSuppressed())
+            val drainedDiag = liveEngine.getCommandAudioDiagnostic(pcmCmd)!!
+            assertEquals(com.example.engine.CommandSpeechOutputState.COMPLETED, drainedDiag.outputState)
+            assertEquals(2, drainedDiag.audioFramesReceived)
+            assertEquals(2, drainedDiag.audioFramesPlayed)
+
+            // User stop/cancel during active PCM playback immediately interrupts and cleans up suppression
+            val pcmInterruptCmd = liveEngine.startNewCommandTurn(
+                commandId = "cmd_live_pcm_interrupt",
+                utterance = "Mausam kaisa hai"
+            )
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+            assertTrue(liveEngine.enqueue24kHzPcmChunk(pcmFrame1, pcmInterruptCmd))
+            assertTrue(coord.isSelfTriggerSuppressed())
+            liveEngine.clearPlaybackQueueAndStopImmediately(interruptReason = "USER_STOP_BUTTON")
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = pcmInterruptCmd)
+            assertFalse("User stop must immediately clear speaking suppression", coord.isSelfTriggerSuppressed())
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.INTERRUPTED,
+                liveEngine.getCommandAudioDiagnostic(pcmInterruptCmd)?.outputState
+            )
+
+            // =========================================================================
+            // 5. REQUIREMENT 5: TextToSpeechManager cold-init bounded queue, speak() failure
+            //    handling, denied output acquisition cleanup, multi-segment completion,
+            //    and stale callback isolation
+            // =========================================================================
+            ttsEvents.clear()
+            spokenEngineCalls.clear()
+            var coldInitCompletedCallbackCount = 0
+            ttsManager.onSpeechCompleted = { coldInitCompletedCallbackCount += 1 }
+
+            // 5A: Cold initialization queues bounded speech in QUEUED state instead of calling completion on discarded text
+            ttsManager.setInitializedStateForTest(initialized = false)
+            ttsManager.speak(
+                text = "WhatsApp khul gaya hai.",
+                turnId = "cmd_tts_cold_init",
+                commandId = "cmd_tts_cold_init"
+            )
+            assertEquals(
+                "Cold init must NOT fire onSpeechCompleted for unplayed text",
+                0,
+                coldInitCompletedCallbackCount
+            )
+            assertEquals(1, ttsManager.getPendingInitQueueSize())
+            assertTrue(ttsEvents.any { it.commandId == "cmd_tts_cold_init" && it.state == com.example.engine.TtsOutputLifecycleState.QUEUED })
+
+            // Now simulate TextToSpeech.OnInitListener(SUCCESS) -> queued request flushes to engine
+            ttsManager.simulateInitCallbackForTest(android.speech.tts.TextToSpeech.SUCCESS)
+            assertEquals(0, ttsManager.getPendingInitQueueSize())
+            assertEquals(1, spokenEngineCalls.size)
+            val coldUttId = spokenEngineCalls.single().second
+            ttsManager.handleUtteranceStart(coldUttId)
+            assertTrue(coord.isSelfTriggerSuppressed())
+            ttsManager.handleUtteranceDone(coldUttId)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_tts_cold_init")
+            assertEquals(1, coldInitCompletedCallbackCount)
+            assertFalse(coord.isSelfTriggerSuppressed())
+
+            // 5B: Multi-segment utterance completes turn and releases suppression ONLY after the final segment
+            spokenEngineCalls.clear()
+            var multiSegCompletedCount = 0
+            ttsManager.onSpeechCompleted = { multiSegCompletedCount += 1 }
+            ttsManager.setInitializedStateForTest(initialized = true, urduPkInstalled = true)
+            // Mixed Urdu script + Latin English produces 2 segments
+            ttsManager.speak(
+                text = "واٹس ایپ کھل گیا ہے WhatsApp is ready",
+                turnId = "cmd_tts_multiseg",
+                commandId = "cmd_tts_multiseg"
+            )
+            assertEquals("Mixed Urdu + English must enqueue 2 TTS segments", 2, spokenEngineCalls.size)
+            val seg1Id = spokenEngineCalls[0].second
+            val seg2Id = spokenEngineCalls[1].second
+            ttsManager.handleUtteranceStart(seg1Id)
+            assertTrue(coord.isSelfTriggerSuppressed())
+            // Completing segment 1 must NOT complete the turn or end speaking suppression early!
+            ttsManager.handleUtteranceDone(seg1Id)
+            assertEquals("Turn must not complete after segment 1 of 2", 0, multiSegCompletedCount)
+            assertTrue("Speaking suppression must stay active until final segment finishes", coord.isSelfTriggerSuppressed())
+            // Completing segment 2 (final) completes the turn and releases suppression
+            ttsManager.handleUtteranceStart(seg2Id)
+            ttsManager.handleUtteranceDone(seg2Id)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_tts_multiseg")
+            assertEquals("Turn must complete exactly once after final segment", 1, multiSegCompletedCount)
+            assertFalse("Speaking suppression must be released after final segment", coord.isSelfTriggerSuppressed())
+
+            // 5C: Stale callback from an old turn must not complete a newer turn or clear its suppression
+            spokenEngineCalls.clear()
+            var newTurnCompletedCount = 0
+            ttsManager.onSpeechCompleted = { newTurnCompletedCount += 1 }
+            ttsManager.speak("Old turn speech", turnId = "cmd_old_turn", commandId = "cmd_old_turn")
+            val oldTurnUttId = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(oldTurnUttId)
+            // Start a newer turn that supersedes cmd_old_turn
+            ttsManager.speak("New turn speech", turnId = "cmd_new_turn", commandId = "cmd_new_turn")
+            val newTurnUttId = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(newTurnUttId)
+            assertTrue(coord.isSelfTriggerSuppressed())
+            // Late done callback from oldTurnUttId arrives while newTurnUttId is speaking
+            ttsManager.handleUtteranceDone(oldTurnUttId)
+            assertEquals("Stale callback must NOT complete the active new turn", 0, newTurnCompletedCount)
+            assertTrue("Stale callback must NOT clear speaking suppression owned by new turn", coord.isSelfTriggerSuppressed())
+            // Now complete the active new turn
+            ttsManager.handleUtteranceDone(newTurnUttId)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_new_turn")
+            assertEquals(1, newTurnCompletedCount)
+            assertFalse(coord.isSelfTriggerSuppressed())
+
+            // 5D: Denied output acquisition (when CLOUD_PCM_24KHZ already owns the turn) and speak() ERROR do not stick suppression
+            com.example.engine.AudioOutputManager.acquireTurnOutput(
+                "cmd_denied_tts",
+                com.example.engine.AudioOutputManager.OutputModality.CLOUD_PCM_24KHZ
+            )
+            ttsManager.speak("Should be denied", turnId = "cmd_denied_tts", commandId = "cmd_denied_tts")
+            assertFalse("Denied output acquisition must not leave speaking suppression stuck", coord.isSelfTriggerSuppressed())
+            assertTrue(
+                ttsEvents.any {
+                    it.commandId == "cmd_denied_tts" &&
+                        it.state == com.example.engine.TtsOutputLifecycleState.FAILED &&
+                        it.reason == "OUTPUT_ACQUISITION_DENIED"
+                }
+            )
+            com.example.engine.AudioOutputManager.releaseTurnOutput(
+                "cmd_denied_tts",
+                com.example.engine.AudioOutputManager.OutputModality.CLOUD_PCM_24KHZ
+            )
+
+            simulateSpeakReturnCode = android.speech.tts.TextToSpeech.ERROR
+            ttsManager.speak("Engine error test", turnId = "cmd_speak_error", commandId = "cmd_speak_error")
+            assertFalse("engine.speak() returning ERROR must immediately clean up speaking suppression", coord.isSelfTriggerSuppressed())
+            assertTrue(
+                ttsEvents.any {
+                    it.commandId == "cmd_speak_error" &&
+                        it.state == com.example.engine.TtsOutputLifecycleState.FAILED
+                }
+            )
+            simulateSpeakReturnCode = android.speech.tts.TextToSpeech.SUCCESS
+
+            // =========================================================================
+            // 6. REQUIREMENT 6: StandingRulesEngine notification match without playback
+            //    must NOT start unpaired NOTIFICATION_ANNOUNCEMENT speaking suppression
+            // =========================================================================
+            com.omnivoice.agentfix.StandingRulesEngine.teachStandingRule(
+                context = context,
+                triggerType = "notification_received",
+                triggerFilter = "Ali",
+                actionType = "speak_aloud",
+                actionPayload = "Read notification"
+            )
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+            assertFalse(coord.isSelfTriggerSuppressed())
+            val matchedRules = com.omnivoice.agentfix.StandingRulesEngine.onNotificationPosted(
+                context = context,
+                packageName = "com.whatsapp",
+                title = "Ali",
+                text = "This is urgent"
+            )
+            assertTrue(matchedRules.isNotEmpty())
+            assertFalse(
+                "StandingRulesEngine.onNotificationPosted must NOT leave unpaired speaking suppression active",
+                coord.isSelfTriggerSuppressed()
+            )
+
+            // =========================================================================
+            // 7. REQUIREMENT 8: Concise Diagnostics with Credential & Private Text Redaction
+            // =========================================================================
+            val rawDiag = liveEngine.getCommandAudioDiagnostic("cmd_local_disconnect_after_action")!!.copy(
+                wsCloseReason = "key=AIzaSySecretKey1234567890 phone=+923001234567 draft=\"secret draft 42\""
+            )
+            val redactedLine = rawDiag.toRedactedDiagnosticLine()
+            println("STAGE_03_AUDIO_DIAGNOSTIC: $redactedLine")
+            assertTrue(redactedLine.contains("cmd=cmd_local_disconnect_after_action"))
+            assertTrue(redactedLine.contains("actionResult=VERIFIED"))
+            assertTrue(redactedLine.contains("recovery=true"))
+            assertFalse("API key must be redacted from diagnostic line", redactedLine.contains("AIzaSySecretKey1234567890"))
+            assertFalse("Phone number must be redacted from diagnostic line", redactedLine.contains("+923001234567"))
+            assertFalse("Quoted private draft must be redacted from diagnostic line", redactedLine.contains("secret draft 42"))
+        } finally {
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+            com.example.engine.AudioOutputManager.resetAll()
+            ttsManager.shutdown()
+        }
+    }
 }
-
-
-
-
-
-
-

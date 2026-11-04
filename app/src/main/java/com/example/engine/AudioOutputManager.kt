@@ -135,8 +135,21 @@ object AudioOutputManager {
             return false
         }
 
-        // 3. If switching to CLOUD_PCM_24KHZ while LOCAL_TTS was speaking, stop TTS immediately
-        if (modality == OutputModality.CLOUD_PCM_24KHZ && _activeModality.value == OutputModality.LOCAL_TTS) {
+        // 2b. Reverse Single-Modality Rule: If LOCAL_TTS recovery already owns this exact turnId,
+        // block late duplicate CLOUD_PCM_24KHZ packets for the same turnId!
+        if (modality == OutputModality.CLOUD_PCM_24KHZ &&
+            _activeTurnId.value == turnId &&
+            _activeModality.value == OutputModality.LOCAL_TTS
+        ) {
+            Log.d(TAG, "Blocked late duplicate CLOUD_PCM_24KHZ for turnId=$turnId because LOCAL_TTS already owns this turn")
+            return false
+        }
+
+        // 3. If switching to CLOUD_PCM_24KHZ for a NEW turn while LOCAL_TTS was speaking an older turn, stop TTS
+        if (modality == OutputModality.CLOUD_PCM_24KHZ &&
+            _activeModality.value == OutputModality.LOCAL_TTS &&
+            _activeTurnId.value != turnId
+        ) {
             ttsManager?.stop()
         }
 
@@ -144,6 +157,25 @@ object AudioOutputManager {
         _activeModality.value = modality
         _activeStreamCount.value = 1
         return true
+    }
+
+    /**
+     * Releases an unplayed output slot for [turnId] without marking [turnId] as completed,
+     * allowing a bounded recovery path (e.g. `LOCAL_TTS` after `CLOUD_PCM_24KHZ` send/timeout failure)
+     * to acquire output ownership for the same [turnId].
+     */
+    @Synchronized
+    fun releaseUnplayedTurnSlot(turnId: String) {
+        if (_activeTurnId.value == turnId) {
+            _activeTurnId.value = null
+            _activeModality.value = OutputModality.NONE
+            _activeStreamCount.value = 0
+        }
+    }
+
+    @Synchronized
+    fun releaseTurnOutput(turnId: String, modality: OutputModality = OutputModality.NONE) {
+        completeTurnOutput(turnId)
     }
 
     /**
@@ -188,6 +220,11 @@ object AudioOutputManager {
         _activeTurnId.value = null
         _activeModality.value = OutputModality.NONE
         _activeStreamCount.value = 0
+    }
+
+    @Synchronized
+    fun resetAll() {
+        resetForTesting()
     }
 
     /**

@@ -293,12 +293,8 @@ object StandingRulesEngine {
                 Txt.containsAllTokens(combinedSource, filterLower)
 
             if (matchesFilter) {
-                if (rule.actionType == "speak_aloud") {
-                    com.example.engine.AssistantAudioStateMachine.shared.notifyAssistantSpeechStarted(
-                        spokenText = "$title $text ${rule.actionPayload}",
-                        source = "NOTIFICATION_ANNOUNCEMENT"
-                    )
-                }
+                // Only real audio playback (TTS or PCM) may own speaking suppression.
+                // Do not start unpaired speaking suppression when merely logging a rule match.
                 val summary = "StandingRule[${rule.id}] triggered on notification from $packageName ($title: $text) -> ${rule.actionType}: ${rule.actionPayload}"
                 val record = StandingRuleExecutionRecord(
                     ruleId = rule.id,

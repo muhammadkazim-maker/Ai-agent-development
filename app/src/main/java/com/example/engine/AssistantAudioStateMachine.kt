@@ -995,9 +995,19 @@ class GlobalWakeSpeechCoordinator {
     // 4. SELF-TRIGGER SUPPRESSION (TTS & NOTIFICATION ANNOUNCEMENTS)
     // =========================================================================
 
-    fun notifyAssistantSpeechStarted(spokenText: String, source: String = "TTS") {
+    @Volatile
+    private var activeSpeechOwnerToken: String? = null
+
+    fun notifyAssistantSpeechStarted(
+        spokenText: String,
+        source: String = "TTS",
+        ownerToken: String? = null
+    ) {
         synchronized(lock) {
             isAssistantSpeakingNow = true
+            if (!ownerToken.isNullOrBlank()) {
+                activeSpeechOwnerToken = ownerToken
+            }
             val normalized = AssistantAudioStateMachine.normalizeText(spokenText)
             if (normalized.isNotBlank()) {
                 recentAssistantSpeechPhrases.add(normalized)
@@ -1015,17 +1025,49 @@ class GlobalWakeSpeechCoordinator {
 
     fun notifyAssistantSpeechEnded(
         nowMs: Long = System.currentTimeMillis(),
-        immediateCooldownClear: Boolean = false
+        immediateCooldownClear: Boolean = false,
+        ownerToken: String? = null,
+        forceRelease: Boolean = false,
+        source: String = "TTS"
     ) {
         synchronized(lock) {
+            if (!forceRelease &&
+                !ownerToken.isNullOrBlank() &&
+                !activeSpeechOwnerToken.isNullOrBlank() &&
+                ownerToken != activeSpeechOwnerToken
+            ) {
+                // Stale callback from an older playback turn: do not clear the active turn's suppression!
+                return
+            }
             val wasSpeaking = isAssistantSpeakingNow
             isAssistantSpeakingNow = false
+            activeSpeechOwnerToken = null
             if (immediateCooldownClear) {
                 lastAssistantSpeechEndedAtMs = 0L
+                recentAssistantSpeechPhrases.clear()
             } else if (wasSpeaking) {
                 lastAssistantSpeechEndedAtMs = nowMs
             }
             refreshLifecycleStateLocked()
+        }
+    }
+
+    suspend fun <T> withRealPlaybackSuppression(
+        spokenText: String,
+        source: String = "PLAYBACK",
+        ownerToken: String = "playback_${System.currentTimeMillis()}",
+        block: suspend () -> T
+    ): T {
+        notifyAssistantSpeechStarted(spokenText = spokenText, source = source, ownerToken = ownerToken)
+        return try {
+            block()
+        } catch (e: Throwable) {
+            notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = ownerToken)
+            throw e
+        } finally {
+            if (activeSpeechOwnerToken == ownerToken) {
+                notifyAssistantSpeechEnded(ownerToken = ownerToken)
+            }
         }
     }
 
@@ -1043,6 +1085,12 @@ class GlobalWakeSpeechCoordinator {
         nowMs: Long = System.currentTimeMillis()
     ): Boolean {
         if (isSelfTriggerSuppressed(nowMs)) return true
+        val elapsedSinceSpeechEnd = nowMs - lastAssistantSpeechEndedAtMs
+        if (lastAssistantSpeechEndedAtMs <= 0L ||
+            elapsedSinceSpeechEnd !in 0..(AssistantAudioStateMachine.SELF_SPEECH_TAIL_COOLDOWN_MS * 3)
+        ) {
+            return false
+        }
         val cleaned = AssistantAudioStateMachine.normalizeText(candidateTranscript)
         if (cleaned.isEmpty()) return false
         return recentAssistantSpeechPhrases.any { recent ->
