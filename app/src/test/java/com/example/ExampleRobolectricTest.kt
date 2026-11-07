@@ -5977,4 +5977,551 @@ class ExampleRobolectricTest {
             ttsManager.shutdown()
         }
     }
+
+    @Test
+    fun `Repair A follow-up language consistency voice persistence and playback`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val app = context as android.app.Application
+        org.robolectric.Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+        val keyguardManager = context.getSystemService(android.content.Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        org.robolectric.Shadows.shadowOf(keyguardManager).setIsDeviceLocked(false)
+
+        com.example.engine.SpeechPreferenceStore.resetForTest(context)
+        val coord = com.example.engine.AssistantAudioStateMachine.shared
+        coord.resetTelemetryCounters()
+        coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+        coord.armUserSessionAndPersist(context, "REPAIR_A_FOLLOWUP_ARM")
+        com.example.engine.AudioOutputManager.resetAll()
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+
+        val ttsEvents = mutableListOf<com.example.engine.TtsLifecycleEvent>()
+        val spokenEngineCalls = mutableListOf<Triple<String, String, Int>>()
+        val ttsManager = com.example.engine.TextToSpeechManager(context)
+        ttsManager.setInitializedStateForTest(
+            initialized = true,
+            urduPkInstalled = true,
+            englishPkInstalled = true
+        )
+        ttsManager.onLifecycleEvent = { ev -> ttsEvents.add(ev) }
+        ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+            spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+            android.speech.tts.TextToSpeech.SUCCESS
+        }
+
+        val executor = com.example.engine.ActionExecutor(context)
+        val bridge = com.example.engine.AndroidBridge(context, executor)
+        val liveEngine = com.example.engine.OmniLiveSessionEngine(
+            context = context,
+            androidBridge = bridge,
+            actionExecutor = executor,
+            ttsFallback = ttsManager
+        )
+        liveEngine.clearTurnReportsForTest()
+        liveEngine.liveAudioDeliveryTimeoutMs = 120L
+
+        val sentWsMessages = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var wsSendShouldSucceed = true
+        fun createFakeSocket(): okhttp3.WebSocket {
+            return object : okhttp3.WebSocket {
+                override fun request(): okhttp3.Request =
+                    okhttp3.Request.Builder().url("wss://example.com/live").build()
+                override fun queueSize(): Long = 0L
+                override fun send(text: String): Boolean {
+                    if (!wsSendShouldSucceed) return false
+                    sentWsMessages.add(text)
+                    return true
+                }
+                override fun send(bytes: okio.ByteString): Boolean = wsSendShouldSucceed
+                override fun close(code: Int, reason: String?): Boolean = true
+                override fun cancel() {}
+            }
+        }
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            windowId: Int,
+            titleGuess: String,
+            drafts: Map<String, String> = emptyMap(),
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList()
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + 10L,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = -1,
+                activityComponent = "$pkg.MainActivity",
+                visibleApplicationPackages = setOf(pkg),
+                editableFieldDrafts = drafts
+            )
+        }
+
+        try {
+            com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+                com.omnivoice.agentfix.InstalledAppVariant(
+                    packageName = "com.whatsapp",
+                    label = "WhatsApp",
+                    profileType = "personal",
+                    isBusinessVariant = false
+                ),
+                com.omnivoice.agentfix.InstalledAppVariant(
+                    packageName = "com.example.notepad",
+                    label = "Notepad",
+                    profileType = "personal",
+                    isBusinessVariant = false
+                )
+            )
+
+            var screenPhase = "NOTEPAD_DRAFT_42"
+            var openAppExecutionCount = 0
+            var openAppShouldVerify = true
+            com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+                screenPhase = "HOME_SCREEN"
+                true
+            }
+            com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+                if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                    openAppExecutionCount += 1
+                    if (openAppShouldVerify) {
+                        screenPhase = "WHATSAPP_FOREGROUND"
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+                screenPhase = "NOTEPAD_DRAFT_42"
+                true
+            }
+            com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+                when (screenPhase) {
+                    "NOTEPAD_DRAFT_42" -> buildSnapshot(
+                        pkg = "com.example.notepad",
+                        label = "Notepad",
+                        windowId = 101,
+                        titleGuess = "Notepad - Draft 42",
+                        drafts = mapOf("editor_body" to "draft 42")
+                    )
+                    "HOME_SCREEN" -> buildSnapshot(
+                        pkg = "com.google.android.apps.nexuslauncher",
+                        label = "Pixel Launcher",
+                        windowId = 202,
+                        titleGuess = "Home",
+                        nodes = listOf(
+                            com.omnivoice.agentfix.UiNodeSummary(
+                                index = 1,
+                                viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                                className = "android.widget.TextView",
+                                packageName = "com.google.android.apps.nexuslauncher",
+                                text = "WhatsApp",
+                                contentDescription = "WhatsApp",
+                                hintText = "",
+                                isClickable = true,
+                                isLongClickable = false,
+                                isEditable = false,
+                                isScrollable = false,
+                                isFocused = false,
+                                isEnabled = true,
+                                bounds = android.graphics.Rect(100, 400, 260, 580)
+                            )
+                        )
+                    )
+                    "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                        pkg = "com.whatsapp",
+                        label = "WhatsApp",
+                        windowId = 303,
+                        titleGuess = "WhatsApp Chats"
+                    )
+                    else -> null
+                }
+            }
+
+            // =========================================================================
+            // 1. MULTI-CYCLE LANGUAGE CONSISTENCY & CORRELATED OUTPUT DIAGNOSTICS
+            //    - Cycle 1: Roman Urdu ("WhatsApp kholo") sets conversation context.
+            //    - Cycle 2: Server toolCall arrives with NO inline inputTranscription
+            //      (or bare English app name "WhatsApp"). Must NOT wipe conversation
+            //      language or switch acknowledgement to English "Opened WhatsApp."!
+            //    - Cycle 3: return_to_origin ("Uss previous screen par le kar jao...")
+            //      preserves Roman Urdu and Notes draft 42 -> WhatsApp -> return.
+            //    - Explicit English utterance ("Please open WhatsApp for me right now")
+            //      responds in English (proving replies are NOT hardcoded to Urdu).
+            //    - Unverified outcome ("REQUESTED_UNVERIFIED") reports truth in the right
+            //      language and never claims false success.
+            // =========================================================================
+            liveEngine.selectVoice(com.example.engine.GeminiLiveVoice.PUCK)
+            com.example.engine.SpeechPreferenceStore.setSpeechRateAndPitch(context, 1.12f, 0.94f)
+            val socket = createFakeSocket()
+            liveEngine.attachLiveWebSocketForTest(socket, ready = true)
+
+            // Cycle 1: User speaks Roman Urdu ("WhatsApp kholo"), inputTranscription arrives, then server toolCall, then turnComplete
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                """
+                {
+                  "serverContent": {
+                    "inputTranscription": { "text": "WhatsApp kholo" }
+                  }
+                }
+                """.trimIndent()
+            )
+            sentWsMessages.clear()
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                """
+                {
+                  "toolCall": {
+                    "functionCalls": [
+                      {
+                        "id": "call_cycle_1",
+                        "name": "open_app",
+                        "args": { "app_name": "WhatsApp" }
+                      }
+                    ]
+                  }
+                }
+                """.trimIndent()
+            )
+            val wait1 = android.os.SystemClock.elapsedRealtime() + 2000L
+            while (sentWsMessages.isEmpty() && android.os.SystemClock.elapsedRealtime() < wait1) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(15)
+            }
+            assertEquals("WHATSAPP_FOREGROUND", screenPhase)
+            assertEquals("com.example.notepad", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName)
+            assertEquals("draft 42", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body"))
+
+            // Simulate cloud model completing Cycle 1 turn
+            val pcmSilence24k = ByteArray(480)
+            val pcmBase64 = java.util.Base64.getEncoder().encodeToString(pcmSilence24k)
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                """
+                {
+                  "serverContent": {
+                    "modelTurn": {
+                      "parts": [
+                        { "text": "WhatsApp khul gaya hai." },
+                        { "inlineData": { "mimeType": "audio/pcm;rate=24000", "data": "$pcmBase64" } }
+                      ]
+                    },
+                    "turnComplete": true
+                  }
+                }
+                """.trimIndent()
+            )
+            liveEngine.completeHardwarePcmPlaybackDrainForTest()
+
+            val cycle1Reports = liveEngine.turnReportsHistory
+            assertTrue(cycle1Reports.isNotEmpty())
+            val cycle1Report = cycle1Reports.last()
+            assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, cycle1Report.language)
+            assertEquals("Puck", cycle1Report.requestedVoiceId)
+            assertEquals("WhatsApp khul gaya hai.", cycle1Report.spokenText)
+
+            // Cycle 2: Server sends a toolCall in a later cycle WITHOUT inline inputTranscription in the frame
+            // (and args only contain English app name "WhatsApp").
+            // Previously, handleServerJsonMessage wiped _liveUserTranscript = "" on currentVoiceTurnCompleted,
+            // causing detectLanguage("") -> ENGLISH -> "Opened WhatsApp."!
+            screenPhase = "NOTEPAD_DRAFT_42"
+            sentWsMessages.clear()
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                """
+                {
+                  "toolCall": {
+                    "functionCalls": [
+                      {
+                        "id": "call_cycle_2_no_transcript",
+                        "name": "open_app",
+                        "args": { "app_name": "WhatsApp" }
+                      }
+                    ]
+                  }
+                }
+                """.trimIndent()
+            )
+            val wait2 = android.os.SystemClock.elapsedRealtime() + 2000L
+            while (sentWsMessages.isEmpty() && android.os.SystemClock.elapsedRealtime() < wait2) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(15)
+            }
+            assertEquals(
+                "Cycle 2 spoken acknowledgement must remain Roman Urdu and NOT switch to 'Opened WhatsApp.'",
+                "WhatsApp khul gaya hai.",
+                liveEngine.lastSpokenReplyForCurrentCommand
+            )
+            val cycle2Diag = liveEngine.getCommandAudioDiagnostic()!!
+            assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, cycle2Diag.chosenReplyLanguage)
+            assertTrue(
+                "Language reason must explain conversation context preservation (actual=${cycle2Diag.languageSelectionReason})",
+                cycle2Diag.languageSelectionReason.contains("CONVERSATION_CONTEXT_ROMAN_URDU")
+            )
+            liveEngine.simulateLiveWebSocketMessageForTest("""{"serverContent":{"turnComplete":true}}""")
+
+            // Cycle 2B: User says only bare English app name "WhatsApp" in inputTranscription during Roman Urdu session
+            screenPhase = "NOTEPAD_DRAFT_42"
+            sentWsMessages.clear()
+            liveEngine.simulateLiveWebSocketMessageForTest(
+                """
+                {
+                  "serverContent": {
+                    "inputTranscription": { "text": "WhatsApp" }
+                  },
+                  "toolCall": {
+                    "functionCalls": [
+                      {
+                        "id": "call_cycle_2b_entity_only",
+                        "name": "open_app",
+                        "args": { "app_name": "WhatsApp" }
+                      }
+                    ]
+                  }
+                }
+                """.trimIndent()
+            )
+            val wait2b = android.os.SystemClock.elapsedRealtime() + 2000L
+            while (sentWsMessages.isEmpty() && android.os.SystemClock.elapsedRealtime() < wait2b) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(15)
+            }
+            val cycle2bDiag = liveEngine.getCommandAudioDiagnostic()!!
+            assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, cycle2bDiag.chosenReplyLanguage)
+            assertEquals(
+                "CONVERSATION_CONTEXT_ROMAN_URDU_PRESERVED_ON_ENTITY_OR_TOOL_TOKEN",
+                cycle2bDiag.languageSelectionReason
+            )
+            assertEquals("WhatsApp khul gaya hai.", liveEngine.lastSpokenReplyForCurrentCommand)
+
+            // Even if the cloud model emits internal English text "Opened WhatsApp." during a Roman Urdu session,
+            // sanitizeSpokenText must localize it using the verified outcome rather than speaking English:
+            val sanitizedLeak = liveEngine.sanitizeSpokenText("Opened WhatsApp.", utterance = "WhatsApp")
+            assertEquals("WhatsApp khul gaya hai.", sanitizedLeak)
+
+            // Cycle 3: Notes draft 42 -> WhatsApp -> return_to_origin preserves Roman Urdu
+            val cycle3Result = kotlinx.coroutines.runBlocking {
+                liveEngine.startNewCommandTurn(
+                    commandId = "cmd_cycle_3_return",
+                    utterance = "Uss previous screen par le kar jao jahan main pehle work kar raha tha"
+                )
+                liveEngine.executeToolActionOnly(
+                    org.json.JSONObject().apply {
+                        put("id", "call_cycle_3_return")
+                        put("commandId", "cmd_cycle_3_return")
+                        put("name", "return_to_origin")
+                        put("args", org.json.JSONObject())
+                    },
+                    isServerOriginCall = true
+                )
+            }
+            assertEquals("VERIFIED", cycle3Result.finalStatus)
+            assertTrue(
+                "Mixed Roman Urdu + English utterance must resolve to MIXED or ROMAN_URDU (actual=${cycle3Result.userLanguage})",
+                cycle3Result.userLanguage == com.example.engine.DetectedLanguage.MIXED ||
+                    cycle3Result.userLanguage == com.example.engine.DetectedLanguage.ROMAN_URDU
+            )
+            assertEquals("NOTEPAD_DRAFT_42", screenPhase)
+            assertTrue(
+                "Return acknowledgement must be in Roman Urdu and reference Notepad (actual=${cycle3Result.spokenMessage})",
+                cycle3Result.spokenMessage.contains("Notepad wapas khul gaya hai")
+            )
+
+            // Explicit English turn: user genuinely speaks English -> assistant responds in English (not hardcoded Urdu)
+            screenPhase = "NOTEPAD_DRAFT_42"
+            val englishResult = kotlinx.coroutines.runBlocking {
+                liveEngine.startNewCommandTurn(
+                    commandId = "cmd_explicit_english",
+                    utterance = "Please open the WhatsApp application for me right now"
+                )
+                liveEngine.executeToolActionOnly(
+                    org.json.JSONObject().apply {
+                        put("id", "call_explicit_english")
+                        put("commandId", "cmd_explicit_english")
+                        put("name", "open_app")
+                        put("args", org.json.JSONObject().put("app_name", "WhatsApp"))
+                    },
+                    isServerOriginCall = true
+                )
+            }
+            assertEquals(com.example.engine.DetectedLanguage.ENGLISH, englishResult.userLanguage)
+            assertEquals("UTTERANCE_ENGLISH", englishResult.languageSelectionReason)
+            assertEquals("Opened WhatsApp.", englishResult.spokenMessage)
+
+            // Restore Roman Urdu conversation context and test unverified outcome truthfulness
+            com.example.engine.SpeechPreferenceStore.setConversationLanguage(
+                context,
+                com.example.engine.DetectedLanguage.ROMAN_URDU
+            )
+            screenPhase = "NOTEPAD_DRAFT_42"
+            openAppShouldVerify = false // Tap happens, but foreground stays on launcher -> REQUESTED_UNVERIFIED
+            val unverifiedResult = kotlinx.coroutines.runBlocking {
+                liveEngine.startNewCommandTurn(
+                    commandId = "cmd_unverified_urdu",
+                    utterance = "WhatsApp"
+                )
+                liveEngine.executeToolActionOnly(
+                    org.json.JSONObject().apply {
+                        put("id", "call_unverified_urdu")
+                        put("commandId", "cmd_unverified_urdu")
+                        put("name", "open_app")
+                        put("args", org.json.JSONObject().put("app_name", "WhatsApp"))
+                    },
+                    isServerOriginCall = true
+                )
+            }
+            openAppShouldVerify = true
+            assertEquals("REQUESTED_UNVERIFIED", unverifiedResult.finalStatus)
+            assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, unverifiedResult.userLanguage)
+            assertTrue(
+                "Unverified action must never claim success (actual=${unverifiedResult.spokenMessage})",
+                unverifiedResult.spokenMessage.contains("koshish ki") &&
+                    !unverifiedResult.spokenMessage.contains("khul gaya hai")
+            )
+
+            // =========================================================================
+            // 2. VOICE CONFIGURATION PERSISTENCE, RESTORATION, STALE CALLBACK REJECTION
+            //    & NO MID-UTTERANCE VOICE/LOCALE MUTATION
+            // =========================================================================
+            // Recreate OmniLiveSessionEngine to simulate app switch / process resume
+            val recreatedLiveEngine = com.example.engine.OmniLiveSessionEngine(
+                context = context,
+                androidBridge = bridge,
+                actionExecutor = executor,
+                ttsFallback = ttsManager
+            )
+            assertEquals(
+                "Selected voice Puck must be restored from SpeechPreferenceStore on new engine instance",
+                com.example.engine.GeminiLiveVoice.PUCK,
+                recreatedLiveEngine.selectedVoice.value
+            )
+            assertEquals("Puck", com.example.engine.SpeechPreferenceStore.getSelectedLiveVoice(context))
+            assertEquals(1.12f, com.example.engine.SpeechPreferenceStore.getSpeechRate(context), 0.001f)
+            assertEquals(0.94f, com.example.engine.SpeechPreferenceStore.getPitch(context), 0.001f)
+
+            // Verify multi-segment utterance applies a single stable SpeechConfigSnapshot once
+            // and does NOT re-mutate locale/voice/rate/pitch between segments
+            val snapshotsBefore = ttsManager.appliedConfigSnapshotsForTest.size
+            spokenEngineCalls.clear()
+            val longMixedReply = "واٹس ایپ کھل گیا ہے WhatsApp is ready"
+            ttsManager.speakNormalized(
+                rawReply = longMixedReply,
+                detectedLanguage = com.example.engine.DetectedLanguage.URDU_NASTALIQ,
+                turnId = "cmd_stable_snapshot",
+                pitch = com.example.engine.SpeechPreferenceStore.getPitch(context),
+                speechRate = com.example.engine.SpeechPreferenceStore.getSpeechRate(context),
+                commandId = "cmd_stable_snapshot",
+                languageSelectionReason = "TEST_MULTI_SEGMENT"
+            )
+            assertTrue("Multi-segment speech must enqueue at least 2 segments", spokenEngineCalls.size >= 2)
+            val snapshotsAfter = ttsManager.appliedConfigSnapshotsForTest
+            assertEquals(
+                "TextToSpeechManager must apply configuration snapshot exactly ONCE per utterance, not inside the segment loop",
+                snapshotsBefore + 1,
+                snapshotsAfter.size
+            )
+            val appliedSnap = snapshotsAfter.last()
+            assertEquals(1.12f, appliedSnap.speechRate, 0.001f)
+            assertEquals(0.94f, appliedSnap.pitch, 0.001f)
+            assertTrue(appliedSnap.resolvedVoiceId.isNotBlank())
+            assertEquals(0, ttsManager.getMidUtteranceConfigMutationsCount())
+            // Finish the multi-segment utterance cleanly
+            spokenEngineCalls.forEachIndexed { idx, triple ->
+                if (idx == 0) ttsManager.handleUtteranceStart(triple.second)
+                ttsManager.handleUtteranceDone(triple.second)
+            }
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_stable_snapshot")
+
+            // Verify stale session generation callbacks and stale init callbacks are rejected
+            val staleInitBefore = ttsManager.getStaleInitCallbacksRejectedCount()
+            ttsManager.simulateInitCallbackForTest(android.speech.tts.TextToSpeech.SUCCESS, initGeneration = -99L)
+            assertEquals(staleInitBefore + 1, ttsManager.getStaleInitCallbacksRejectedCount())
+
+            val staleCallbacksBefore = ttsManager.getStaleCallbacksRejectedCount()
+            ttsManager.speak("Active session utterance", turnId = "cmd_gen_check", commandId = "cmd_gen_check")
+            val activeUttId = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(activeUttId)
+            ttsManager.handleUtteranceDone(activeUttId, callbackSessionGeneration = -1L)
+            assertTrue(
+                "Stale callback from older session generation must be rejected and counted",
+                ttsManager.getStaleCallbacksRejectedCount() > staleCallbacksBefore
+            )
+            ttsManager.handleUtteranceDone(activeUttId)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_gen_check")
+
+            // =========================================================================
+            // 3. HONEST CLOUD/LOCAL FALLBACK ARBITRATION Around "Cycle 7"
+            //    - Simulate cloud audio send failure during Cycle 7.
+            //    - Bounded recovery uses ANDROID_TTS_FALLBACK with user's stored rate/pitch
+            //      (not hardcoded 1.05f), records requestedOutputProvider="GEMINI_LIVE (Puck)"
+            //      and actualOutputProvider="ANDROID_TTS_FALLBACK", does NOT repeat open_app,
+            //      and preserves Puck as the primary voice preference for Cycle 8.
+            // =========================================================================
+            screenPhase = "NOTEPAD_DRAFT_42"
+            val launchesBeforeCycle7 = openAppExecutionCount
+            spokenEngineCalls.clear()
+            wsSendShouldSucceed = false // Simulate socket send=false after local fast-path action
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = "cmd_cycle_7_fallback"
+                )
+            }
+            wsSendShouldSucceed = true
+            assertEquals("open_app must execute exactly once during Cycle 7", launchesBeforeCycle7 + 1, openAppExecutionCount)
+            val cycle7Diag = liveEngine.getCommandAudioDiagnostic("cmd_cycle_7_fallback")!!
+            assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, cycle7Diag.chosenReplyLanguage)
+            assertEquals("GEMINI_LIVE (Puck)", cycle7Diag.requestedOutputProvider)
+            assertEquals("ANDROID_TTS_FALLBACK", cycle7Diag.actualOutputProvider)
+            assertEquals("Puck", cycle7Diag.requestedVoiceId)
+            assertTrue("Resolved local TTS voice ID must be recorded", cycle7Diag.resolvedVoiceId.isNotBlank())
+            assertEquals(1.12f, cycle7Diag.speechRate, 0.001f)
+            assertEquals(0.94f, cycle7Diag.pitch, 0.001f)
+            assertEquals("WS_CLIENT_CONTENT_SEND_FALSE", cycle7Diag.fallbackOrReconnectReason)
+            assertEquals(
+                "Primary voice preference Puck must remain intact after local TTS fallback",
+                com.example.engine.GeminiLiveVoice.PUCK,
+                liveEngine.selectedVoice.value
+            )
+            // Late cloud PCM arriving for cmd_cycle_7_fallback must be suppressed
+            val acceptedLatePcm = liveEngine.enqueue24kHzPcmChunk(pcmSilence24k, commandId = "cmd_cycle_7_fallback")
+            assertFalse("Late cloud PCM for recovered command must be suppressed", acceptedLatePcm)
+            assertTrue(
+                (liveEngine.getCommandAudioDiagnostic("cmd_cycle_7_fallback")?.lateDuplicateFramesSuppressed ?: 0) >= 1
+            )
+
+            val cycle7Redacted = cycle7Diag.toRedactedDiagnosticLine()
+            println("REPAIR_A_FOLLOWUP_DIAG: $cycle7Redacted")
+            assertTrue(cycle7Redacted.contains("replyLang=ROMAN_URDU"))
+            assertTrue(cycle7Redacted.contains("reqProvider=GEMINI_LIVE (Puck)"))
+            assertTrue(cycle7Redacted.contains("actProvider=ANDROID_TTS_FALLBACK"))
+            assertTrue(cycle7Redacted.contains("reqVoice=Puck"))
+
+            // =========================================================================
+            // 4. PCM PLAYBACK STREAM VALIDATION (Sample rate parsing & 16-bit alignment)
+            // =========================================================================
+            assertEquals(24000, com.example.engine.OmniLiveSessionEngine.parsePcmSampleRateFromMimeType("audio/pcm;rate=24000"))
+            assertEquals(16000, com.example.engine.OmniLiveSessionEngine.parsePcmSampleRateFromMimeType("audio/pcm;rate=16000"))
+            assertEquals(24000, com.example.engine.OmniLiveSessionEngine.parsePcmSampleRateFromMimeType("audio/pcm"))
+
+            // Odd-length byte array must be aligned to even 16-bit sample boundary
+            val oddBytes = ByteArray(101) { 1 }
+            val aligned24k = com.example.engine.OmniLiveSessionEngine.ensure24kHzPcm16Mono(oddBytes, 24000)
+            assertEquals("PCM16 mono frame must have even byte count", 100, aligned24k.size)
+
+            // 16kHz PCM stream (160 samples = 320 bytes) resampled to 24kHz must produce 240 samples (480 bytes)
+            val pcm16k = ByteArray(320)
+            val resampled24k = com.example.engine.OmniLiveSessionEngine.ensure24kHzPcm16Mono(pcm16k, 16000)
+            assertEquals(480, resampled24k.size)
+            assertEquals("Resampled PCM16 output must be 2-byte aligned", 0, resampled24k.size % 2)
+        } finally {
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+            com.example.engine.AudioOutputManager.resetAll()
+            ttsManager.shutdown()
+        }
+    }
 }

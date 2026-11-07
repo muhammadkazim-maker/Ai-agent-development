@@ -129,6 +129,16 @@ data class CommandAudioDiagnosticEntry(
     val observedActionResult: String = "NONE",
     val outputState: CommandSpeechOutputState = CommandSpeechOutputState.NONE,
     val outputEngine: String = "NONE",
+    val requestedOutputProvider: String = "NONE",
+    val actualOutputProvider: String = "NONE",
+    val requestedVoiceId: String = "NONE",
+    val resolvedVoiceId: String = "NONE",
+    val resolvedLocaleTag: String = "NONE",
+    val speechRate: Float = 1.0f,
+    val pitch: Float = 1.0f,
+    val chosenReplyLanguage: DetectedLanguage = DetectedLanguage.ENGLISH,
+    val languageSelectionReason: String = "DEFAULT",
+    val fallbackOrReconnectReason: String = "NONE",
     val wsGeneration: Long = 0L,
     val wsCloseCode: Int? = null,
     val wsCloseReason: String = "",
@@ -143,11 +153,25 @@ data class CommandAudioDiagnosticEntry(
     val lateDuplicateFramesSuppressed: Int = 0,
     val cancellationReason: String = "NONE"
 ) {
+    val sessionGeneration: Long
+        get() = wsGeneration
+
     fun toRedactedDiagnosticLine(): String {
         return "cmd=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(commandId.ifBlank { "NONE" })} | " +
+            "sessionGen=$wsGeneration | " +
             "route=${route.ifBlank { "NONE" }} | " +
             "toolCallId=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(toolCallId.ifBlank { "NONE" })} | " +
             "actionResult=${observedActionResult.ifBlank { "NONE" }} | " +
+            "replyLang=${chosenReplyLanguage.name} | " +
+            "langReason=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(languageSelectionReason.ifBlank { "NONE" })} | " +
+            "reqProvider=${requestedOutputProvider.ifBlank { "NONE" }} | " +
+            "actProvider=${actualOutputProvider.ifBlank { outputEngine.ifBlank { "NONE" } }} | " +
+            "reqVoice=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(requestedVoiceId.ifBlank { "NONE" })} | " +
+            "resVoice=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(resolvedVoiceId.ifBlank { "NONE" })} | " +
+            "locale=${resolvedLocaleTag.ifBlank { "NONE" }} | " +
+            "rate=$speechRate | " +
+            "pitch=$pitch | " +
+            "fallbackReason=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(fallbackOrReconnectReason.ifBlank { "NONE" })} | " +
             "outputState=${outputState.name} | " +
             "engine=${outputEngine.ifBlank { "NONE" }} | " +
             "wsGen=$wsGeneration | " +
@@ -177,6 +201,7 @@ data class ExecutedToolCallResult(
     val resultPayload: JSONObject,
     val activeUtterance: String = "",
     val userLanguage: DetectedLanguage = DetectedLanguage.ENGLISH,
+    val languageSelectionReason: String = "DEFAULT",
     val staleIgnored: Boolean = false
 )
 
@@ -194,7 +219,17 @@ data class LiveTurnExecutionReport(
     val outputState: CommandSpeechOutputState = CommandSpeechOutputState.NONE,
     val audioFramesReceived: Int = 0,
     val audioFramesPlayed: Int = 0,
-    val recoveryTriggered: Boolean = false
+    val recoveryTriggered: Boolean = false,
+    val sessionGeneration: Long = 0L,
+    val languageSelectionReason: String = "DEFAULT",
+    val requestedOutputProvider: String = outputEngine,
+    val actualOutputProvider: String = outputEngine,
+    val requestedVoiceId: String = "NONE",
+    val resolvedVoiceId: String = "NONE",
+    val resolvedLocaleTag: String = language.ttsLocale.toLanguageTag(),
+    val speechRate: Float = 1.0f,
+    val pitch: Float = 1.0f,
+    val fallbackOrReconnectReason: String = "NONE"
 ) {
     val spokenReply: String
         get() = spokenText
@@ -853,11 +888,58 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
 
         /**
-         * Decodes Base64 16-bit signed little-endian PCM (`audio/pcm;rate=24000`) into a `FloatArray` (`[-1f, 1f]`)
-         * for real-time audio visualization and returns both the raw PCM bytes and `FloatArray`.
+         * Extracts the PCM sample rate from a Gemini Live `inlineData.mimeType` string
+         * (e.g., `"audio/pcm;rate=24000"` -> `24000`). Defaults to [OUTPUT_SAMPLE_RATE] (`24000`).
          */
-        fun decodeBase64Pcm16ToFloat32(base64Pcm: String): Pair<ByteArray, FloatArray> {
-            val rawBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
+        fun parsePcmSampleRateFromMimeType(mimeType: String?): Int {
+            val raw = mimeType?.trim().orEmpty()
+            if (raw.isEmpty()) return OUTPUT_SAMPLE_RATE
+            val match = Regex("rate\\s*=\\s*(\\d+)", RegexOption.IGNORE_CASE).find(raw)
+            val parsed = match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: OUTPUT_SAMPLE_RATE
+            return if (parsed in 8000..96000) parsed else OUTPUT_SAMPLE_RATE
+        }
+
+        /**
+         * Ensures 16-bit signed little-endian mono PCM bytes are even-byte frame-aligned and
+         * resampled to [OUTPUT_SAMPLE_RATE] (`24000 Hz`) if the incoming stream uses a different rate.
+         * Prevents sample boundary byte-shift noise and pitch/speed warping across cycles.
+         */
+        fun ensure24kHzPcm16Mono(rawBytes: ByteArray, sourceRate: Int = OUTPUT_SAMPLE_RATE): ByteArray {
+            val alignedSize = rawBytes.size and 1.inv()
+            if (alignedSize <= 0) return ByteArray(0)
+            val alignedBytes = if (alignedSize == rawBytes.size) rawBytes else rawBytes.copyOf(alignedSize)
+            if (sourceRate == OUTPUT_SAMPLE_RATE || sourceRate !in 8000..96000) {
+                return alignedBytes
+            }
+            val inSamples = alignedSize / 2
+            if (inSamples <= 1) return alignedBytes
+            val outSamples = ((inSamples.toLong() * OUTPUT_SAMPLE_RATE) / sourceRate).toInt().coerceAtLeast(1)
+            val outBytes = ByteArray(outSamples * 2)
+            for (i in 0 until outSamples) {
+                val srcPos = (i.toDouble() * (inSamples - 1)) / (outSamples - 1).coerceAtLeast(1)
+                val idx0 = srcPos.toInt().coerceIn(0, inSamples - 1)
+                val idx1 = (idx0 + 1).coerceIn(0, inSamples - 1)
+                val frac = srcPos - idx0
+                val s0 = ((alignedBytes[idx0 * 2 + 1].toInt() shl 8) or (alignedBytes[idx0 * 2].toInt() and 0xFF)).toShort().toInt()
+                val s1 = ((alignedBytes[idx1 * 2 + 1].toInt() shl 8) or (alignedBytes[idx1 * 2].toInt() and 0xFF)).toShort().toInt()
+                val interp = (s0 + ((s1 - s0) * frac).roundToInt()).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                outBytes[i * 2] = (interp and 0xFF).toByte()
+                outBytes[i * 2 + 1] = ((interp shr 8) and 0xFF).toByte()
+            }
+            return outBytes
+        }
+
+        /**
+         * Decodes Base64 16-bit signed little-endian PCM (`audio/pcm;rate=24000`) into a `FloatArray` (`[-1f, 1f]`)
+         * for real-time audio visualization and returns both the aligned 24kHz PCM bytes and `FloatArray`.
+         */
+        fun decodeBase64Pcm16ToFloat32(
+            base64Pcm: String,
+            mimeType: String = "audio/pcm;rate=24000"
+        ): Pair<ByteArray, FloatArray> {
+            val decoded = Base64.decode(base64Pcm, Base64.DEFAULT)
+            val sourceRate = parsePcmSampleRateFromMimeType(mimeType)
+            val rawBytes = ensure24kHzPcm16Mono(decoded, sourceRate)
             val sampleCount = rawBytes.size / 2
             val floats = FloatArray(sampleCount)
             for (i in 0 until sampleCount) {
@@ -1007,6 +1089,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     var lastTurnReport: LiveTurnExecutionReport? = null
         private set
 
+    @Volatile
+    var lastLanguageResolutionForCurrentCommand: LanguageProcessor.LanguageResolution =
+        LanguageProcessor.LanguageResolution(DetectedLanguage.ENGLISH, "INITIAL")
+        private set
+
     private val _turnReportsHistory = java.util.concurrent.CopyOnWriteArrayList<LiveTurnExecutionReport>()
     val turnReportsHistory: List<LiveTurnExecutionReport>
         get() = _turnReportsHistory.toList()
@@ -1018,9 +1105,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     private val postActionAudioWatchdogJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     @Volatile
-    var liveAudioDeliveryTimeoutMs: Long = 1400L
+    var liveAudioDeliveryTimeoutMs: Long = 2800L
 
     fun clearTurnReportsForTest() {
+        SpeechPreferenceStore.resetForTest(context)
+        _selectedVoice.value = GeminiLiveVoice.AOEDE
         _turnReportsHistory.clear()
         lastTurnReport = null
         transmittedServerToolCallIds.clear()
@@ -1030,6 +1119,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         postActionAudioWatchdogJobs.values.forEach { it.cancel() }
         postActionAudioWatchdogJobs.clear()
         staleWebSocketCallbacksIgnoredCount = 0
+        currentTurnStartedFromInputTranscription = false
     }
 
     fun getCommandAudioDiagnostic(commandId: String = activeCommandId): CommandAudioDiagnosticEntry? =
@@ -1046,7 +1136,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     ): CommandAudioDiagnosticEntry {
         val current = commandDiagnosticsMap[commandId] ?: CommandAudioDiagnosticEntry(
             commandId = commandId,
-            wsGeneration = activeWebSocketGeneration
+            wsGeneration = activeWebSocketGeneration,
+            requestedVoiceId = _selectedVoice.value.voiceName,
+            speechRate = SpeechPreferenceStore.getSpeechRate(context),
+            pitch = SpeechPreferenceStore.getPitch(context)
         )
         val updated = transform(current)
         commandDiagnosticsMap[commandId] = updated
@@ -1061,6 +1154,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     @Volatile
     private var currentVoiceTurnCompleted: Boolean = false
+
+    @Volatile
+    private var currentTurnStartedFromInputTranscription: Boolean = false
 
     @Volatile
     var currentTurnCanonicalResult: com.omnivoice.agentfix.CanonicalAppLaunchResult? = null
@@ -1183,7 +1279,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     /**
      * Delivers a command's spoken reply once via [ttsFallback] and binds TTS utterance callbacks
-     * to the command's [CommandAudioDiagnosticEntry] and [LiveTurnExecutionReport].
+     * and [SpeechConfigSnapshot] to the command's [CommandAudioDiagnosticEntry] and [LiveTurnExecutionReport].
+     * Preserves the user's primary Gemini Live voice preference in [SpeechPreferenceStore].
      */
     private fun deliverCommandSpeechViaLocalTts(
         commandId: String,
@@ -1192,16 +1289,34 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         diagnosticText: String,
         finalStatus: String,
         language: DetectedLanguage,
+        languageSelectionReason: String = lastLanguageResolutionForCurrentCommand.reason,
         isRecovery: Boolean,
         recoveryReason: String = ""
     ) {
         if (spokenReply.isBlank()) return
         val coord = AssistantAudioStateMachine.shared
         val tts = ttsFallback
+        val primaryLiveVoice = _selectedVoice.value.voiceName
+        val requestedProvider = if (isRecovery) "GEMINI_LIVE ($primaryLiveVoice)" else "ANDROID_TTS"
+        val actualProvider = if (isRecovery) "ANDROID_TTS_FALLBACK" else "ANDROID_TTS"
+        val authoritativeRate = SpeechPreferenceStore.getSpeechRate(context)
+        val authoritativePitch = SpeechPreferenceStore.getPitch(context)
+
         if (tts == null) {
             updateCommandDiagnostic(commandId) {
                 it.copy(
                     outputState = CommandSpeechOutputState.FAILED,
+                    outputEngine = actualProvider,
+                    requestedOutputProvider = requestedProvider,
+                    actualOutputProvider = actualProvider,
+                    requestedVoiceId = primaryLiveVoice,
+                    resolvedVoiceId = "TTS_UNAVAILABLE",
+                    resolvedLocaleTag = language.ttsLocale.toLanguageTag(),
+                    speechRate = authoritativeRate,
+                    pitch = authoritativePitch,
+                    chosenReplyLanguage = language,
+                    languageSelectionReason = languageSelectionReason,
+                    fallbackOrReconnectReason = recoveryReason.ifBlank { "TTS_UNAVAILABLE" },
                     recoveryTriggered = it.recoveryTriggered || isRecovery,
                     cancellationReason = recoveryReason.ifBlank { "TTS_UNAVAILABLE" }
                 )
@@ -1236,9 +1351,22 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     TtsOutputLifecycleState.INTERRUPTED -> CommandSpeechOutputState.INTERRUPTED
                     TtsOutputLifecycleState.FAILED -> CommandSpeechOutputState.FAILED
                 }
+                val snap = event.configSnapshot
                 val updatedDiag = updateCommandDiagnostic(commandId) { current ->
                     current.copy(
                         outputState = mappedState,
+                        outputEngine = if (isRecovery) "ANDROID_TTS_RECOVERY" else "ANDROID_TTS",
+                        requestedOutputProvider = snap?.requestedOutputProvider ?: requestedProvider,
+                        actualOutputProvider = snap?.actualOutputProvider ?: actualProvider,
+                        requestedVoiceId = snap?.requestedVoiceId ?: primaryLiveVoice,
+                        resolvedVoiceId = snap?.resolvedVoiceId ?: tts.lastResolvedVoiceId,
+                        resolvedLocaleTag = snap?.resolvedLocaleTag ?: language.ttsLocale.toLanguageTag(),
+                        speechRate = snap?.speechRate ?: authoritativeRate,
+                        pitch = snap?.pitch ?: authoritativePitch,
+                        chosenReplyLanguage = snap?.chosenReplyLanguage ?: language,
+                        languageSelectionReason = snap?.languageSelectionReason ?: languageSelectionReason,
+                        fallbackOrReconnectReason = snap?.fallbackOrReconnectReason?.takeIf { it != "NONE" }
+                            ?: recoveryReason.ifBlank { current.fallbackOrReconnectReason },
                         ttsUtteranceId = event.utteranceId,
                         ttsStartedCount = if (event.state == TtsOutputLifecycleState.STARTED && event.segmentIndex == 0) {
                             current.ttsStartedCount + 1
@@ -1263,6 +1391,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     lastTurnReport = lastTurnReport?.copy(
                         outputState = updatedDiag.outputState,
                         outputEngine = if (isRecovery) "ANDROID_TTS_RECOVERY" else "ANDROID_TTS",
+                        requestedOutputProvider = updatedDiag.requestedOutputProvider,
+                        actualOutputProvider = updatedDiag.actualOutputProvider,
+                        requestedVoiceId = updatedDiag.requestedVoiceId,
+                        resolvedVoiceId = updatedDiag.resolvedVoiceId,
+                        resolvedLocaleTag = updatedDiag.resolvedLocaleTag,
+                        speechRate = updatedDiag.speechRate,
+                        pitch = updatedDiag.pitch,
+                        languageSelectionReason = updatedDiag.languageSelectionReason,
+                        fallbackOrReconnectReason = updatedDiag.fallbackOrReconnectReason,
                         recoveryTriggered = updatedDiag.recoveryTriggered,
                         audioFramesReceived = updatedDiag.audioFramesReceived,
                         audioFramesPlayed = updatedDiag.audioFramesPlayed
@@ -1272,11 +1409,17 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
         tts.speak(
             text = spokenReply,
-            pitch = 1.0f,
-            speechRate = 1.05f,
+            pitch = authoritativePitch,
+            speechRate = authoritativeRate,
             locale = language.ttsLocale,
             turnId = commandId,
-            commandId = commandId
+            commandId = commandId,
+            sessionGeneration = activeWebSocketGeneration,
+            requestedOutputProvider = requestedProvider,
+            actualOutputProvider = actualProvider,
+            requestedVoiceId = primaryLiveVoice,
+            languageSelectionReason = languageSelectionReason,
+            fallbackOrReconnectReason = recoveryReason.ifBlank { "NONE" }
         )
     }
 
@@ -1324,11 +1467,21 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             currentDiag?.observedActionResult?.ifBlank { "REQUESTED_UNVERIFIED" } ?: "REQUESTED_UNVERIFIED"
         }
         val diagnosticText = lastDiagnosticTextForCurrentCommand.ifBlank { spokenText }
-        val lang = LanguageProcessor.detectLanguage(utterance.ifBlank { spokenText })
+        val langRes = if (currentDiag != null && currentDiag.languageSelectionReason != "DEFAULT") {
+            LanguageProcessor.LanguageResolution(currentDiag.chosenReplyLanguage, currentDiag.languageSelectionReason)
+        } else {
+            resolveCommandReplyLanguage(utterance, mutateHistoryIfGenuine = false)
+        }
 
         updateCommandDiagnostic(commandId) {
             it.copy(
                 recoveryTriggered = true,
+                requestedOutputProvider = "GEMINI_LIVE (${_selectedVoice.value.voiceName})",
+                actualOutputProvider = "ANDROID_TTS_FALLBACK",
+                requestedVoiceId = _selectedVoice.value.voiceName,
+                chosenReplyLanguage = langRes.language,
+                languageSelectionReason = langRes.reason,
+                fallbackOrReconnectReason = reason,
                 cancellationReason = reason
             )
         }
@@ -1339,7 +1492,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             spokenReply = spokenText,
             diagnosticText = diagnosticText,
             finalStatus = finalStatus,
-            language = lang,
+            language = langRes.language,
+            languageSelectionReason = langRes.reason,
             isRecovery = true,
             recoveryReason = reason
         )
@@ -1348,11 +1502,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             commandId = commandId,
             utterance = utterance,
             outputEngine = "ANDROID_TTS_RECOVERY",
-            language = lang,
+            language = langRes.language,
+            languageSelectionReason = langRes.reason,
             liveConnected = isGeminiLiveWebSocketConnected(),
             finalStatus = finalStatus,
             spokenText = spokenText,
-            diagnosticText = diagnosticText
+            diagnosticText = diagnosticText,
+            requestedOutputProvider = "GEMINI_LIVE (${_selectedVoice.value.voiceName})",
+            actualOutputProvider = "ANDROID_TTS_FALLBACK",
+            fallbackOrReconnectReason = reason
         )
         return true
     }
@@ -1383,13 +1541,35 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         utterance: String,
         outputEngine: String,
         language: DetectedLanguage,
+        languageSelectionReason: String = lastLanguageResolutionForCurrentCommand.reason,
         liveConnected: Boolean,
         finalStatus: String,
         spokenText: String,
         diagnosticText: String,
+        requestedOutputProvider: String? = null,
+        actualOutputProvider: String? = null,
+        fallbackOrReconnectReason: String? = null,
         foregroundPackage: String? = com.omnivoice.agentfix.ScreenObserver.captureFreshSnapshot(preferNonSelfPackage = true)?.packageName
     ): LiveTurnExecutionReport {
         val diag = commandDiagnosticsMap[commandId]
+        val liveVoice = _selectedVoice.value.voiceName
+        val reqProv = requestedOutputProvider
+            ?: diag?.requestedOutputProvider?.takeIf { it != "NONE" }
+            ?: outputEngine
+        val actProv = actualOutputProvider
+            ?: diag?.actualOutputProvider?.takeIf { it != "NONE" }
+            ?: outputEngine
+        val reqVoice = diag?.requestedVoiceId?.takeIf { it != "NONE" } ?: liveVoice
+        val resVoice = diag?.resolvedVoiceId?.takeIf { it != "NONE" }
+            ?: if (actProv.startsWith("GEMINI_LIVE")) liveVoice else (ttsFallback?.lastResolvedVoiceId ?: "ANDROID_TTS")
+        val resLocale = diag?.resolvedLocaleTag?.takeIf { it != "NONE" }
+            ?: language.ttsLocale.toLanguageTag()
+        val rate = diag?.speechRate ?: SpeechPreferenceStore.getSpeechRate(context)
+        val pitchVal = diag?.pitch ?: SpeechPreferenceStore.getPitch(context)
+        val fbReason = fallbackOrReconnectReason
+            ?: diag?.fallbackOrReconnectReason?.takeIf { it != "NONE" }
+            ?: "NONE"
+
         val report = LiveTurnExecutionReport(
             commandId = commandId,
             utterance = utterance,
@@ -1404,7 +1584,17 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             outputState = diag?.outputState ?: CommandSpeechOutputState.REQUESTED,
             recoveryTriggered = diag?.recoveryTriggered ?: false,
             audioFramesReceived = diag?.audioFramesReceived ?: 0,
-            audioFramesPlayed = diag?.audioFramesPlayed ?: 0
+            audioFramesPlayed = diag?.audioFramesPlayed ?: 0,
+            sessionGeneration = diag?.wsGeneration ?: activeWebSocketGeneration,
+            languageSelectionReason = languageSelectionReason,
+            requestedOutputProvider = reqProv,
+            actualOutputProvider = actProv,
+            requestedVoiceId = reqVoice,
+            resolvedVoiceId = resVoice,
+            resolvedLocaleTag = resLocale,
+            speechRate = rate,
+            pitch = pitchVal,
+            fallbackOrReconnectReason = fbReason
         )
         lastTurnReport = report
         _turnReportsHistory.add(report)
@@ -1418,6 +1608,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (activeCommandId.isNotBlank() && activeCommandId != commandId) {
             postActionAudioWatchdogJobs.remove(activeCommandId)?.cancel()
         }
+        restoreAuthoritativeSpeechPreferences()
         activeCommandId = commandId
         awaitingVerifiedToolOutcome = false
         currentVoiceTurnCompleted = false
@@ -1431,15 +1622,33 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         com.omnivoice.agentfix.DuplicateCallGuard.clear()
         clearPlaybackQueueAndStopImmediately(interruptReason = "NEW_COMMAND_TURN")
         val trimmedUtterance = utterance.trim()
+        currentTurnStartedFromInputTranscription = trimmedUtterance.isNotEmpty()
         currentTurnHasPendingOrExecutedAction = trimmedUtterance.isNotEmpty() && (
             com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(trimmedUtterance) ||
                 SuperAgiBrainEngine.extractAllDeviceTasks(context, trimmedUtterance).isNotEmpty()
             )
+        val langRes = if (trimmedUtterance.isNotEmpty()) {
+            resolveCommandReplyLanguage(trimmedUtterance, mutateHistoryIfGenuine = true)
+        } else {
+            resolveCommandReplyLanguage("", mutateHistoryIfGenuine = false)
+        }
+        val liveVoice = _selectedVoice.value.voiceName
+        val isLiveReady = isGeminiLiveWebSocketConnected()
         commandDiagnosticsMap[commandId] = CommandAudioDiagnosticEntry(
             commandId = commandId,
             route = if (currentTurnHasPendingOrExecutedAction) "ACTION_TURN" else "CONVERSATIONAL_TURN",
             wsGeneration = activeWebSocketGeneration,
-            outputState = CommandSpeechOutputState.REQUESTED
+            outputState = CommandSpeechOutputState.REQUESTED,
+            outputEngine = if (isLiveReady) "GEMINI_LIVE ($liveVoice)" else "ANDROID_TTS",
+            requestedOutputProvider = if (isLiveReady) "GEMINI_LIVE ($liveVoice)" else "ANDROID_TTS",
+            actualOutputProvider = if (isLiveReady) "GEMINI_LIVE ($liveVoice)" else "ANDROID_TTS",
+            requestedVoiceId = liveVoice,
+            resolvedVoiceId = if (isLiveReady) liveVoice else (ttsFallback?.lastResolvedVoiceId ?: "ANDROID_TTS"),
+            resolvedLocaleTag = langRes.language.ttsLocale.toLanguageTag(),
+            speechRate = SpeechPreferenceStore.getSpeechRate(context),
+            pitch = SpeechPreferenceStore.getPitch(context),
+            chosenReplyLanguage = langRes.language,
+            languageSelectionReason = langRes.reason
         )
         if (trimmedUtterance.isNotEmpty()) {
             _liveUserTranscript.value = trimmedUtterance
@@ -1510,8 +1719,34 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         return withoutPkg.ifBlank { "App" }
     }
 
+    /**
+     * Resolves the reply language for the current command using [SpeechPreferenceStore] and
+     * [LanguageProcessor.resolveReplyLanguage], ensuring English app names, tool names, result codes,
+     * or empty tool-call transcripts never switch an Urdu / Roman Urdu conversation to English.
+     */
+    fun resolveCommandReplyLanguage(
+        utterance: String,
+        mutateHistoryIfGenuine: Boolean = true
+    ): LanguageProcessor.LanguageResolution {
+        val resolution = if (mutateHistoryIfGenuine) {
+            SpeechPreferenceStore.recordUtteranceAndResolveReplyLanguage(context, utterance)
+        } else {
+            SpeechPreferenceStore.resolveReplyLanguageWithoutMutatingHistory(context, utterance)
+        }
+        lastLanguageResolutionForCurrentCommand = resolution
+        return resolution
+    }
+
+    fun setPreferredLanguageMode(mode: LanguageProcessor.UserLanguagePreferenceMode) {
+        SpeechPreferenceStore.setPreferredLanguageMode(context, mode)
+    }
+
+    fun getPreferredLanguageMode(): LanguageProcessor.UserLanguagePreferenceMode =
+        SpeechPreferenceStore.getPreferredLanguageMode(context)
+
     fun buildMissingOutcomeSpokenReply(utterance: String): String {
-        return when (LanguageProcessor.detectLanguage(utterance)) {
+        val lang = resolveCommandReplyLanguage(utterance, mutateHistoryIfGenuine = false).language
+        return when (lang) {
             DetectedLanguage.URDU_NASTALIQ ->
                 "اس کمانڈ کا نتیجہ ابھی موجود نہیں ہے۔"
             DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED ->
@@ -1523,7 +1758,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     /**
      * Generates clean spoken confirmation text strictly from the current command's
-     * [com.omnivoice.agentfix.CanonicalAppLaunchResult] and the user's utterance language.
+     * [com.omnivoice.agentfix.CanonicalAppLaunchResult] and the resolved conversation/utterance language.
      * Never reads package names, status labels, or navigation methods aloud.
      * If the current outcome is missing (`outcome == null`), explicitly says so.
      */
@@ -1531,19 +1766,21 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         outcome: com.omnivoice.agentfix.CanonicalAppLaunchResult?,
         utterance: String,
         isReturnCommand: Boolean,
-        fallbackAppName: String = ""
+        fallbackAppName: String = "",
+        explicitLanguageResolution: LanguageProcessor.LanguageResolution? = null
     ): String {
         if (outcome == null) {
             return buildMissingOutcomeSpokenReply(utterance)
         }
-        val lang = LanguageProcessor.detectLanguage(utterance)
+        val langRes = explicitLanguageResolution ?: resolveCommandReplyLanguage(utterance, mutateHistoryIfGenuine = true)
+        val lang = langRes.language
         val useUrduScript = lang == DetectedLanguage.URDU_NASTALIQ
         val useRomanUrdu = lang == DetectedLanguage.ROMAN_URDU ||
             lang == DetectedLanguage.MIXED ||
-            com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(utterance) &&
-            !utterance.trim().lowercase(Locale.ROOT).let {
-                it.startsWith("return") || it.startsWith("go back") || it.startsWith("switch") || it.startsWith("back to")
-            }
+            (com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(utterance) &&
+                !utterance.trim().lowercase(Locale.ROOT).let {
+                    it.startsWith("return") || it.startsWith("go back") || it.startsWith("switch") || it.startsWith("back to") || it.startsWith("take me")
+                })
 
         if (isReturnCommand || outcome.requestedApp == "return_to_previous_app") {
             val originLabel = cleanSpokenAppName(
@@ -1667,7 +1904,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     /**
      * Strips diagnostic-only artifacts (package names, status prefixes, navigation method constants,
-     * task/window IDs) so no speech caller ever reads diagnostic metadata aloud.
+     * task/window IDs) and localizes internal English execution strings when the active conversation
+     * is in Urdu or Roman Urdu/Mixed, without ever turning a failed/unverified status into a success claim.
      */
     fun sanitizeSpokenText(rawText: String, utterance: String = ""): String {
         val trimmed = rawText.trim()
@@ -1697,9 +1935,62 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             .replace(Regex("\\s+([.,!?;:])"), "$1")
             .trim()
         if (cleaned.isEmpty()) {
-            cleaned = buildMissingOutcomeSpokenReply(utterance)
+            return buildMissingOutcomeSpokenReply(utterance)
         }
-        return cleaned
+        val langRes = resolveCommandReplyLanguage(utterance, mutateHistoryIfGenuine = false)
+        return localizeInternalDiagnosticIfNeeded(cleaned, langRes.language)
+    }
+
+    private fun localizeInternalDiagnosticIfNeeded(cleanedText: String, targetLang: DetectedLanguage): String {
+        if (targetLang == DetectedLanguage.ENGLISH) return cleanedText
+        val useUrduScript = targetLang == DetectedLanguage.URDU_NASTALIQ
+
+        // Match "Opened <Target>." or "Opened <Target>"
+        val openedMatch = Regex("^Opened\\s+([^.!?]+)[.!?]?$", RegexOption.IGNORE_CASE).matchEntire(cleanedText)
+        if (openedMatch != null) {
+            val target = cleanSpokenAppName(openedMatch.groupValues[1])
+            return if (useUrduScript) "$target کھل گیا ہے۔" else "$target khul gaya hai."
+        }
+
+        // Match "Returned to <Target> with your draft preserved." or "Returned to <Target>."
+        val returnedDraftMatch = Regex("^Returned\\s+to\\s+(.+?)\\s+with\\s+your\\s+draft\\s+preserved[.!?]?$", RegexOption.IGNORE_CASE).matchEntire(cleanedText)
+        if (returnedDraftMatch != null) {
+            val target = cleanSpokenAppName(returnedDraftMatch.groupValues[1])
+            return if (useUrduScript) {
+                "$target واپس کھل گیا ہے اور آپ کا ڈرافٹ محفوظ ہے۔"
+            } else {
+                "$target wapas khul gaya hai aur aapka draft mehfooz hai."
+            }
+        }
+
+        val returnedMatch = Regex("^Returned\\s+to\\s+([^.!?]+)[.!?]?$", RegexOption.IGNORE_CASE).matchEntire(cleanedText)
+        if (returnedMatch != null) {
+            val target = cleanSpokenAppName(returnedMatch.groupValues[1])
+            return if (useUrduScript) "$target واپس کھل گیا ہے۔" else "$target wapas khul gaya hai."
+        }
+
+        // Match "I tried to open <Target>, but could not confirm..." (preserve unverified truth!)
+        val unverifiedOpenMatch = Regex("^I\\s+tried\\s+to\\s+open\\s+([^,]+),\\s*but\\s+could\\s+not\\s+confirm.*$", RegexOption.IGNORE_CASE).matchEntire(cleanedText)
+        if (unverifiedOpenMatch != null) {
+            val target = cleanSpokenAppName(unverifiedOpenMatch.groupValues[1])
+            return if (useUrduScript) {
+                "میں نے $target کھولنے کی کوشش کی، لیکن ابھی کھلنا کنفرم نہیں ہوا۔"
+            } else {
+                "Maine $target kholne ki koshish ki, lekin abhi khulna confirm nahin hua."
+            }
+        }
+
+        val flashlightMatch = Regex("^Flashlight\\s+turned\\s+(ON|OFF)[.!?]?$", RegexOption.IGNORE_CASE).matchEntire(cleanedText)
+        if (flashlightMatch != null) {
+            val isOn = flashlightMatch.groupValues[1].equals("ON", ignoreCase = true)
+            return if (useUrduScript) {
+                if (isOn) "فلیش لائٹ آن ہو گئی ہے۔" else "فلیش لائٹ بند ہو گئی ہے۔"
+            } else {
+                if (isOn) "Flashlight on ho gayi hai." else "Flashlight band ho gayi hai."
+            }
+        }
+
+        return cleanedText
     }
 
     fun toggleScreenVision(): Boolean {
@@ -1934,6 +2225,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     init {
         instance = this
         com.omnivoice.agentfix.AgentBridge.appContext = context.applicationContext
+        restoreAuthoritativeSpeechPreferences()
         try {
             OmniAutonomousCoreEngine.initialize(context)
         } catch (_: Exception) {
@@ -1945,6 +2237,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             } catch (_: Exception) {
             }
         }
+    }
+
+    /**
+     * Restores the authoritative voice persona and language preferences from [SpeechPreferenceStore]
+     * during initialization, reconnect, app resume, and output-provider recreation so OmniVoice
+     * never silently resets to a default voice after an app switch or timeout.
+     */
+    fun restoreAuthoritativeSpeechPreferences(): GeminiLiveVoice {
+        SpeechPreferenceStore.ensureLoaded(context)
+        val savedVoiceName = SpeechPreferenceStore.getSelectedLiveVoice(context)
+        val matchedVoice = GeminiLiveVoice.entries.firstOrNull {
+            it.voiceName.equals(savedVoiceName, ignoreCase = true)
+        } ?: _selectedVoice.value
+        if (_selectedVoice.value != matchedVoice) {
+            _selectedVoice.value = matchedVoice
+        }
+        return matchedVoice
     }
 
     fun refreshSmartContacts() {
@@ -2065,6 +2374,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             }
             return
         }
+        restoreAuthoritativeSpeechPreferences()
         _isSessionActive.value = true
         _liveSessionStartCount.incrementAndGet()
         _isMicMuted.value = false
@@ -2328,6 +2638,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      * and reconnects the Gemini Live WebSocket if Android paused or dropped it while in WhatsApp.
      */
     fun ensureSessionAliveOnResume() {
+        restoreAuthoritativeSpeechPreferences()
         val coord = AssistantAudioStateMachine.shared
         // Respect user's armed/stopped/muted choice on resume!
         if (!_isSessionActive.value ||
@@ -2373,7 +2684,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
         JarvisHandsFreeEngine.appendLog(
             category = "KEEP_ALIVE",
-            line = "Foreground focus restored: AudioContext + 1Hz Carrier + Live WebSocket verified active."
+            line = "Foreground focus restored: AudioContext + 1Hz Carrier + Live WebSocket verified active (voice=${_selectedVoice.value.voiceName})."
         )
     }
 
@@ -2428,11 +2739,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
     /**
      * Switches between `'Aoede'`, `'Puck'`, `'Charon'`, `'Kore'`, and `'Fenrir'`.
-     * If a Live session is active, reconnects the session with the new `voiceName`.
+     * Persists the choice in [SpeechPreferenceStore] and reconnects if a Live session is active.
      */
     fun cycleVoice(): GeminiLiveVoice {
         val nextVoice = _selectedVoice.value.next()
         _selectedVoice.value = nextVoice
+        SpeechPreferenceStore.setSelectedLiveVoice(context, nextVoice.voiceName)
         if (_isSessionActive.value) {
             try {
                 activeWebSocket?.close(1000, "Switching voice to ${nextVoice.voiceName}")
@@ -2448,8 +2760,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     }
 
     fun selectVoice(voice: GeminiLiveVoice) {
+        val changed = _selectedVoice.value != voice
         _selectedVoice.value = voice
-        if (_isSessionActive.value) {
+        SpeechPreferenceStore.setSelectedLiveVoice(context, voice.voiceName)
+        if (_isSessionActive.value && changed) {
             try {
                 activeWebSocket?.close(1000, "Switching voice to ${voice.voiceName}")
             } catch (_: Exception) {
@@ -2628,10 +2942,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         val assistantName = OmniAutonomousCoreEngine.permanentMemory.value.assistantName
 
+        val authoritativeVoice = restoreAuthoritativeSpeechPreferences()
+
         if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY" || !OmniAutonomousCoreEngine.refreshOnlineState(context)) {
             Log.i(TAG, "Running Hybrid Live Streaming mode (online=${OmniAutonomousCoreEngine.isNetworkOnline.value})")
             _connectionState.value = LiveConnectionState.LIVE_LISTENING
-            _liveAiTranscript.value = "$assistantName Live Ready (${_selectedVoice.value.voiceName}) • Speak in English, اردو, or Roman Urdu"
+            _liveAiTranscript.value = "$assistantName Live Ready (${authoritativeVoice.voiceName}) • Speak in English, اردو, or Roman Urdu"
             return
         }
 
@@ -2642,18 +2958,20 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         _activeModelLabel.value = modelName.removePrefix("models/")
         val socketGeneration = webSocketGenerationCounter.incrementAndGet()
         activeWebSocketGeneration = socketGeneration
+        SpeechPreferenceStore.nextSessionGeneration()
 
         activeWebSocket = wsHttpClient.newWebSocket(
             request,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     if (!isActiveWebSocketCallback(webSocket, socketGeneration)) return
-                    Log.d(TAG, "Gemini Live WebSocket opened (gen=$socketGeneration) for model=$modelName")
+                    val currentVoice = restoreAuthoritativeSpeechPreferences()
+                    Log.d(TAG, "Gemini Live WebSocket opened (gen=$socketGeneration, voice=${currentVoice.voiceName}) for model=$modelName")
                     val mem = OmniAutonomousCoreEngine.loadPermanentMemory(context)
                     val mood = OmniAutonomousCoreEngine.moodAndToneState.value
                     val setupJson = buildLiveSetupPayload(
                         modelName = modelName,
-                        voiceName = _selectedVoice.value.voiceName,
+                        voiceName = currentVoice.voiceName,
                         savedContactsSummary = SmartContactAndAppRegistry.buildContactsSummaryForPrompt(context),
                         assistantName = mem.assistantName,
                         learnedRulesSummary = mem.learnedRules.joinToString("; "),
@@ -2720,27 +3038,46 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             if (root.has("setupComplete")) {
                 isWebSocketReady.set(true)
                 _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                val currentVoice = restoreAuthoritativeSpeechPreferences()
                 val assistantName = OmniAutonomousCoreEngine.permanentMemory.value.assistantName
                 _liveAiTranscript.value =
-                    "$assistantName Live Connected (${_selectedVoice.value.voiceName}) • Listening..."
-                Log.d(TAG, "Gemini Live setupComplete received (gen=$socketGeneration)")
+                    "$assistantName Live Connected (${currentVoice.voiceName}) • Listening..."
+                Log.d(TAG, "Gemini Live setupComplete received (gen=$socketGeneration, voice=${currentVoice.voiceName})")
                 return
             }
 
+            // Process inputTranscription BEFORE toolCall turn-reset check so inline or prior transcripts
+            // for the current turn are never wiped when a server toolCall arrives!
+            val serverContent = root.optJSONObject("serverContent")
+            val inlineInputTranscriptChunk = serverContent
+                ?.optJSONObject("inputTranscription")
+                ?.optString("text", "")
+                .orEmpty()
+            if (inlineInputTranscriptChunk.isNotEmpty()) {
+                if (currentVoiceTurnCompleted) {
+                    startNewCommandTurn()
+                    _liveUserTranscript.value = ""
+                    currentTurnStartedFromInputTranscription = true
+                }
+                _liveUserTranscript.value = (_liveUserTranscript.value + inlineInputTranscriptChunk).trimStart()
+                com.omnivoice.agentfix.AgentSession.onUserUtterance(_liveUserTranscript.value)
+                resolveCommandReplyLanguage(_liveUserTranscript.value, mutateHistoryIfGenuine = true)
+                OmniAutonomousCoreEngine.analyzeUserMood(_liveUserTranscript.value, _inputAudioRms.value)
+            }
+
             val hasEmbeddedToolCall = root.optJSONObject("toolCall") != null ||
-                root.optJSONObject("serverContent")?.optJSONObject("toolCall") != null ||
-                (root.optJSONObject("serverContent")?.optJSONObject("modelTurn")?.optJSONArray("parts")?.let { partsArr ->
+                serverContent?.optJSONObject("toolCall") != null ||
+                (serverContent?.optJSONObject("modelTurn")?.optJSONArray("parts")?.let { partsArr ->
                     (0 until partsArr.length()).any { idx -> partsArr.optJSONObject(idx)?.optJSONObject("functionCall") != null }
                 } == true)
             if (hasEmbeddedToolCall) {
-                val hasInlineInputTranscription = root.optJSONObject("serverContent")
-                    ?.optJSONObject("inputTranscription")
-                    ?.optString("text", "")
-                    ?.isNotEmpty() == true
-                if (currentVoiceTurnCompleted && !hasInlineInputTranscription) {
+                if (currentVoiceTurnCompleted && !currentTurnStartedFromInputTranscription && inlineInputTranscriptChunk.isEmpty()) {
                     startNewCommandTurn()
+                    // Clear the per-turn transcript and AgentSession utterance so stale return-to-origin
+                    // intents from previous turns cannot leak, while SpeechPreferenceStore preserves
+                    // the active conversation language across turns!
                     _liveUserTranscript.value = ""
-                    com.omnivoice.agentfix.AgentSession.onUserUtterance("")
+                    com.omnivoice.agentfix.AgentSession.clearForTest()
                 }
                 currentTurnHasPendingOrExecutedAction = true
                 awaitingVerifiedToolOutcome = true
@@ -2748,7 +3085,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             }
 
             // 2. serverContent (Audio output, input/output transcriptions, interruption, turnComplete)
-            val serverContent = root.optJSONObject("serverContent")
             if (serverContent != null) {
                 OmniAutonomousCoreEngine.resetInactivityTimer()
 
@@ -2757,21 +3093,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     Log.d(TAG, "Gemini Live interrupted by user speech — clearing 24kHz audio queue")
                     clearPlaybackQueueAndStopImmediately(interruptReason = "SERVER_INTERRUPTED")
                     _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                }
-
-                // Real-time input audio transcription (what the user is saying)
-                val inputTrans = serverContent.optJSONObject("inputTranscription")
-                if (inputTrans != null) {
-                    val userChunk = inputTrans.optString("text", "")
-                    if (userChunk.isNotEmpty()) {
-                        if (currentVoiceTurnCompleted) {
-                            startNewCommandTurn()
-                            _liveUserTranscript.value = ""
-                        }
-                        _liveUserTranscript.value = (_liveUserTranscript.value + userChunk).trimStart()
-                        com.omnivoice.agentfix.AgentSession.onUserUtterance(_liveUserTranscript.value)
-                        OmniAutonomousCoreEngine.analyzeUserMood(_liveUserTranscript.value, _inputAudioRms.value)
-                    }
                 }
 
                 // Real-time output audio transcription (what Gemini is saying)
@@ -2822,7 +3143,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                         it.copy(lateDuplicateFramesSuppressed = it.lateDuplicateFramesSuppressed + 1)
                                     }
                                 } else {
-                                    val (pcmBytes, floatSamples) = decodeBase64Pcm16ToFloat32(base64Audio)
+                                    val (pcmBytes, floatSamples) = decodeBase64Pcm16ToFloat32(base64Audio, mimeType)
                                     updateVisualizerFromFloatSamples(floatSamples, isAiOutput = true)
                                     enqueue24kHzPcmChunk(pcmBytes, cmdId)
                                 }
@@ -2873,13 +3194,26 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 if (serverContent.optBoolean("turnComplete", false)) {
                     currentVoiceTurnCompleted = true
+                    currentTurnStartedFromInputTranscription = false
                     val uText = _liveUserTranscript.value.trim()
                     val aText = _liveAiTranscript.value.trim()
                     if (uText.isNotEmpty()) {
                         com.omnivoice.agentfix.AgentSession.onUserUtterance(uText)
                     }
-                    val turnLang = LanguageProcessor.detectLanguage(uText.ifBlank { aText })
+                    val langRes = resolveCommandReplyLanguage(
+                        utterance = uText,
+                        mutateHistoryIfGenuine = uText.isNotEmpty()
+                    )
+                    val turnLang = langRes.language
                     val liveConn = isGeminiLiveWebSocketConnected()
+                    val diag = commandDiagnosticsMap[activeCommandId]
+                    val actEngine = if (diag?.recoveryTriggered == true) {
+                        "ANDROID_TTS_RECOVERY"
+                    } else if (liveConn) {
+                        "GEMINI_LIVE (${_selectedVoice.value.voiceName})"
+                    } else {
+                        "ANDROID_TTS"
+                    }
                     recordTurnExecutionReport(
                         commandId = activeCommandId,
                         utterance = uText,
@@ -2891,12 +3225,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         } else {
                             "CONVERSATIONAL"
                         },
-                        outputEngine = if (liveConn) {
-                            "GEMINI_LIVE (${_selectedVoice.value.voiceName})"
-                        } else {
-                            "ANDROID_TTS"
-                        },
+                        outputEngine = actEngine,
                         language = turnLang,
+                        languageSelectionReason = langRes.reason,
                         liveConnected = liveConn
                     )
                     if (uText.isNotEmpty() || aText.isNotEmpty()) {
@@ -3145,19 +3476,21 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     trackBuilder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 }
                 val track = trackBuilder.build()
+                try {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                        track.playbackParams = android.media.PlaybackParams()
+                            .setSpeed(1.0f)
+                            .setPitch(1.0f)
+                    }
+                } catch (_: Exception) {
+                }
 
                 outputAudioTrack = track
                 track.play()
 
-                // Pre-compute a 5ms 1Hz ultra-low-amplitude sub-audible carrier wave (120 samples = 240 bytes)
-                // so Android OS keeps the audio session alive while responding within 5ms when audio arrives.
-                val subAudibleCarrierChunk = ByteArray(240).apply {
-                    for (i in 0 until 120) {
-                        val sample: Int = if (i % 2 == 0) 1 else -1
-                        this[i * 2] = (sample and 0xFF).toByte()
-                        this[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
-                    }
-                }
+                // Zero-amplitude PCM silence (120 samples = 240 bytes) used ONLY when idle (!isPcmHardwareDrainInProgress)
+                // to keep the audio session warm without interleaving a Nyquist +1/-1 carrier into active speech!
+                val silentKeepAliveChunk = ByteArray(240)
 
                 var pendingDrainSinceEmptyMs = 0L
                 val hardwareTailDrainWindowMs = ((minBuf.toLong() * 1000L) / (OUTPUT_SAMPLE_RATE * 2L)).coerceIn(60L, 280L)
@@ -3166,8 +3499,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     val taggedChunk = pcm24kPlaybackQueue.poll()
                     if (taggedChunk != null) {
                         pendingDrainSinceEmptyMs = 0L
-                        recordPcmFrameWrittenToHardware(taggedChunk.commandId)
-                        track.write(taggedChunk.pcmBytes, 0, taggedChunk.pcmBytes.size)
+                        val alignedBytes = ensure24kHzPcm16Mono(taggedChunk.pcmBytes, OUTPUT_SAMPLE_RATE)
+                        if (alignedBytes.isNotEmpty()) {
+                            recordPcmFrameWrittenToHardware(taggedChunk.commandId)
+                            track.write(alignedBytes, 0, alignedBytes.size)
+                        }
                     } else {
                         if (isPcmHardwareDrainInProgress) {
                             val now = System.currentTimeMillis()
@@ -3177,10 +3513,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                 pendingDrainSinceEmptyMs = 0L
                                 completePcmPlaybackDrain(activePcmPlaybackCommandId)
                             }
+                            // Do NOT write keep-alive silence into AudioTrack while speech is actively draining!
+                            delay(4)
+                        } else {
+                            track.write(silentKeepAliveChunk, 0, silentKeepAliveChunk.size)
+                            delay(5)
                         }
-                        // Continuous 1Hz sub-audible keep-alive carrier prevents Android background suspension
-                        track.write(subAudibleCarrierChunk, 0, subAudibleCarrierChunk.size)
-                        delay(5)
                     }
                 }
             } catch (e: CancellationException) {
@@ -4378,12 +4716,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             )
         ).trim()
 
+        val langResolution = resolveCommandReplyLanguage(
+            utterance = activeUtterance,
+            mutateHistoryIfGenuine = activeUtterance.isNotBlank()
+        )
+        val userLang = langResolution.language
+
         val spokenMessageForTurn = if (isAppOpenOrReturnCommand && resultPayload.optString("errorCode") != "DEVICE_LOCKED") {
             buildSpokenConfirmationForAppCommand(
                 outcome = currentOutcome,
                 utterance = activeUtterance,
                 isReturnCommand = isReturnTool,
-                fallbackAppName = requestedAppHint
+                fallbackAppName = requestedAppHint,
+                explicitLanguageResolution = langResolution
             )
         } else {
             sanitizeSpokenText(rawDiagnosticMessage, activeUtterance)
@@ -4406,6 +4751,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         lastSpokenReplyForCurrentCommand = spokenMessageForTurn
         awaitingVerifiedToolOutcome = false
 
+        val liveConn = isGeminiLiveWebSocketConnected()
+        val liveVoice = _selectedVoice.value.voiceName
+        val expectedProvider = if (liveConn) "GEMINI_LIVE ($liveVoice)" else "ANDROID_TTS"
+
         updateCommandDiagnostic(commandId) { current ->
             current.copy(
                 route = if (isServerOriginCall) "SERVER_TOOL_CALL" else "LOCAL_FAST_PATH",
@@ -4414,7 +4763,17 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 executedFunctionName = fnName,
                 observedActionResult = finalStatusForTurn,
                 wsGeneration = activeWebSocketGeneration,
-                outputState = CommandSpeechOutputState.REQUESTED
+                outputState = CommandSpeechOutputState.REQUESTED,
+                outputEngine = expectedProvider,
+                requestedOutputProvider = expectedProvider,
+                actualOutputProvider = expectedProvider,
+                requestedVoiceId = liveVoice,
+                resolvedVoiceId = if (liveConn) liveVoice else (ttsFallback?.lastResolvedVoiceId ?: "ANDROID_TTS"),
+                resolvedLocaleTag = userLang.ttsLocale.toLanguageTag(),
+                speechRate = SpeechPreferenceStore.getSpeechRate(context),
+                pitch = SpeechPreferenceStore.getPitch(context),
+                chosenReplyLanguage = userLang,
+                languageSelectionReason = langResolution.reason
             )
         }
 
@@ -4442,20 +4801,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         pushSlideUpCard(synchronizedCard)
         _liveAiTranscript.value = spokenMessageForTurn
 
-        val userLang = LanguageProcessor.detectLanguage(activeUtterance.ifBlank { spokenMessageForTurn })
-        val liveConn = isGeminiLiveWebSocketConnected()
         recordTurnExecutionReport(
             commandId = commandId,
             utterance = activeUtterance,
             spokenText = spokenMessageForTurn,
             diagnosticText = diagnosticMessageForTurn,
             finalStatus = finalStatusForTurn,
-            outputEngine = if (liveConn) {
-                "GEMINI_LIVE (${_selectedVoice.value.voiceName})"
-            } else {
-                "ANDROID_TTS"
-            },
+            outputEngine = expectedProvider,
             language = userLang,
+            languageSelectionReason = langResolution.reason,
             liveConnected = liveConn
         )
 
@@ -4469,7 +4823,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             finalStatus = finalStatusForTurn,
             spokenMessage = spokenMessageForTurn,
             diagnosticMessage = diagnosticMessageForTurn,
-            resultPayload = resultPayload
+            resultPayload = resultPayload,
+            activeUtterance = activeUtterance,
+            userLanguage = userLang,
+            languageSelectionReason = langResolution.reason
         )
     }
 
@@ -4945,12 +5302,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             com.omnivoice.agentfix.AgentSession.onUserUtterance(cleanUtterance)
         }
 
-        // Never speak a speculative "ho gaya" reply BEFORE action tasks execute and verify!
         val isReturnToOriginCommand = com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(cleanUtterance)
         val hasActionTasks = isReturnToOriginCommand || rawResult.tasksToExecute.isNotEmpty()
         currentTurnHasPendingOrExecutedAction = hasActionTasks
+        val langResolution = resolveCommandReplyLanguage(
+            utterance = cleanUtterance,
+            mutateHistoryIfGenuine = cleanUtterance.isNotBlank()
+        )
+        val userLang = langResolution.language
         var finalSpokenReply = if (hasActionTasks) "" else sanitizeSpokenText(rawResult.spokenReply, cleanUtterance)
-        val userLang = LanguageProcessor.detectLanguage(cleanUtterance.ifBlank { finalSpokenReply })
 
         if (!hasActionTasks) {
             _liveAiTranscript.value = finalSpokenReply
@@ -4986,6 +5346,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                             diagnosticText = finalSpokenReply,
                             finalStatus = "CONVERSATIONAL",
                             language = userLang,
+                            languageSelectionReason = langResolution.reason,
                             isRecovery = true,
                             recoveryReason = "WS_CONVERSATION_SEND_FALSE"
                         )
@@ -5000,6 +5361,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     finalStatus = "CONVERSATIONAL",
                     outputEngine = "GEMINI_LIVE (${_selectedVoice.value.voiceName})",
                     language = userLang,
+                    languageSelectionReason = langResolution.reason,
                     liveConnected = true
                 )
             } else {
@@ -5010,6 +5372,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     diagnosticText = finalSpokenReply,
                     finalStatus = "CONVERSATIONAL",
                     language = userLang,
+                    languageSelectionReason = langResolution.reason,
                     isRecovery = false
                 )
                 recordTurnExecutionReport(
@@ -5020,6 +5383,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     finalStatus = "CONVERSATIONAL",
                     outputEngine = "ANDROID_TTS",
                     language = userLang,
+                    languageSelectionReason = langResolution.reason,
                     liveConnected = false
                 )
             }
@@ -5356,6 +5720,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     diagnosticText = diagnosticForTurn,
                     finalStatus = finalStatusForTurn,
                     language = userLang,
+                    languageSelectionReason = langResolution.reason,
                     isRecovery = false
                 )
                 recordTurnExecutionReport(
@@ -5363,6 +5728,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     utterance = cleanUtterance,
                     outputEngine = "ANDROID_TTS",
                     language = userLang,
+                    languageSelectionReason = langResolution.reason,
                     liveConnected = false,
                     finalStatus = finalStatusForTurn,
                     spokenText = finalSpokenReply,

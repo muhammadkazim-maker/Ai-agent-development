@@ -75,6 +75,251 @@ enum class TtsOutputLifecycleState {
     FAILED
 }
 
+/**
+ * Immutable speech configuration snapshot correlated with a specific command and session generation.
+ * Ensures voice, locale, speech rate, pitch, and provider are locked for the duration of an utterance
+ * and audited across cloud and local fallback paths.
+ */
+data class SpeechConfigSnapshot(
+    val commandId: String,
+    val turnId: String,
+    val sessionGeneration: Long,
+    val requestedOutputProvider: String,
+    val actualOutputProvider: String,
+    val requestedVoiceId: String,
+    val resolvedVoiceId: String,
+    val resolvedLocaleTag: String,
+    val speechRate: Float,
+    val pitch: Float,
+    val chosenReplyLanguage: DetectedLanguage,
+    val languageSelectionReason: String,
+    val fallbackOrReconnectReason: String = "NONE"
+)
+
+/**
+ * Single authoritative speech and language preference store shared across
+ * [OmniLiveSessionEngine], [TextToSpeechManager], and [com.example.ui.viewmodel.VoiceAssistantViewModel].
+ * Persisted to SharedPreferences so voice persona, speech rate, pitch, language policy, and
+ * active conversation language survive app switches, timeouts, reconnects, and provider recreation.
+ */
+object SpeechPreferenceStore {
+    private const val PREFS_NAME = "omni_authoritative_speech_prefs"
+    private const val KEY_LIVE_VOICE = "selected_live_voice"
+    private const val KEY_LANG_MODE = "preferred_language_mode"
+    private const val KEY_CONVERSATION_LANG = "last_conversation_language"
+    private const val KEY_SPEECH_RATE = "speech_rate"
+    private const val KEY_PITCH = "speech_pitch"
+    private const val KEY_ACCENT_MODE = "accent_training_mode"
+
+    private val sessionGenCounter = AtomicLong(1L)
+
+    @Volatile
+    private var cachedLiveVoiceName: String = "Aoede"
+
+    @Volatile
+    private var cachedLanguageMode: LanguageProcessor.UserLanguagePreferenceMode =
+        LanguageProcessor.UserLanguagePreferenceMode.AUTO
+
+    @Volatile
+    private var cachedConversationLanguage: DetectedLanguage? = null
+
+    @Volatile
+    private var cachedSpeechRate: Float = 1.0f
+
+    @Volatile
+    private var cachedPitch: Float = 1.0f
+
+    @Volatile
+    private var isLoadedFromDisk: Boolean = false
+
+    @Synchronized
+    fun ensureLoaded(context: Context?) {
+        if (isLoadedFromDisk || context == null) return
+        try {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            cachedLiveVoiceName = prefs.getString(KEY_LIVE_VOICE, "Aoede")?.takeIf { it.isNotBlank() } ?: "Aoede"
+            cachedLanguageMode = LanguageProcessor.UserLanguagePreferenceMode.fromIdOrLabel(
+                prefs.getString(KEY_LANG_MODE, LanguageProcessor.UserLanguagePreferenceMode.AUTO.id)
+            )
+            val convLangName = prefs.getString(KEY_CONVERSATION_LANG, null)
+            cachedConversationLanguage = convLangName?.let { name ->
+                DetectedLanguage.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            }
+            cachedSpeechRate = prefs.getFloat(KEY_SPEECH_RATE, 1.0f).coerceIn(0.5f, 2.0f)
+            cachedPitch = prefs.getFloat(KEY_PITCH, 1.0f).coerceIn(0.5f, 2.0f)
+            val savedAccent = prefs.getString(KEY_ACCENT_MODE, null)
+            if (!savedAccent.isNullOrBlank()) {
+                AccentTrainingMode.entries.firstOrNull { it.name == savedAccent }?.let {
+                    TextToSpeechManager.setAccentTrainingMode(it, context = null)
+                }
+            }
+            isLoadedFromDisk = true
+        } catch (_: Exception) {
+        }
+    }
+
+    fun currentSessionGeneration(): Long = sessionGenCounter.get()
+
+    fun nextSessionGeneration(): Long = sessionGenCounter.incrementAndGet()
+
+    @Synchronized
+    fun setSelectedLiveVoice(context: Context?, voiceName: String) {
+        ensureLoaded(context)
+        val clean = voiceName.trim().ifBlank { "Aoede" }
+        cachedLiveVoiceName = clean
+        if (context != null) {
+            try {
+                context.applicationContext
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_LIVE_VOICE, clean)
+                    .apply()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @Synchronized
+    fun getSelectedLiveVoice(context: Context? = null): String {
+        ensureLoaded(context)
+        return cachedLiveVoiceName
+    }
+
+    @Synchronized
+    fun setPreferredLanguageMode(context: Context?, mode: LanguageProcessor.UserLanguagePreferenceMode) {
+        ensureLoaded(context)
+        cachedLanguageMode = mode
+        if (context != null) {
+            try {
+                context.applicationContext
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_LANG_MODE, mode.id)
+                    .apply()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @Synchronized
+    fun getPreferredLanguageMode(context: Context? = null): LanguageProcessor.UserLanguagePreferenceMode {
+        ensureLoaded(context)
+        return cachedLanguageMode
+    }
+
+    @Synchronized
+    fun setConversationLanguage(context: Context?, language: DetectedLanguage?) {
+        ensureLoaded(context)
+        cachedConversationLanguage = language
+        if (context != null) {
+            try {
+                val editor = context.applicationContext
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                if (language != null) {
+                    editor.putString(KEY_CONVERSATION_LANG, language.name)
+                } else {
+                    editor.remove(KEY_CONVERSATION_LANG)
+                }
+                editor.apply()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @Synchronized
+    fun getConversationLanguage(context: Context? = null): DetectedLanguage? {
+        ensureLoaded(context)
+        return cachedConversationLanguage
+    }
+
+    /**
+     * Updates the persisted conversation language ONLY if [utterance] contains genuine conversational
+     * language markers (Urdu script, Roman Urdu vocabulary, or genuine English sentence words).
+     * Never overwrites conversation language when [utterance] is empty or contains only app/tool/status tokens.
+     */
+    @Synchronized
+    fun recordUtteranceAndResolveReplyLanguage(
+        context: Context?,
+        utterance: String
+    ): LanguageProcessor.LanguageResolution {
+        ensureLoaded(context)
+        val evidence = LanguageProcessor.detectConversationalLanguageEvidence(utterance)
+        if (evidence != null) {
+            setConversationLanguage(context, evidence.language)
+        }
+        return LanguageProcessor.resolveReplyLanguage(
+            utterance = utterance,
+            preferredMode = cachedLanguageMode,
+            conversationLanguage = cachedConversationLanguage
+        )
+    }
+
+    @Synchronized
+    fun resolveReplyLanguageWithoutMutatingHistory(
+        context: Context?,
+        utterance: String
+    ): LanguageProcessor.LanguageResolution {
+        ensureLoaded(context)
+        return LanguageProcessor.resolveReplyLanguage(
+            utterance = utterance,
+            preferredMode = cachedLanguageMode,
+            conversationLanguage = cachedConversationLanguage
+        )
+    }
+
+    @Synchronized
+    fun setSpeechRateAndPitch(context: Context?, speechRate: Float, pitch: Float) {
+        ensureLoaded(context)
+        cachedSpeechRate = speechRate.coerceIn(0.5f, 2.0f)
+        cachedPitch = pitch.coerceIn(0.5f, 2.0f)
+        if (context != null) {
+            try {
+                context.applicationContext
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putFloat(KEY_SPEECH_RATE, cachedSpeechRate)
+                    .putFloat(KEY_PITCH, cachedPitch)
+                    .apply()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @Synchronized
+    fun getSpeechRate(context: Context? = null): Float {
+        ensureLoaded(context)
+        return cachedSpeechRate
+    }
+
+    @Synchronized
+    fun getPitch(context: Context? = null): Float {
+        ensureLoaded(context)
+        return cachedPitch
+    }
+
+    @Synchronized
+    fun resetForTest(context: Context? = null) {
+        cachedLiveVoiceName = "Aoede"
+        cachedLanguageMode = LanguageProcessor.UserLanguagePreferenceMode.AUTO
+        cachedConversationLanguage = null
+        cachedSpeechRate = 1.0f
+        cachedPitch = 1.0f
+        sessionGenCounter.set(1L)
+        isLoadedFromDisk = true
+        if (context != null) {
+            try {
+                context.applicationContext
+                    .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .clear()
+                    .commit()
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
+
 data class TtsLifecycleEvent(
     val commandId: String,
     val turnId: String,
@@ -82,7 +327,8 @@ data class TtsLifecycleEvent(
     val state: TtsOutputLifecycleState,
     val segmentIndex: Int = 0,
     val totalSegments: Int = 1,
-    val reason: String = ""
+    val reason: String = "",
+    val configSnapshot: SpeechConfigSnapshot? = null
 )
 
 class TextToSpeechManager(
@@ -100,8 +346,18 @@ class TextToSpeechManager(
         private val _activeAccentMode = MutableStateFlow(AccentTrainingMode.AUTO_TRILINGUAL)
         val activeAccentMode: StateFlow<AccentTrainingMode> = _activeAccentMode.asStateFlow()
 
-        fun setAccentTrainingMode(mode: AccentTrainingMode) {
+        fun setAccentTrainingMode(mode: AccentTrainingMode, context: Context? = null) {
             _activeAccentMode.value = mode
+            if (context != null) {
+                try {
+                    context.applicationContext
+                        .getSharedPreferences("omni_authoritative_speech_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("accent_training_mode", mode.name)
+                        .apply()
+                } catch (_: Exception) {
+                }
+            }
         }
 
         fun createInstallTtsDataIntent(): Intent {
@@ -119,6 +375,7 @@ class TextToSpeechManager(
         val pitch: Float,
         val speechRate: Float,
         val normalized: NormalizedSpeechReply,
+        val requestedSnapshot: SpeechConfigSnapshot,
         val onCommandStateChanged: ((TtsLifecycleEvent) -> Unit)?
     )
 
@@ -126,9 +383,11 @@ class TextToSpeechManager(
         val turnId: String,
         val commandId: String,
         val generation: Long,
+        val sessionGeneration: Long,
         val segmentUtteranceIds: List<String>,
         val finalUtteranceId: String,
         val spokenText: String,
+        val configSnapshot: SpeechConfigSnapshot,
         val startedSegments: MutableSet<String> = mutableSetOf(),
         val completedSegments: MutableSet<String> = mutableSetOf(),
         val onCommandStateChanged: ((TtsLifecycleEvent) -> Unit)? = null
@@ -143,6 +402,11 @@ class TextToSpeechManager(
     @Volatile
     private var isInitializationFailed = false
 
+    private val initGenerationCounter = AtomicLong(0L)
+
+    @Volatile
+    private var activeInitGeneration: Long = 0L
+
     private val turnGenerationCounter = AtomicLong(0L)
     private val pendingInitQueue = ArrayDeque<PendingInitTtsRequest>()
     private val utteranceToTurnMap = ConcurrentHashMap<String, ActiveTtsTurnRecord>()
@@ -154,6 +418,8 @@ class TextToSpeechManager(
     private val completedCountAtomic = AtomicInteger(0)
     private val errorCountAtomic = AtomicInteger(0)
     private val interruptedCountAtomic = AtomicInteger(0)
+    private val staleCallbacksRejectedAtomic = AtomicInteger(0)
+    private val staleInitCallbacksRejectedAtomic = AtomicInteger(0)
 
     @Volatile
     var lastUtteranceId: String = ""
@@ -167,6 +433,29 @@ class TextToSpeechManager(
     var lastErrorReason: String = ""
         private set
 
+    @Volatile
+    var lastConfigSnapshot: SpeechConfigSnapshot? = null
+        private set
+
+    @Volatile
+    var lastResolvedVoiceId: String = "NONE"
+        private set
+
+    @Volatile
+    var lastResolvedLocaleTag: String = "en-US"
+        private set
+
+    @Volatile
+    var lastFallbackLimitationNote: String = "NONE"
+        private set
+
+    private val _appliedConfigSnapshotsForTest = java.util.concurrent.CopyOnWriteArrayList<SpeechConfigSnapshot>()
+    val appliedConfigSnapshotsForTest: List<SpeechConfigSnapshot>
+        get() = _appliedConfigSnapshotsForTest.toList()
+
+    private val _midUtteranceConfigMutationsCount = AtomicInteger(0)
+    fun getMidUtteranceConfigMutationsCount(): Int = _midUtteranceConfigMutationsCount.get()
+
     /**
      * Optional test interceptor for verifying `engine.speak()` calls and simulating `TextToSpeech.ERROR`
      * or multi-segment synthesis in Robolectric unit tests without hardware audio drivers.
@@ -178,6 +467,7 @@ class TextToSpeechManager(
     val voicePackStatus: StateFlow<TtsVoicePackStatus> = _voicePackStatus.asStateFlow()
 
     init {
+        SpeechPreferenceStore.ensureLoaded(context)
         initTts()
     }
 
@@ -185,6 +475,8 @@ class TextToSpeechManager(
     fun getCompletedCount(): Int = completedCountAtomic.get()
     fun getErrorCount(): Int = errorCountAtomic.get()
     fun getInterruptedCount(): Int = interruptedCountAtomic.get()
+    fun getStaleCallbacksRejectedCount(): Int = staleCallbacksRejectedAtomic.get()
+    fun getStaleInitCallbacksRejectedCount(): Int = staleInitCallbacksRejectedAtomic.get()
     fun getPendingInitQueueSize(): Int = synchronized(lock) { pendingInitQueue.size }
     fun getActiveTurnCommandId(): String? = activeTurnRecord?.commandId
     fun getActiveTurnId(): String? = activeTurnRecord?.turnId
@@ -192,38 +484,50 @@ class TextToSpeechManager(
     fun setInitializedStateForTest(
         initialized: Boolean,
         initFailed: Boolean = false,
-        urduPkInstalled: Boolean = true
+        urduPkInstalled: Boolean = true,
+        englishPkInstalled: Boolean = true
     ) {
         synchronized(lock) {
             isInitialized = initialized
             isInitializationFailed = initFailed
             _voicePackStatus.value = _voicePackStatus.value.copy(
                 isInitialized = initialized,
-                isUrduPkInstalled = urduPkInstalled
+                isUrduPkInstalled = urduPkInstalled,
+                isEnglishPkInstalled = englishPkInstalled
             )
         }
     }
 
-    fun simulateInitCallbackForTest(status: Int) {
-        handleTtsInitStatus(status)
+    fun simulateInitCallbackForTest(status: Int, initGeneration: Long = activeInitGeneration) {
+        handleTtsInitStatus(status, initGeneration)
     }
 
     private fun initTts() {
+        val myInitGen = initGenerationCounter.incrementAndGet()
+        activeInitGeneration = myInitGen
         try {
             tts = TextToSpeech(context.applicationContext) { status ->
-                handleTtsInitStatus(status)
+                handleTtsInitStatus(status, myInitGen)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Exception initializing TextToSpeech: ${e.message}")
-            handleTtsInitStatus(TextToSpeech.ERROR)
+            handleTtsInitStatus(TextToSpeech.ERROR, myInitGen)
         }
     }
 
-    private fun handleTtsInitStatus(status: Int) {
+    private fun handleTtsInitStatus(status: Int, callbackInitGeneration: Long = activeInitGeneration) {
         val requestsToDispatch = mutableListOf<PendingInitTtsRequest>()
         val requestsToFail = mutableListOf<PendingInitTtsRequest>()
 
         synchronized(lock) {
+            if (callbackInitGeneration != activeInitGeneration) {
+                staleInitCallbacksRejectedAtomic.incrementAndGet()
+                Log.w(
+                    TAG,
+                    "Rejected stale TTS OnInitListener callback (callbackGen=$callbackInitGeneration, activeGen=$activeInitGeneration)"
+                )
+                return
+            }
             if (status == TextToSpeech.SUCCESS) {
                 isInitialized = true
                 isInitializationFailed = false
@@ -291,7 +595,8 @@ class TextToSpeechManager(
                         turnId = req.turnId,
                         utteranceId = req.turnId,
                         state = TtsOutputLifecycleState.FAILED,
-                        reason = "TTS_INIT_FAILED_$status"
+                        reason = "TTS_INIT_FAILED_$status",
+                        configSnapshot = req.requestedSnapshot
                     )
                 )
                 onSpeechError?.invoke("TTS_INIT_FAILED_$status")
@@ -305,15 +610,18 @@ class TextToSpeechManager(
     ) {
         lastCommandId = event.commandId
         lastUtteranceId = event.utteranceId
+        if (event.configSnapshot != null) {
+            lastConfigSnapshot = event.configSnapshot
+        }
         perCallListener?.invoke(event)
         onLifecycleEvent?.invoke(event)
     }
 
     /**
-     * Handles `UtteranceProgressListener.onStart(utteranceId)` with strict turn-generation and
-     * multi-segment correlation. Stale callbacks from older turns are ignored.
+     * Handles `UtteranceProgressListener.onStart(utteranceId)` with strict turn-generation,
+     * session-generation, and multi-segment correlation. Stale callbacks from older turns/sessions are rejected.
      */
-    fun handleUtteranceStart(utteranceId: String?) {
+    fun handleUtteranceStart(utteranceId: String?, callbackSessionGeneration: Long? = null) {
         val uttId = utteranceId?.trim().orEmpty()
         if (uttId.isEmpty()) return
 
@@ -321,10 +629,17 @@ class TextToSpeechManager(
         val isFirstSegment: Boolean
         val segIndex: Int
         synchronized(lock) {
-            val matched = utteranceToTurnMap[uttId] ?: return
+            val matched = utteranceToTurnMap[uttId]
             val current = activeTurnRecord
-            if (current == null || current.generation != matched.generation) {
-                Log.d(TAG, "Ignored stale TTS onStart for utteranceId=$uttId (gen=${matched.generation}, activeGen=${current?.generation})")
+            val sessionMismatch = callbackSessionGeneration != null &&
+                current != null &&
+                callbackSessionGeneration != current.sessionGeneration
+            if (matched == null || current == null || current.generation != matched.generation || sessionMismatch) {
+                staleCallbacksRejectedAtomic.incrementAndGet()
+                Log.d(
+                    TAG,
+                    "Ignored stale TTS onStart for utteranceId=$uttId (matchedGen=${matched?.generation}, activeGen=${current?.generation})"
+                )
                 return
             }
             record = matched
@@ -349,7 +664,8 @@ class TextToSpeechManager(
                     state = TtsOutputLifecycleState.STARTED,
                     segmentIndex = segIndex,
                     totalSegments = record.segmentUtteranceIds.size,
-                    reason = "TTS_SEGMENT_STARTED"
+                    reason = "TTS_SEGMENT_STARTED",
+                    configSnapshot = record.configSnapshot
                 )
             )
             onSpeechStarted?.invoke()
@@ -359,9 +675,9 @@ class TextToSpeechManager(
     /**
      * Handles `UtteranceProgressListener.onDone(utteranceId)`.
      * For multilingual turns with multiple segments, completes the turn and releases speaking
-     * suppression ONLY after the final segment completes. Stale callbacks from old turns are ignored.
+     * suppression ONLY after the final segment completes. Stale callbacks from old turns/sessions are rejected.
      */
-    fun handleUtteranceDone(utteranceId: String?) {
+    fun handleUtteranceDone(utteranceId: String?, callbackSessionGeneration: Long? = null) {
         val uttId = utteranceId?.trim().orEmpty()
         if (uttId.isEmpty()) return
 
@@ -369,10 +685,17 @@ class TextToSpeechManager(
         val isFinalTurnCompletion: Boolean
         val segIndex: Int
         synchronized(lock) {
-            val matched = utteranceToTurnMap[uttId] ?: return
+            val matched = utteranceToTurnMap[uttId]
             val current = activeTurnRecord
-            if (current == null || current.generation != matched.generation) {
-                Log.d(TAG, "Ignored stale TTS onDone for utteranceId=$uttId (gen=${matched.generation}, activeGen=${current?.generation})")
+            val sessionMismatch = callbackSessionGeneration != null &&
+                current != null &&
+                callbackSessionGeneration != current.sessionGeneration
+            if (matched == null || current == null || current.generation != matched.generation || sessionMismatch) {
+                staleCallbacksRejectedAtomic.incrementAndGet()
+                Log.d(
+                    TAG,
+                    "Ignored stale TTS onDone for utteranceId=$uttId (matchedGen=${matched?.generation}, activeGen=${current?.generation})"
+                )
                 return
             }
             record = matched
@@ -390,7 +713,7 @@ class TextToSpeechManager(
         }
 
         if (!isFinalTurnCompletion) {
-            // Intermediate multilingual segment finished; keep speaking suppression active for remaining segments!
+            // Intermediate multilingual segment finished; keep speaking suppression and voice config locked!
             return
         }
 
@@ -406,7 +729,8 @@ class TextToSpeechManager(
                 state = TtsOutputLifecycleState.COMPLETED,
                 segmentIndex = segIndex,
                 totalSegments = record.segmentUtteranceIds.size,
-                reason = "FINAL_SEGMENT_COMPLETED"
+                reason = "FINAL_SEGMENT_COMPLETED",
+                configSnapshot = record.configSnapshot
             )
         )
         onSpeechCompleted?.invoke()
@@ -417,13 +741,21 @@ class TextToSpeechManager(
      * Ignores stale turns; for the active turn, cleans up output ownership and speaking suppression
      * immediately so suppression never remains stuck.
      */
-    fun handleUtteranceError(utteranceId: String?, errorCode: Int = TextToSpeech.ERROR) {
+    fun handleUtteranceError(
+        utteranceId: String?,
+        errorCode: Int = TextToSpeech.ERROR,
+        callbackSessionGeneration: Long? = null
+    ) {
         val uttId = utteranceId?.trim().orEmpty()
         val record: ActiveTtsTurnRecord
         synchronized(lock) {
             val matched = if (uttId.isNotEmpty()) utteranceToTurnMap[uttId] else activeTurnRecord
             val current = activeTurnRecord
-            if (matched == null || current == null || current.generation != matched.generation) {
+            val sessionMismatch = callbackSessionGeneration != null &&
+                current != null &&
+                callbackSessionGeneration != current.sessionGeneration
+            if (matched == null || current == null || current.generation != matched.generation || sessionMismatch) {
+                staleCallbacksRejectedAtomic.incrementAndGet()
                 Log.d(TAG, "Ignored stale TTS onError for utteranceId=$uttId")
                 return
             }
@@ -450,7 +782,8 @@ class TextToSpeechManager(
                 utteranceId = uttId.ifBlank { record.finalUtteranceId },
                 state = TtsOutputLifecycleState.FAILED,
                 totalSegments = record.segmentUtteranceIds.size,
-                reason = "TTS_UTTERANCE_ERROR_$errorCode"
+                reason = "TTS_UTTERANCE_ERROR_$errorCode",
+                configSnapshot = record.configSnapshot
             )
         )
         onSpeechError?.invoke("TTS_UTTERANCE_ERROR_$errorCode")
@@ -459,13 +792,21 @@ class TextToSpeechManager(
     /**
      * Handles `UtteranceProgressListener.onStop(utteranceId, interrupted)`.
      */
-    fun handleUtteranceStop(utteranceId: String?, interrupted: Boolean = true) {
+    fun handleUtteranceStop(
+        utteranceId: String?,
+        interrupted: Boolean = true,
+        callbackSessionGeneration: Long? = null
+    ) {
         val uttId = utteranceId?.trim().orEmpty()
         val record: ActiveTtsTurnRecord
         synchronized(lock) {
             val matched = if (uttId.isNotEmpty()) utteranceToTurnMap[uttId] else activeTurnRecord
             val current = activeTurnRecord
-            if (matched == null || current == null || current.generation != matched.generation) {
+            val sessionMismatch = callbackSessionGeneration != null &&
+                current != null &&
+                callbackSessionGeneration != current.sessionGeneration
+            if (matched == null || current == null || current.generation != matched.generation || sessionMismatch) {
+                staleCallbacksRejectedAtomic.incrementAndGet()
                 return
             }
             record = matched
@@ -490,7 +831,8 @@ class TextToSpeechManager(
                 utteranceId = uttId.ifBlank { record.finalUtteranceId },
                 state = TtsOutputLifecycleState.INTERRUPTED,
                 totalSegments = record.segmentUtteranceIds.size,
-                reason = if (interrupted) "TTS_UTTERANCE_INTERRUPTED" else "TTS_UTTERANCE_STOPPED"
+                reason = if (interrupted) "TTS_UTTERANCE_INTERRUPTED" else "TTS_UTTERANCE_STOPPED",
+                configSnapshot = record.configSnapshot
             )
         )
     }
@@ -498,6 +840,7 @@ class TextToSpeechManager(
     /**
      * Probes installed TTS voice packs (`ur-PK`, `en-PK`, `en-IN`, `en-US`) and surfaces
      * a helpful banner if the offline Urdu (`ur-PK`) voice pack is missing (`F-052`).
+     * Never mutates `engine.language` or `engine.voice` if an utterance is currently active.
      */
     fun probeAvailableVoicePacks(): TtsVoicePackStatus {
         val engine = tts ?: return _voicePackStatus.value
@@ -509,11 +852,16 @@ class TextToSpeechManager(
             isLocaleSupported(engine, Locale.forLanguageTag("hi-IN"))
         val enUs = isLocaleSupported(engine, Locale.US)
 
-        val chosenLocale = applyBestAvailableLocale(engine, Locale.forLanguageTag("ur-PK"))
-        val chosenVoiceName = try {
-            engine.voice?.name ?: chosenLocale.toLanguageTag()
-        } catch (_: Exception) {
-            chosenLocale.toLanguageTag()
+        val isTurnInFlight = synchronized(lock) { activeTurnRecord != null }
+        val chosenLocaleTag: String
+        val chosenVoiceName: String
+        if (isTurnInFlight) {
+            chosenLocaleTag = lastResolvedLocaleTag
+            chosenVoiceName = lastResolvedVoiceId.ifBlank { "Default Neural Voice" }
+        } else {
+            val (loc, voiceId, _) = applyBestAvailableLocale(engine, Locale.forLanguageTag("ur-PK"))
+            chosenLocaleTag = loc.toLanguageTag()
+            chosenVoiceName = voiceId
         }
 
         val banner = if (!urPk) {
@@ -528,7 +876,7 @@ class TextToSpeechManager(
             isEnglishPkInstalled = enPk,
             isEnglishInInstalled = enIn,
             isEnglishUsInstalled = enUs,
-            activeLocaleTag = chosenLocale.toLanguageTag(),
+            activeLocaleTag = chosenLocaleTag,
             activeVoiceName = chosenVoiceName,
             guidanceBanner = banner
         )
@@ -546,17 +894,23 @@ class TextToSpeechManager(
     }
 
     /**
-     * Normalizes a raw assistant reply via [SpeechNormaliser] and speaks it across bilingual
-     * `LanguageRun` segments (`ur-PK` for Urdu script, `en-PK`/`en-IN`/`en-US` for Latin/English),
-     * guarded by [AudioOutputManager] so duplicate turns or simultaneous PCM+TTS never occur (`F-039`, `F-043`).
+     * Normalizes a raw assistant reply via [SpeechNormaliser] and speaks it using a single
+     * immutable [SpeechConfigSnapshot] for the entire utterance, guarded by [AudioOutputManager]
+     * so duplicate turns, mid-utterance voice/rate/pitch mutations, or simultaneous PCM+TTS never occur.
      */
     fun speakNormalized(
         rawReply: String,
         detectedLanguage: DetectedLanguage = LanguageProcessor.detectLanguage(rawReply),
         turnId: String = UUID.randomUUID().toString(),
-        pitch: Float = 1.0f,
-        speechRate: Float = 0.98f,
+        pitch: Float = SpeechPreferenceStore.getPitch(context),
+        speechRate: Float = SpeechPreferenceStore.getSpeechRate(context),
         commandId: String = turnId,
+        sessionGeneration: Long = SpeechPreferenceStore.currentSessionGeneration(),
+        requestedOutputProvider: String = "ANDROID_TTS",
+        actualOutputProvider: String = "ANDROID_TTS",
+        requestedVoiceId: String = SpeechPreferenceStore.getSelectedLiveVoice(context),
+        languageSelectionReason: String = "DIRECT_TTS_REQUEST",
+        fallbackOrReconnectReason: String = "NONE",
         onCommandStateChanged: ((TtsLifecycleEvent) -> Unit)? = null
     ): NormalizedSpeechReply {
         val status = _voicePackStatus.value
@@ -586,6 +940,26 @@ class TextToSpeechManager(
         val effectiveTurnId = turnId.trim().ifBlank { UUID.randomUUID().toString() }
         val effectiveCommandId = commandId.trim().ifBlank { effectiveTurnId }
 
+        val stablePitch = pitch.coerceIn(0.85f, 1.25f)
+        val stableRate = speechRate.coerceIn(0.85f, 1.25f)
+        val initialLocaleTag = effectiveDetectedLang.ttsLocale.toLanguageTag()
+
+        val initialSnapshot = SpeechConfigSnapshot(
+            commandId = effectiveCommandId,
+            turnId = effectiveTurnId,
+            sessionGeneration = sessionGeneration,
+            requestedOutputProvider = requestedOutputProvider,
+            actualOutputProvider = actualOutputProvider,
+            requestedVoiceId = requestedVoiceId,
+            resolvedVoiceId = lastResolvedVoiceId.takeIf { it != "NONE" } ?: "ANDROID_TTS_PENDING_RESOLVE",
+            resolvedLocaleTag = initialLocaleTag,
+            speechRate = stableRate,
+            pitch = stablePitch,
+            chosenReplyLanguage = effectiveDetectedLang,
+            languageSelectionReason = languageSelectionReason,
+            fallbackOrReconnectReason = fallbackOrReconnectReason
+        )
+
         emitLifecycle(
             onCommandStateChanged,
             TtsLifecycleEvent(
@@ -593,7 +967,8 @@ class TextToSpeechManager(
                 turnId = effectiveTurnId,
                 utteranceId = effectiveTurnId,
                 state = TtsOutputLifecycleState.REQUESTED,
-                reason = "TTS_SPEAK_REQUESTED"
+                reason = "TTS_SPEAK_REQUESTED",
+                configSnapshot = initialSnapshot
             )
         )
 
@@ -607,7 +982,8 @@ class TextToSpeechManager(
                     turnId = effectiveTurnId,
                     utteranceId = effectiveTurnId,
                     state = TtsOutputLifecycleState.FAILED,
-                    reason = "BLANK_SPEECH_TEXT"
+                    reason = "BLANK_SPEECH_TEXT",
+                    configSnapshot = initialSnapshot
                 )
             )
             return normalized
@@ -618,9 +994,10 @@ class TextToSpeechManager(
             detectedLanguage = effectiveDetectedLang,
             turnId = effectiveTurnId,
             commandId = effectiveCommandId,
-            pitch = pitch,
-            speechRate = speechRate,
+            pitch = stablePitch,
+            speechRate = stableRate,
             normalized = normalized,
+            requestedSnapshot = initialSnapshot,
             onCommandStateChanged = onCommandStateChanged
         )
 
@@ -648,7 +1025,8 @@ class TextToSpeechManager(
                     turnId = dropped.turnId,
                     utteranceId = dropped.turnId,
                     state = TtsOutputLifecycleState.INTERRUPTED,
-                    reason = "DROPPED_BY_BOUNDED_INIT_QUEUE"
+                    reason = "DROPPED_BY_BOUNDED_INIT_QUEUE",
+                    configSnapshot = dropped.requestedSnapshot
                 )
             )
         }
@@ -667,7 +1045,8 @@ class TextToSpeechManager(
                     turnId = effectiveTurnId,
                     utteranceId = effectiveTurnId,
                     state = TtsOutputLifecycleState.FAILED,
-                    reason = "TTS_NOT_INITIALIZED_FAILED"
+                    reason = "TTS_NOT_INITIALIZED_FAILED",
+                    configSnapshot = initialSnapshot
                 )
             )
             onSpeechError?.invoke("TTS_NOT_INITIALIZED_FAILED")
@@ -683,7 +1062,8 @@ class TextToSpeechManager(
                     turnId = effectiveTurnId,
                     utteranceId = effectiveTurnId,
                     state = TtsOutputLifecycleState.QUEUED,
-                    reason = "QUEUED_AWAITING_TTS_INIT"
+                    reason = "QUEUED_AWAITING_TTS_INIT",
+                    configSnapshot = initialSnapshot
                 )
             )
             return normalized
@@ -719,7 +1099,8 @@ class TextToSpeechManager(
                     turnId = req.turnId,
                     utteranceId = req.turnId,
                     state = TtsOutputLifecycleState.FAILED,
-                    reason = "OUTPUT_ACQUISITION_DENIED"
+                    reason = "OUTPUT_ACQUISITION_DENIED",
+                    configSnapshot = req.requestedSnapshot
                 )
             )
             onSpeechError?.invoke("OUTPUT_ACQUISITION_DENIED")
@@ -744,7 +1125,8 @@ class TextToSpeechManager(
                     turnId = req.turnId,
                     utteranceId = req.turnId,
                     state = TtsOutputLifecycleState.FAILED,
-                    reason = "TTS_ENGINE_NULL"
+                    reason = "TTS_ENGINE_NULL",
+                    configSnapshot = req.requestedSnapshot
                 )
             )
             onSpeechError?.invoke("TTS_ENGINE_NULL")
@@ -761,6 +1143,63 @@ class TextToSpeechManager(
         }
         val finalUttId = segmentIds.last()
 
+        // 2. Resolve ONE stable locale, voice, rate, and pitch for the entire utterance BEFORE queuing segments.
+        // Never mutate voice, locale, rate, or pitch inside the segment loop or midway through an utterance!
+        val desiredPrimaryLocale = when {
+            mode == AccentTrainingMode.ENGLISH_COMPLETE_ACCENT -> Locale.US
+            mode == AccentTrainingMode.URDU_COMPLETE_ACCENT -> Locale.forLanguageTag("ur-PK")
+            (effectiveDetectedLang == DetectedLanguage.URDU_NASTALIQ || runs.any { it.isUrdu }) && status.isUrduPkInstalled ->
+                Locale.forLanguageTag("ur-PK")
+            effectiveDetectedLang == DetectedLanguage.ROMAN_URDU ||
+                effectiveDetectedLang == DetectedLanguage.MIXED ||
+                (effectiveDetectedLang == DetectedLanguage.URDU_NASTALIQ && !status.isUrduPkInstalled) ->
+                Locale.forLanguageTag("en-PK")
+            else -> runs.first().locale
+        }
+
+        val tunedPitch = req.pitch.coerceIn(0.85f, 1.25f)
+        val tunedRate = req.speechRate.coerceIn(0.85f, 1.25f)
+
+        val resolvedLocale: Locale
+        val resolvedVoiceId: String
+        val limitationNote: String
+        if (engine != null) {
+            try {
+                engine.setPitch(tunedPitch)
+                engine.setSpeechRate(tunedRate)
+            } catch (_: Exception) {
+            }
+            val (loc, voiceId, lim) = applyBestAvailableLocale(engine, desiredPrimaryLocale)
+            resolvedLocale = loc
+            resolvedVoiceId = voiceId
+            limitationNote = lim
+        } else {
+            resolvedLocale = desiredPrimaryLocale
+            resolvedVoiceId = "TEST_INTERCEPTOR_VOICE_${desiredPrimaryLocale.toLanguageTag()}"
+            limitationNote = "NONE"
+        }
+
+        lastResolvedLocaleTag = resolvedLocale.toLanguageTag()
+        lastResolvedVoiceId = resolvedVoiceId
+        lastFallbackLimitationNote = limitationNote
+
+        val effectiveFallbackReason = when {
+            req.requestedSnapshot.fallbackOrReconnectReason != "NONE" && limitationNote != "NONE" ->
+                "${req.requestedSnapshot.fallbackOrReconnectReason};$limitationNote"
+            limitationNote != "NONE" -> limitationNote
+            else -> req.requestedSnapshot.fallbackOrReconnectReason
+        }
+
+        val resolvedSnapshot = req.requestedSnapshot.copy(
+            resolvedVoiceId = resolvedVoiceId,
+            resolvedLocaleTag = resolvedLocale.toLanguageTag(),
+            speechRate = tunedRate,
+            pitch = tunedPitch,
+            fallbackOrReconnectReason = effectiveFallbackReason
+        )
+        lastConfigSnapshot = resolvedSnapshot
+        _appliedConfigSnapshotsForTest.add(resolvedSnapshot)
+
         val previousActive: ActiveTtsTurnRecord?
         val newRecord: ActiveTtsTurnRecord
         synchronized(lock) {
@@ -775,9 +1214,11 @@ class TextToSpeechManager(
                 turnId = req.turnId,
                 commandId = req.commandId,
                 generation = gen,
+                sessionGeneration = resolvedSnapshot.sessionGeneration,
                 segmentUtteranceIds = segmentIds,
                 finalUtteranceId = finalUttId,
                 spokenText = normalized.speechText.ifBlank { req.rawReply },
+                configSnapshot = resolvedSnapshot,
                 onCommandStateChanged = req.onCommandStateChanged
             )
             activeTurnRecord = newRecord
@@ -797,7 +1238,8 @@ class TextToSpeechManager(
                     utteranceId = previousActive.finalUtteranceId,
                     state = TtsOutputLifecycleState.INTERRUPTED,
                     totalSegments = previousActive.segmentUtteranceIds.size,
-                    reason = "SUPERSEDED_BY_NEW_TURN_${req.turnId}"
+                    reason = "SUPERSEDED_BY_NEW_TURN_${req.turnId}",
+                    configSnapshot = previousActive.configSnapshot
                 )
             )
         }
@@ -816,41 +1258,12 @@ class TextToSpeechManager(
                 utteranceId = finalUttId,
                 state = TtsOutputLifecycleState.QUEUED,
                 totalSegments = segmentIds.size,
-                reason = "TTS_SEGMENTS_QUEUED"
+                reason = "TTS_SEGMENTS_QUEUED",
+                configSnapshot = resolvedSnapshot
             )
         )
 
-        val tunedPitch = when (effectiveDetectedLang) {
-            DetectedLanguage.URDU_NASTALIQ, DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED ->
-                req.pitch.coerceIn(0.95f, 1.08f)
-            DetectedLanguage.ENGLISH ->
-                req.pitch.coerceIn(0.95f, 1.05f)
-        }
-        val tunedRate = when (effectiveDetectedLang) {
-            DetectedLanguage.URDU_NASTALIQ, DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED ->
-                req.speechRate.coerceIn(0.92f, 1.04f)
-            DetectedLanguage.ENGLISH ->
-                req.speechRate.coerceIn(0.96f, 1.06f)
-        }
-
-        try {
-            engine?.setPitch(tunedPitch)
-            engine?.setSpeechRate(tunedRate)
-        } catch (_: Exception) {
-        }
-
         for ((index, run) in runs.withIndex()) {
-            val targetLocale = when {
-                mode == AccentTrainingMode.ENGLISH_COMPLETE_ACCENT -> Locale.US
-                mode == AccentTrainingMode.URDU_COMPLETE_ACCENT -> Locale.forLanguageTag("ur-PK")
-                run.isUrdu && status.isUrduPkInstalled -> Locale.forLanguageTag("ur-PK")
-                effectiveDetectedLang == DetectedLanguage.ROMAN_URDU ||
-                    effectiveDetectedLang == DetectedLanguage.MIXED -> Locale.forLanguageTag("en-PK")
-                else -> run.locale
-            }
-            if (engine != null) {
-                applyBestAvailableLocale(engine, targetLocale)
-            }
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             val uttId = segmentIds[index]
             val params = Bundle().apply {
@@ -894,7 +1307,8 @@ class TextToSpeechManager(
                         state = TtsOutputLifecycleState.FAILED,
                         segmentIndex = index,
                         totalSegments = segmentIds.size,
-                        reason = "TTS_SPEAK_RETURNED_$speakResult"
+                        reason = "TTS_SPEAK_RETURNED_$speakResult",
+                        configSnapshot = resolvedSnapshot
                     )
                 )
                 onSpeechError?.invoke("TTS_SPEAK_RETURNED_$speakResult")
@@ -906,18 +1320,27 @@ class TextToSpeechManager(
     /**
      * Speaks any text using the trained Urdu / English / Mixed Roman-Urdu accent pipeline!
      * Routes automatically through [speakNormalized] so every caller in the app gets
-     * authentic pronunciation, cold-init queuing, and multi-run bilingual voice switching.
+     * authentic pronunciation, cold-init queuing, and a stable per-utterance [SpeechConfigSnapshot].
      */
     fun speak(
         text: String,
-        pitch: Float = 1.0f,
-        speechRate: Float = 0.98f,
+        pitch: Float = SpeechPreferenceStore.getPitch(context),
+        speechRate: Float = SpeechPreferenceStore.getSpeechRate(context),
         locale: Locale = Locale.US,
         turnId: String = UUID.randomUUID().toString(),
         commandId: String = turnId,
+        sessionGeneration: Long = SpeechPreferenceStore.currentSessionGeneration(),
+        requestedOutputProvider: String = "ANDROID_TTS",
+        actualOutputProvider: String = "ANDROID_TTS",
+        requestedVoiceId: String = SpeechPreferenceStore.getSelectedLiveVoice(context),
+        languageSelectionReason: String = "DIRECT_TTS_SPEAK",
+        fallbackOrReconnectReason: String = "NONE",
         onCommandStateChanged: ((TtsLifecycleEvent) -> Unit)? = null
     ) {
-        val detected = LanguageProcessor.detectLanguage(text)
+        val detected = LanguageProcessor.detectLanguage(
+            text = text,
+            fallbackConversationLanguage = SpeechPreferenceStore.getConversationLanguage(context)
+        )
         val effectiveLang = when {
             locale.language.equals("ur", ignoreCase = true) -> DetectedLanguage.URDU_NASTALIQ
             detected != DetectedLanguage.ENGLISH -> detected
@@ -932,6 +1355,12 @@ class TextToSpeechManager(
             pitch = pitch,
             speechRate = speechRate,
             commandId = commandId,
+            sessionGeneration = sessionGeneration,
+            requestedOutputProvider = requestedOutputProvider,
+            actualOutputProvider = actualOutputProvider,
+            requestedVoiceId = requestedVoiceId,
+            languageSelectionReason = languageSelectionReason,
+            fallbackOrReconnectReason = fallbackOrReconnectReason,
             onCommandStateChanged = onCommandStateChanged
         )
     }
@@ -939,15 +1368,20 @@ class TextToSpeechManager(
     /**
      * Selects the highest-quality neural/local [Voice] and [Locale] for Urdu (`ur-PK`, `ur-IN`, `hi-IN`),
      * Pakistani/Subcontinental English (`en-PK`, `en-IN`), or US/UK English (`en-US`, `en-GB`).
+     * Returns `(resolvedLocale, resolvedVoiceId, limitationNote)` so fallback limitations are transparently reported.
      */
-    private fun applyBestAvailableLocale(engine: TextToSpeech, preferred: Locale): Locale {
+    private fun applyBestAvailableLocale(
+        engine: TextToSpeech,
+        preferred: Locale
+    ): Triple<Locale, String, String> {
+        val status = _voicePackStatus.value
         val candidates = when {
             preferred.language.equals("ur", ignoreCase = true) -> listOf(
                 Locale.forLanguageTag("ur-PK"),
                 Locale.forLanguageTag("ur-IN"),
                 Locale.forLanguageTag("ur"),
-                Locale.forLanguageTag("hi-IN"),
                 Locale.forLanguageTag("en-PK"),
+                Locale.forLanguageTag("hi-IN"),
                 Locale.forLanguageTag("en-IN"),
                 Locale.US
             )
@@ -967,48 +1401,78 @@ class TextToSpeechManager(
         }
 
         for (candidate in candidates) {
-            if (isLocaleSupported(engine, candidate)) {
-                engine.language = candidate
-                selectHighestQualityVoiceForLocale(engine, candidate)
-                return candidate
+            val isSupported = isLocaleSupported(engine, candidate) ||
+                (candidate.language.equals("ur", ignoreCase = true) && status.isUrduPkInstalled) ||
+                (candidate.toLanguageTag().equals("en-PK", ignoreCase = true) && status.isEnglishPkInstalled)
+            if (isSupported) {
+                try {
+                    engine.language = candidate
+                } catch (_: Exception) {
+                }
+                val selectedVoiceName = selectHighestQualityVoiceForLocale(engine, candidate)
+                val limitation = if (!candidate.language.equals(preferred.language, ignoreCase = true)) {
+                    "REQUESTED_LOCALE_${preferred.toLanguageTag()}_UNAVAILABLE_USING_${candidate.toLanguageTag()}"
+                } else {
+                    "NONE"
+                }
+                return Triple(candidate, selectedVoiceName, limitation)
             }
         }
-        engine.language = Locale.US
-        selectHighestQualityVoiceForLocale(engine, Locale.US)
-        return Locale.US
+        try {
+            engine.language = Locale.US
+        } catch (_: Exception) {
+        }
+        val fallbackVoiceName = selectHighestQualityVoiceForLocale(engine, Locale.US)
+        val limitation = if (!preferred.language.equals("en", ignoreCase = true)) {
+            "REQUESTED_LOCALE_${preferred.toLanguageTag()}_UNAVAILABLE_USING_en-US"
+        } else {
+            "NONE"
+        }
+        return Triple(Locale.US, fallbackVoiceName, limitation)
     }
 
-    private fun selectHighestQualityVoiceForLocale(engine: TextToSpeech, targetLocale: Locale) {
+    private fun selectHighestQualityVoiceForLocale(engine: TextToSpeech, targetLocale: Locale): String {
         try {
-            val availableVoices = engine.voices ?: return
-            val matchingVoices = availableVoices.filter { voice ->
-                voice.locale != null &&
-                    voice.locale.language.equals(targetLocale.language, ignoreCase = true) &&
-                    (targetLocale.country.isBlank() || voice.locale.country.equals(targetLocale.country, ignoreCase = true)) &&
-                    !voice.isNetworkConnectionRequired
-            }.ifEmpty {
-                availableVoices.filter { voice ->
+            val availableVoices = engine.voices
+            if (!availableVoices.isNullOrEmpty()) {
+                val matchingVoices = availableVoices.filter { voice ->
                     voice.locale != null &&
-                        voice.locale.language.equals(targetLocale.language, ignoreCase = true)
+                        voice.locale.language.equals(targetLocale.language, ignoreCase = true) &&
+                        (targetLocale.country.isBlank() || voice.locale.country.equals(targetLocale.country, ignoreCase = true)) &&
+                        !voice.isNetworkConnectionRequired
+                }.ifEmpty {
+                    availableVoices.filter { voice ->
+                        voice.locale != null &&
+                            voice.locale.language.equals(targetLocale.language, ignoreCase = true)
+                    }
+                }
+
+                val bestVoice: Voice? = matchingVoices.maxByOrNull { v ->
+                    var score = v.quality
+                    if (!v.isNetworkConnectionRequired) score += 100
+                    if (v.name.contains("neural", ignoreCase = true) ||
+                        v.name.contains("wavenet", ignoreCase = true) ||
+                        v.name.contains("local", ignoreCase = true)
+                    ) {
+                        score += 50
+                    }
+                    score
+                }
+
+                if (bestVoice != null) {
+                    engine.voice = bestVoice
+                    return bestVoice.name
                 }
             }
-
-            val bestVoice: Voice? = matchingVoices.maxByOrNull { v ->
-                var score = v.quality
-                if (!v.isNetworkConnectionRequired) score += 100
-                if (v.name.contains("neural", ignoreCase = true) ||
-                    v.name.contains("wavenet", ignoreCase = true) ||
-                    v.name.contains("local", ignoreCase = true)
-                ) {
-                    score += 50
-                }
-                score
+            val currentVoiceName = try {
+                engine.voice?.name
+            } catch (_: Exception) {
+                null
             }
-
-            if (bestVoice != null) {
-                engine.voice = bestVoice
-            }
+            return currentVoiceName?.takeIf { it.isNotBlank() }
+                ?: "ANDROID_TTS_${targetLocale.toLanguageTag()}"
         } catch (_: Exception) {
+            return "ANDROID_TTS_${targetLocale.toLanguageTag()}"
         }
     }
 
@@ -1053,7 +1517,8 @@ class TextToSpeechManager(
                     utteranceId = activeToCancel.finalUtteranceId,
                     state = TtsOutputLifecycleState.INTERRUPTED,
                     totalSegments = activeToCancel.segmentUtteranceIds.size,
-                    reason = reason
+                    reason = reason,
+                    configSnapshot = activeToCancel.configSnapshot
                 )
             )
         } else {
@@ -1069,7 +1534,8 @@ class TextToSpeechManager(
                     turnId = queued.turnId,
                     utteranceId = queued.turnId,
                     state = TtsOutputLifecycleState.INTERRUPTED,
-                    reason = reason
+                    reason = reason,
+                    configSnapshot = queued.requestedSnapshot
                 )
             )
         }

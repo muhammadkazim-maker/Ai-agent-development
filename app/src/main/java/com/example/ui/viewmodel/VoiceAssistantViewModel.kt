@@ -276,6 +276,13 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
     init {
         com.omnivoice.agentfix.AgentBridge.appContext = context.applicationContext
+        com.example.engine.SpeechPreferenceStore.ensureLoaded(context)
+        val restoredMode = com.example.engine.SpeechPreferenceStore.getPreferredLanguageMode(context)
+        _preferredLanguageMode.value = restoredMode.displayName
+        val restoredRate = com.example.engine.SpeechPreferenceStore.getSpeechRate(context)
+        val restoredPitch = com.example.engine.SpeechPreferenceStore.getPitch(context)
+        _config.value = _config.value.copy(voiceSpeed = restoredRate, voicePitch = restoredPitch)
+        omniLiveEngine.restoreAuthoritativeSpeechPreferences()
         AssistantAudioStateMachine.shared.inspectWakeAndAssistantReadiness(context)
         setupSttCallbacks()
 
@@ -400,6 +407,8 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
     fun setPreferredLanguageMode(mode: String) {
         _preferredLanguageMode.value = mode
+        val parsed = LanguageProcessor.UserLanguagePreferenceMode.fromIdOrLabel(mode)
+        com.example.engine.SpeechPreferenceStore.setPreferredLanguageMode(context, parsed)
     }
 
     fun isDeviceLocked(): Boolean {
@@ -645,14 +654,14 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
             val vocabSummary = _personalVocabulary.value.take(10).joinToString("; ") { "${it.spokenPhrase}=${it.canonicalMeaning}" }
             val memorySummary = _userMemories.value.take(10).joinToString("; ") { "${it.memoryKey}:${it.memoryValue}" }
 
-            val (action, lang) = if (isExplicitConversationOrUnclear && !voiceAnalysis?.reply.isNullOrBlank()) {
-                val detected = LanguageProcessor.detectLanguage(effectiveSpeech)
+            val (action, rawDetectedLang) = if (isExplicitConversationOrUnclear && !voiceAnalysis?.reply.isNullOrBlank()) {
+                val resolved = omniLiveEngine.resolveCommandReplyLanguage(effectiveSpeech, mutateHistoryIfGenuine = true)
                 VoiceAction(
                     action = "general_chat",
                     target = effectiveSpeech,
                     spokenResponse = voiceAnalysis?.reply.orEmpty(),
                     confirmationRequired = false
-                ) to detected
+                ) to resolved.language
             } else {
                 aiBrain.processCommand(
                     userSpeech = effectiveSpeech,
@@ -661,6 +670,8 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                     longTermMemoryContext = memorySummary
                 )
             }
+            val langResolution = omniLiveEngine.resolveCommandReplyLanguage(effectiveSpeech, mutateHistoryIfGenuine = true)
+            val lang = langResolution.language
             _detectedLanguage.value = lang
             _pendingAction.value = action
 
@@ -1128,7 +1139,12 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         }
         audioStateMachine.transitionTo(AudioPipelineOwner.SPEAKING)
 
-        val locale = _detectedLanguage.value.ttsLocale
+        val langRes = omniLiveEngine.resolveCommandReplyLanguage(
+            utterance = _liveTranscription.value,
+            mutateHistoryIfGenuine = _liveTranscription.value.isNotBlank()
+        )
+        _detectedLanguage.value = langRes.language
+        val locale = langRes.language.ttsLocale
         ttsManager.onSpeechCompleted = {
             audioStateMachine.transitionTo(AudioPipelineOwner.IDLE)
             onDone?.invoke()
@@ -1142,7 +1158,14 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
                 }
             }
         }
-        ttsManager.speak(cleanText, _config.value.voicePitch, _config.value.voiceSpeed, locale)
+        ttsManager.speak(
+            text = cleanText,
+            pitch = _config.value.voicePitch,
+            speechRate = _config.value.voiceSpeed,
+            locale = locale,
+            requestedVoiceId = selectedLiveVoice.value.voiceName,
+            languageSelectionReason = langRes.reason
+        )
     }
 
     private fun recordLog(
@@ -1285,6 +1308,11 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     fun updateConfig(newConfig: AssistantConfig) {
         _config.value = newConfig
         WakeWordForegroundService.configuredWakeWord = newConfig.wakeWord
+        com.example.engine.SpeechPreferenceStore.setSpeechRateAndPitch(
+            context = context,
+            speechRate = newConfig.voiceSpeed,
+            pitch = newConfig.voicePitch
+        )
     }
 
     fun toggleForegroundService(enable: Boolean) {
@@ -1461,10 +1489,14 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
-    fun startGeminiLiveConversation(voiceName: String = "Aoede") {
+    fun startGeminiLiveConversation(voiceName: String = selectedLiveVoice.value.voiceName) {
         WakeWordForegroundService.pause(context)
         sttManager.stopListening()
-        geminiSkills.startLiveVoiceSession(voiceName) { fallbackSpokenText ->
+        val matchedVoice = GeminiLiveVoice.entries.firstOrNull {
+            it.voiceName.equals(voiceName, ignoreCase = true)
+        } ?: selectedLiveVoice.value
+        omniLiveEngine.selectVoice(matchedVoice)
+        geminiSkills.startLiveVoiceSession(matchedVoice.voiceName) { fallbackSpokenText ->
             speakResponse(fallbackSpokenText)
         }
     }

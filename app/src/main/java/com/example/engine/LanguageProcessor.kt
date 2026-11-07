@@ -518,16 +518,222 @@ object LanguageProcessor {
     }
 
     /**
+     * User-configurable language policy mode.
+     * In [AUTO] mode, OmniVoice responds in Urdu to Urdu, English to English, and naturally mixed
+     * Roman Urdu/English to mixed speech while preserving conversation language across app names,
+     * tool names, result codes, and accessibility labels.
+     */
+    enum class UserLanguagePreferenceMode(val id: String, val displayName: String) {
+        AUTO("AUTO", "Auto (Match User Conversation)"),
+        URDU_SCRIPT("URDU_SCRIPT", "Urdu (اردو)"),
+        ROMAN_URDU_MIXED("ROMAN_URDU_MIXED", "Roman Urdu / Mixed"),
+        ENGLISH("ENGLISH", "English");
+
+        companion object {
+            fun fromIdOrLabel(raw: String?): UserLanguagePreferenceMode {
+                val clean = raw?.trim().orEmpty()
+                if (clean.isEmpty()) return AUTO
+                return entries.firstOrNull {
+                    it.id.equals(clean, ignoreCase = true) ||
+                        it.displayName.equals(clean, ignoreCase = true)
+                } ?: when {
+                    clean.contains("auto", ignoreCase = true) -> AUTO
+                    clean.contains("roman", ignoreCase = true) || clean.contains("mixed", ignoreCase = true) -> ROMAN_URDU_MIXED
+                    clean.contains("urdu", ignoreCase = true) || clean.contains("اردو") -> URDU_SCRIPT
+                    clean.contains("english", ignoreCase = true) -> ENGLISH
+                    else -> AUTO
+                }
+            }
+        }
+    }
+
+    /**
+     * Correlated language decision with explicit audit reason for command diagnostics.
+     */
+    data class LanguageResolution(
+        val language: DetectedLanguage,
+        val reason: String
+    )
+
+    /**
+     * Tokens that represent app names, package identifiers, tool names, status labels,
+     * accessibility labels, or wake words. By themselves, these tokens must NEVER switch
+     * an ongoing Urdu / Roman Urdu conversation to English.
+     */
+    private val NON_LINGUISTIC_ENTITY_AND_SYSTEM_TOKENS = setOf(
+        "whatsapp", "watsapp", "whatsap", "notepad", "notes", "keep", "youtube", "utube",
+        "chrome", "browser", "instagram", "insta", "facebook", "fb", "tiktok", "settings",
+        "camera", "gallery", "photos", "calculator", "clock", "alarm", "calendar", "maps",
+        "gmail", "email", "play", "store", "playstore", "phone", "dialer", "messages",
+        "sms", "contacts", "spotify", "telegram", "snapchat", "netflix", "drive", "files",
+        "open_app", "return_to_origin", "navigate", "click", "long_click", "type_text",
+        "scroll", "read_screen", "control_hardware", "manage_connectivity_and_settings",
+        "verified", "requested_unverified", "missing_app", "needs_setup", "blocked",
+        "failed", "success", "error", "none", "null", "true", "false",
+        "jarvis", "omni", "omnivoice", "assistant",
+        "status", "updates", "chats", "calls", "communities", "recents", "overview",
+        "button", "tab", "icon", "toolbar", "header", "search_button", "com", "android",
+        "google", "apps", "app", "package", "draft"
+    )
+
+    /**
+     * Genuine English sentence/command words (verbs, pronouns, question words, prepositions)
+     * that indicate the user is actively speaking English rather than just naming an app.
+     */
+    private val GENUINE_ENGLISH_SENTENCE_MARKERS = setOf(
+        "open", "launch", "start", "go", "back", "return", "take", "bring", "me", "to",
+        "the", "my", "previous", "last", "where", "was", "working", "please", "can",
+        "could", "would", "you", "what", "how", "why", "when", "who", "is", "are", "am",
+        "tell", "joke", "turn", "on", "off", "enable", "disable", "show", "close",
+        "switch", "hello", "hi", "hey", "thanks", "thank", "good", "morning", "evening",
+        "night", "send", "read", "write", "delete", "find", "search", "check", "call"
+    )
+
+    /**
+     * Detects whether the user utterance explicitly requests switching the conversation language.
+     */
+    fun detectExplicitLanguageSwitchDirective(text: String): DetectedLanguage? {
+        val lower = text.trim().lowercase()
+        if (lower.isEmpty()) return null
+        return when {
+            lower.contains("speak in english") ||
+                lower.contains("reply in english") ||
+                lower.contains("talk in english") ||
+                lower.contains("english mein baat") ||
+                lower.contains("english me baat") ||
+                lower.contains("english mein جواب") -> DetectedLanguage.ENGLISH
+            lower.contains("urdu mein baat") ||
+                lower.contains("urdu me baat") ||
+                lower.contains("speak in urdu") ||
+                lower.contains("reply in urdu") ||
+                lower.contains("اردو میں بات") ||
+                lower.contains("اردو میں جواب") -> {
+                if (text.any { URDU_UNICODE_REGEX.matches(it.toString()) }) {
+                    DetectedLanguage.URDU_NASTALIQ
+                } else {
+                    DetectedLanguage.ROMAN_URDU
+                }
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Returns a non-null [DetectedLanguage] ONLY when [text] contains genuine linguistic markers
+     * (Urdu script, Roman Urdu vocabulary, or genuine English sentence structure).
+     * Returns `null` when [text] is blank or consists solely of app names, tool names, result codes,
+     * numbers, or accessibility labels so that non-linguistic tokens never overwrite conversation language.
+     */
+    fun detectConversationalLanguageEvidence(text: String): LanguageResolution? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+
+        detectExplicitLanguageSwitchDirective(trimmed)?.let { explicitLang ->
+            return LanguageResolution(explicitLang, "EXPLICIT_USER_LANGUAGE_DIRECTIVE_${explicitLang.name}")
+        }
+
+        val urduCharCount = trimmed.count { char -> URDU_UNICODE_REGEX.matches(char.toString()) }
+        val totalLetters = trimmed.count { it.isLetter() }
+        if (totalLetters > 0 && (urduCharCount.toDouble() / totalLetters) >= 0.25) {
+            return LanguageResolution(DetectedLanguage.URDU_NASTALIQ, "UTTERANCE_URDU_SCRIPT")
+        }
+
+        val tokens = trimmed.lowercase()
+            .split(Regex("[\\s,?.!:'\"()\\[\\]/\\\\-]+"))
+            .filter { it.isNotBlank() && !it.all { ch -> ch.isDigit() } }
+        if (tokens.isEmpty()) return null
+
+        var romanUrduTokens = 0
+        var genuineEnglishSentenceTokens = 0
+
+        for (t in tokens) {
+            val isRomanUrdu = ROMAN_URDU_MARKERS.contains(t) || ROMAN_TO_URDU_CONVERSATIONAL_LEXICON.containsKey(t)
+            val isSystemOrEntityOnly = NON_LINGUISTIC_ENTITY_AND_SYSTEM_TOKENS.contains(t)
+            val isGenuineEnglish = !isRomanUrdu && !isSystemOrEntityOnly &&
+                (GENUINE_ENGLISH_SENTENCE_MARKERS.contains(t) || ENGLISH_MARKERS.contains(t))
+            if (isRomanUrdu) romanUrduTokens++
+            if (isGenuineEnglish) genuineEnglishSentenceTokens++
+        }
+
+        return when {
+            romanUrduTokens >= 1 && genuineEnglishSentenceTokens >= 2 ->
+                LanguageResolution(DetectedLanguage.MIXED, "UTTERANCE_MIXED_ROMAN_URDU_ENGLISH")
+            romanUrduTokens >= 1 ->
+                LanguageResolution(DetectedLanguage.ROMAN_URDU, "UTTERANCE_ROMAN_URDU")
+            genuineEnglishSentenceTokens >= 1 ->
+                LanguageResolution(DetectedLanguage.ENGLISH, "UTTERANCE_ENGLISH")
+            else -> null
+        }
+    }
+
+    /**
+     * Resolves the reply language and records why it was chosen across cloud responses,
+     * local acknowledgements, fallback speech, and errors.
+     *
+     * Rules:
+     * 1. Explicit language switch in the current utterance wins.
+     * 2. If the user explicitly selected a non-AUTO language preference, honour it.
+     * 3. If the current utterance has genuine Urdu, Roman Urdu, Mixed, or English linguistic evidence,
+     *    respond in that language.
+     * 4. If the current utterance is empty or contains only an English app name, tool name,
+     *    result code, or accessibility label, preserve [conversationLanguage] if present.
+     * 5. Otherwise default to [DetectedLanguage.ENGLISH].
+     */
+    fun resolveReplyLanguage(
+        utterance: String,
+        preferredMode: UserLanguagePreferenceMode = UserLanguagePreferenceMode.AUTO,
+        conversationLanguage: DetectedLanguage? = null
+    ): LanguageResolution {
+        val trimmed = utterance.trim()
+
+        detectExplicitLanguageSwitchDirective(trimmed)?.let { explicit ->
+            return LanguageResolution(explicit, "EXPLICIT_LANGUAGE_SWITCH_${explicit.name}")
+        }
+
+        when (preferredMode) {
+            UserLanguagePreferenceMode.URDU_SCRIPT ->
+                return LanguageResolution(DetectedLanguage.URDU_NASTALIQ, "USER_PREFERENCE_URDU_SCRIPT")
+            UserLanguagePreferenceMode.ROMAN_URDU_MIXED ->
+                return LanguageResolution(DetectedLanguage.ROMAN_URDU, "USER_PREFERENCE_ROMAN_URDU_MIXED")
+            UserLanguagePreferenceMode.ENGLISH ->
+                return LanguageResolution(DetectedLanguage.ENGLISH, "USER_PREFERENCE_ENGLISH")
+            UserLanguagePreferenceMode.AUTO -> Unit
+        }
+
+        val utteranceEvidence = detectConversationalLanguageEvidence(trimmed)
+        if (utteranceEvidence != null) {
+            return utteranceEvidence
+        }
+
+        if (conversationLanguage != null) {
+            val contextReason = if (trimmed.isEmpty()) {
+                "CONVERSATION_CONTEXT_${conversationLanguage.name}_ON_EMPTY_UTTERANCE"
+            } else {
+                "CONVERSATION_CONTEXT_${conversationLanguage.name}_PRESERVED_ON_ENTITY_OR_TOOL_TOKEN"
+            }
+            return LanguageResolution(conversationLanguage, contextReason)
+        }
+
+        return LanguageResolution(
+            language = DetectedLanguage.ENGLISH,
+            reason = if (trimmed.isEmpty()) "DEFAULT_ENGLISH_EMPTY_UTTERANCE" else "DEFAULT_ENGLISH_NO_PRIOR_CONTEXT"
+        )
+    }
+
+    /**
      * Detects input language style (Urdu Nastaliq, Roman Urdu, English, or Mixed).
      */
-    fun detectLanguage(text: String): DetectedLanguage {
+    fun detectLanguage(
+        text: String,
+        fallbackConversationLanguage: DetectedLanguage? = null
+    ): DetectedLanguage {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return DetectedLanguage.ENGLISH
+        if (trimmed.isEmpty()) return fallbackConversationLanguage ?: DetectedLanguage.ENGLISH
 
         val urduCharCount = trimmed.count { char -> URDU_UNICODE_REGEX.matches(char.toString()) }
         val totalLetters = trimmed.count { it.isLetter() }
 
-        if (totalLetters > 0 && (urduCharCount.toDouble() / totalLetters) >= 0.30) {
+        if (totalLetters > 0 && (urduCharCount.toDouble() / totalLetters) >= 0.25) {
             return DetectedLanguage.URDU_NASTALIQ
         }
 
@@ -536,15 +742,19 @@ object LanguageProcessor {
         var englishTokens = 0
 
         for (t in tokens) {
-            val isRomanUrdu = ROMAN_URDU_MARKERS.contains(t)
-            val isEnglish = ENGLISH_MARKERS.contains(t)
+            val isRomanUrdu = ROMAN_URDU_MARKERS.contains(t) || ROMAN_TO_URDU_CONVERSATIONAL_LEXICON.containsKey(t)
+            val isSystemOrEntityOnly = NON_LINGUISTIC_ENTITY_AND_SYSTEM_TOKENS.contains(t)
+            val isEnglish = !isRomanUrdu && !isSystemOrEntityOnly &&
+                (GENUINE_ENGLISH_SENTENCE_MARKERS.contains(t) || ENGLISH_MARKERS.contains(t))
             if (isRomanUrdu) romanUrduTokens++
-            if (isEnglish && !isRomanUrdu) englishTokens++
+            if (isEnglish) englishTokens++
         }
 
         return when {
             romanUrduTokens >= 1 && englishTokens >= 2 -> DetectedLanguage.MIXED
             romanUrduTokens >= 1 -> DetectedLanguage.ROMAN_URDU
+            englishTokens >= 1 -> DetectedLanguage.ENGLISH
+            fallbackConversationLanguage != null -> fallbackConversationLanguage
             else -> DetectedLanguage.ENGLISH
         }
     }

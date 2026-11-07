@@ -670,7 +670,8 @@ fun LiveVoiceAndTranscribePanel(viewModel: VoiceAssistantViewModel) {
     val isTranscribing by viewModel.isTranscribingAudio.collectAsState()
     val transcribedNotes by viewModel.transcribedNotes.collectAsState()
 
-    var selectedVoice by remember { mutableStateOf("Aoede") }
+    val authoritativeLiveVoice by viewModel.selectedLiveVoice.collectAsState()
+    val selectedVoice = authoritativeLiveVoice.voiceName
     var liveTextQuickTurn by remember { mutableStateOf("") }
     var selectedLangMode by remember { mutableStateOf("Auto (English / Urdu / Roman Urdu)") }
 
@@ -748,11 +749,11 @@ fun LiveVoiceAndTranscribePanel(viewModel: VoiceAssistantViewModel) {
 
                 // Voice Persona Chips
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Aoede", "Puck", "Kore", "Charon").forEach { voice ->
+                    com.example.engine.GeminiLiveVoice.entries.forEach { voiceEnum ->
                         FilterChip(
-                            selected = selectedVoice == voice,
-                            onClick = { selectedVoice = voice },
-                            label = { Text(voice, fontSize = 11.sp) }
+                            selected = authoritativeLiveVoice == voiceEnum,
+                            onClick = { viewModel.selectLiveVoice(voiceEnum) },
+                            label = { Text(voiceEnum.voiceName, fontSize = 11.sp) }
                         )
                     }
                 }
