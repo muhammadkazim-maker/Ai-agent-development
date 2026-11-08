@@ -260,6 +260,10 @@ class WakeWordForegroundService : Service() {
                 WakeSpeechCandidateDecision.WAKE_WORD_DETECTED_OPEN_WINDOW,
                 WakeSpeechCandidateDecision.WAKE_AND_INLINE_COMMAND_ACCEPTED -> {
                     activeInstance?.pauseMicrophoneCaptureForHandoff()
+                    if (eval.decision == WakeSpeechCandidateDecision.WAKE_WORD_DETECTED_OPEN_WINDOW) {
+                        com.example.engine.OmniLiveSessionEngine.getInstance()
+                            ?.startActiveCommandCaptureAfterWakeWord("WAKE_SERVICE_JARVIS_DETECTED", nowMs = nowMs)
+                    }
                     _wakeWordTriggered.tryEmit(
                         if (eval.extractedCommandText.isNotBlank()) {
                             "${configuredWakeWord}: ${eval.extractedCommandText}"
@@ -339,7 +343,12 @@ class WakeWordForegroundService : Service() {
                 }
                 resumeMicrophoneCaptureAfterHandoff()
                 val route = coord.detectActiveAudioInputRoute(this)
-                updateNotification("Wake-only active (${route.label}) — Say \"$configuredWakeWord\"")
+                val statusMsg = if (AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable) {
+                    "Wake-only active (${route.label}) — Say \"$configuredWakeWord\""
+                } else {
+                    "Standby (${route.label}) — Tap Launch Jarvis or Mic to speak"
+                }
+                updateNotification(statusMsg)
                 return START_STICKY
             }
         }
@@ -357,8 +366,10 @@ class WakeWordForegroundService : Service() {
         val notification = buildNotification(
             if (_isListeningPaused.value || coord.isDeviceMutedPersisted(this)) {
                 "Muted / Paused — Tap Resume to listen for \"$configuredWakeWord\""
-            } else {
+            } else if (AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable) {
                 "Wake-only active (${route.label}) — Say \"$configuredWakeWord\""
+            } else {
+                "Standby (${route.label}) — Tap Launch Jarvis or Mic to speak"
             }
         )
         try {

@@ -604,6 +604,32 @@ class TextToSpeechManager(
         }
     }
 
+    private val commandScopedLifecycleListeners = ConcurrentHashMap<String, (TtsLifecycleEvent) -> Unit>()
+
+    fun registerCommandLifecycleListener(
+        commandId: String,
+        listener: (TtsLifecycleEvent) -> Unit
+    ) {
+        val cleanId = commandId.trim()
+        if (cleanId.isEmpty()) return
+        if (commandScopedLifecycleListeners.size >= 16) {
+            val oldestKey = commandScopedLifecycleListeners.keys().asSequence().firstOrNull()
+            if (oldestKey != null) {
+                commandScopedLifecycleListeners.remove(oldestKey)
+            }
+        }
+        commandScopedLifecycleListeners[cleanId] = listener
+    }
+
+    fun unregisterCommandLifecycleListener(commandId: String) {
+        val cleanId = commandId.trim()
+        if (cleanId.isNotEmpty()) {
+            commandScopedLifecycleListeners.remove(cleanId)
+        }
+    }
+
+    fun getRegisteredCommandListenerCount(): Int = commandScopedLifecycleListeners.size
+
     private fun emitLifecycle(
         perCallListener: ((TtsLifecycleEvent) -> Unit)?,
         event: TtsLifecycleEvent
@@ -614,6 +640,17 @@ class TextToSpeechManager(
             lastConfigSnapshot = event.configSnapshot
         }
         perCallListener?.invoke(event)
+        val cmdKey = event.commandId.trim()
+        if (cmdKey.isNotEmpty()) {
+            val scopedListener = commandScopedLifecycleListeners[cmdKey]
+            scopedListener?.invoke(event)
+            if (event.state == TtsOutputLifecycleState.COMPLETED ||
+                event.state == TtsOutputLifecycleState.FAILED ||
+                event.state == TtsOutputLifecycleState.INTERRUPTED
+            ) {
+                commandScopedLifecycleListeners.remove(cmdKey)
+            }
+        }
         onLifecycleEvent?.invoke(event)
     }
 

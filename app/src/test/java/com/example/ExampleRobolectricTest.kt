@@ -6984,7 +6984,649 @@ class ExampleRobolectricTest {
         }
     }
 
+    @Test
+    fun repairA_listeningWithoutResponse_realCapturePlaybackAndHandoffPaths() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val shadowApp = org.robolectric.Shadows.shadowOf(context as android.app.Application)
+        shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+
+        val coord = com.example.engine.AssistantAudioStateMachine.shared
+        coord.resetTelemetryCounters()
+        coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+        com.example.engine.AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable = false
+        com.example.engine.SpeechPreferenceStore.resetForTest(context)
+        com.example.engine.AudioOutputManager.resetAll()
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+
+        val vm = com.example.ui.viewmodel.VoiceAssistantViewModel(context as android.app.Application)
+        val liveEngine = vm.omniLiveEngine
+        val ttsManager = vm.ttsManager
+        liveEngine.endLiveSession()
+        liveEngine.clearTurnReportsForTest()
+        liveEngine.autoConfirmCaptureReadyInTest = false
+        liveEngine.liveAudioDeliveryTimeoutMs = 90L
+        liveEngine.pcmPlaybackStallTimeoutMs = 120L
+        liveEngine.audioTrackWriteInterceptorForTest = null
+
+        val spokenEngineCalls = java.util.concurrent.CopyOnWriteArrayList<Triple<String, String, Int>>()
+        ttsManager.setInitializedStateForTest(
+            initialized = true,
+            urduPkInstalled = true,
+            englishPkInstalled = true
+        )
+        ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+            spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+            android.speech.tts.TextToSpeech.SUCCESS
+        }
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            windowId: Int,
+            titleGuess: String,
+            drafts: Map<String, String> = emptyMap(),
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList()
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + 10L,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = -1,
+                activityComponent = "$pkg.MainActivity",
+                visibleApplicationPackages = setOf(pkg),
+                editableFieldDrafts = drafts
+            )
+        }
+
+        var openAppCount = 0
+        var returnToOriginCount = 0
+        var screenPhase = "NOTEPAD_DRAFT_42"
+
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notepad",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            screenPhase = "HOME_SCREEN"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                openAppCount += 1
+                screenPhase = "WHATSAPP_FOREGROUND"
+                true
+            } else {
+                false
+            }
+        }
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            returnToOriginCount += 1
+            screenPhase = "NOTEPAD_DRAFT_42"
+            true
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (screenPhase) {
+                "NOTEPAD_DRAFT_42" -> buildSnapshot(
+                    pkg = "com.example.notepad",
+                    label = "Notepad",
+                    windowId = 101,
+                    titleGuess = "Notepad - Draft 42",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                "HOME_SCREEN" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    windowId = 202,
+                    titleGuess = "Home",
+                    nodes = listOf(
+                        com.omnivoice.agentfix.UiNodeSummary(
+                            index = 1,
+                            viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                            className = "android.widget.TextView",
+                            packageName = "com.google.android.apps.nexuslauncher",
+                            text = "WhatsApp",
+                            contentDescription = "WhatsApp",
+                            hintText = "",
+                            isClickable = true,
+                            isLongClickable = false,
+                            isEditable = false,
+                            isScrollable = false,
+                            isFocused = false,
+                            isEnabled = true,
+                            bounds = android.graphics.Rect(100, 400, 260, 580)
+                        )
+                    )
+                )
+                "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    windowId = 303,
+                    titleGuess = "WhatsApp Chats"
+                )
+                else -> null
+            }
+        }
+
+        try {
+            // =========================================================================
+            // 1. TRUE CAPTURE READINESS BY OWNER + GENERATION & STALE CALLBACK GUARD
+            //    - Historical lastCaptureReadyElapsedMs > 0 must NOT make
+            //      isCaptureCurrentlyReady() true after speech ends or handoff occurs.
+            //    - Stale RecognitionListener callbacks from an older generation must
+            //      be ignored.
+            // =========================================================================
+            vm.launchJarvisAndStartListening(reason = "TEST_LAUNCH_TURN_1")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+
+            val gen1 = liveEngine.activeCaptureGeneration
+            assertTrue("Launch Jarvis must assign a positive capture generation", gen1 > 0L)
+            assertFalse(
+                "Capture must NOT be ready before SpeechRecognizer.onReadyForSpeech fires",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.STARTING,
+                liveEngine.observedCaptureState.value
+            )
+
+            // Create a stale listener for an older generation and verify its callbacks are ignored
+            val staleListener = liveEngine.createRecognitionListenerForGenerationForTest(gen1 - 1L)
+            val staleIgnoredBefore = liveEngine.staleRecognitionCallbacksIgnoredCount
+            staleListener.onReadyForSpeech(android.os.Bundle())
+            assertTrue(
+                "Stale generation callback must increment staleRecognitionCallbacksIgnoredCount",
+                liveEngine.staleRecognitionCallbacksIgnoredCount > staleIgnoredBefore
+            )
+            assertFalse(
+                "Stale onReadyForSpeech must NOT mark current capture ready",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+
+            // Now fire real onReadyForSpeech on the active generation listener
+            val turn1Listener = liveEngine.activeRecognitionListenerForTest
+            assertNotNull("Active RecognitionListener must be created for Turn 1", turn1Listener)
+            turn1Listener!!.onReadyForSpeech(android.os.Bundle())
+
+            assertTrue(
+                "Current generation onReadyForSpeech must mark capture ready",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+            assertEquals(gen1, liveEngine.readyCaptureGeneration)
+            assertEquals(
+                com.example.engine.MicComponentOwner.COMMAND_WINDOW_CAPTURE,
+                liveEngine.readyCaptureOwner
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.LISTENING,
+                liveEngine.observedCaptureState.value
+            )
+
+            // =========================================================================
+            // 2. GREETING IN OPEN COMMAND WINDOW & AUTOMATIC TURN-2 CAPTURE HANDOFF
+            //    - "Assalam o Alaikum" has no "jarvis"/"kholo"/"open" keyword but must
+            //      be accepted inside the open command window.
+            //    - onEndOfSpeech must immediately clear hardware capture readiness even
+            //      though lastCaptureReadyElapsedMs > 0.
+            //    - After TTS playback completes and echo cooldown drains, bounded
+            //      conversation mode must automatically start Turn 2 capture.
+            // =========================================================================
+            spokenEngineCalls.clear()
+            turn1Listener.onBeginningOfSpeech()
+            val partial1 = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("Assalam o")
+                )
+            }
+            turn1Listener.onPartialResults(partial1)
+            turn1Listener.onEndOfSpeech()
+
+            assertFalse(
+                "onEndOfSpeech must clear current capture readiness despite historical timestamp > 0",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+
+            val final1 = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("Assalam o Alaikum")
+                )
+            }
+            turn1Listener.onResults(final1)
+
+            val turn1Deadline = System.currentTimeMillis() + 3_000L
+            while (spokenEngineCalls.isEmpty() && System.currentTimeMillis() < turn1Deadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertTrue(
+                "Greeting 'Assalam o Alaikum' in open command window must produce spoken reply",
+                spokenEngineCalls.isNotEmpty()
+            )
+            val turn1Utterance = spokenEngineCalls.last()
+            assertTrue(
+                "Greeting reply must be warm/natural (${turn1Utterance.first})",
+                turn1Utterance.first.contains("Wa Alaikum Assalam", ignoreCase = true) ||
+                    turn1Utterance.first.contains("وعلیکم السلام")
+            )
+
+            // Complete TTS playback for Turn 1
+            ttsManager.handleUtteranceStart(turn1Utterance.second)
+            ttsManager.handleUtteranceDone(turn1Utterance.second)
+
+            // Wait for post-turn echo cooldown + bounded conversation handoff to start Turn 2 capture
+            val handoffDeadline = System.currentTimeMillis() + 3_000L
+            while (liveEngine.activeCaptureGeneration <= gen1 && System.currentTimeMillis() < handoffDeadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(25)
+            }
+            val gen2 = liveEngine.activeCaptureGeneration
+            assertTrue(
+                "Bounded conversation mode must automatically start Turn 2 capture (gen2=$gen2 > gen1=$gen1)",
+                gen2 > gen1
+            )
+            assertTrue(
+                "Command window must remain open for Turn 2 in bounded conversation mode",
+                coord.isCommandWindowOpen()
+            )
+            assertFalse(
+                "Turn 2 capture must start in STARTING (not ready until onReadyForSpeech)",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+
+            // =========================================================================
+            // 3. SECOND SPOKEN COMMAND IN SEQUENCE: URDU-SCRIPT QUESTION WITHOUT KEYWORD
+            //    - User asks "2 + 2 کیا ہوتا ہے؟" in Urdu script without tapping Mic again.
+            //    - Must be accepted (not rejected as ordinary conversation/TV audio).
+            //    - Rejection/acceptance diagnostic reason must not leak private transcript.
+            // =========================================================================
+            val turn2Listener = liveEngine.activeRecognitionListenerForTest
+            assertNotNull("Turn 2 RecognitionListener must be bound", turn2Listener)
+            turn2Listener!!.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.LISTENING,
+                liveEngine.observedCaptureState.value
+            )
+
+            val evalUrdu = coord.evaluateAudioCandidate(
+                context = context,
+                transcript = "2 + 2 کیا ہوتا ہے؟"
+            )
+            assertEquals(
+                "Urdu-script question in open window must be accepted",
+                com.example.engine.WakeSpeechCandidateDecision.COMMAND_ACCEPTED_IN_WINDOW,
+                evalUrdu.decision
+            )
+            assertFalse(
+                "Decision reason must not leak private transcript text",
+                evalUrdu.reason.contains("کیا ہوتا")
+            )
+
+            spokenEngineCalls.clear()
+            turn2Listener.onBeginningOfSpeech()
+            turn2Listener.onEndOfSpeech()
+            val final2 = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("2 + 2 کیا ہوتا ہے؟")
+                )
+            }
+            turn2Listener.onResults(final2)
+
+            val turn2Deadline = System.currentTimeMillis() + 3_000L
+            while (spokenEngineCalls.isEmpty() && System.currentTimeMillis() < turn2Deadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertTrue(
+                "Second spoken command in sequence ('2 + 2 کیا ہوتا ہے؟') must produce spoken answer",
+                spokenEngineCalls.isNotEmpty()
+            )
+            val turn2Utterance = spokenEngineCalls.last()
+            assertTrue(
+                "Urdu math question must be answered with 4 (${turn2Utterance.first})",
+                turn2Utterance.first.contains("4")
+            )
+            ttsManager.handleUtteranceStart(turn2Utterance.second)
+            ttsManager.handleUtteranceDone(turn2Utterance.second)
+            assertEquals(
+                "Registered command TTS listeners must be cleaned up on completion",
+                0,
+                ttsManager.getRegisteredCommandListenerCount()
+            )
+
+            // =========================================================================
+            // 4. WAKE WORD ALONE ("Jarvis") FOLLOWED BY COMMAND ("WhatsApp kholo")
+            //    & TRUTHFUL WAKE-ONLY STANDBY STATE
+            //    - When bounded conversation mode ends and local acoustic wake detector
+            //      is unavailable, standby must report IDLE (never fake LISTENING).
+            //    - Saying "Jarvis" alone must start a new active capture generation so
+            //      the next utterance ("WhatsApp kholo") is captured and executed while
+            //      preserving Notes "draft 42" return-to-origin.
+            // =========================================================================
+            liveEngine.isBoundedConversationModeActive = false
+            liveEngine.boundedConversationRemainingTurns = 0
+            coord.returnToWakeOnlyListening("TEST_END_BOUNDED_CONVERSATION")
+            liveEngine.stopNativeSpeechRecognizerLoop()
+
+            val readinessReport = coord.inspectWakeAndAssistantReadiness(context)
+            assertFalse(
+                "isLocalWakeDetectorReady must be false when acoustic detector is absent",
+                readinessReport.isLocalWakeDetectorReady
+            )
+
+            val genBeforeWakeOnly = liveEngine.activeCaptureGeneration
+            kotlinx.coroutines.runBlocking {
+                liveEngine.processConsentedVoiceAudioTurn("Jarvis")
+            }
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+
+            val genAfterWakeOnly = liveEngine.activeCaptureGeneration
+            assertTrue(
+                "Wake-word-only 'Jarvis' must start a new command capture generation (before=$genBeforeWakeOnly, after=$genAfterWakeOnly)",
+                genAfterWakeOnly > genBeforeWakeOnly
+            )
+            assertTrue(
+                "Wake-word-only 'Jarvis' must open the active command window",
+                coord.isCommandWindowOpen()
+            )
+
+            // Fire onReadyForSpeech for the wake-triggered capture and speak "WhatsApp kholo"
+            liveEngine.activeRecognitionListenerForTest?.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+
+            screenPhase = "NOTEPAD_DRAFT_42"
+            openAppCount = 0
+            returnToOriginCount = 0
+            spokenEngineCalls.clear()
+            val wakeFollowupBundle = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("WhatsApp kholo")
+                )
+            }
+            liveEngine.activeRecognitionListenerForTest?.onBeginningOfSpeech()
+            liveEngine.activeRecognitionListenerForTest?.onEndOfSpeech()
+            liveEngine.activeRecognitionListenerForTest?.onResults(wakeFollowupBundle)
+
+            val waDeadline = System.currentTimeMillis() + 3_000L
+            while ((openAppCount == 0 || spokenEngineCalls.isEmpty()) &&
+                System.currentTimeMillis() < waDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertEquals(1, openAppCount)
+            assertEquals("WHATSAPP_FOREGROUND", screenPhase)
+            assertEquals("com.example.notepad", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName)
+            assertEquals("draft 42", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body"))
+            assertTrue("WhatsApp kholo after 'Jarvis' must produce spoken confirmation", spokenEngineCalls.isNotEmpty())
+            val waUtterance = spokenEngineCalls.last()
+            ttsManager.handleUtteranceStart(waUtterance.second)
+            ttsManager.handleUtteranceDone(waUtterance.second)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+
+            spokenEngineCalls.clear()
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "Uss previous screen par le kar jao jahan main pehle work kar raha tha",
+                    commandIdOverride = "cmd_return_after_wake_whatsapp"
+                )
+            }
+            assertEquals("NOTEPAD_DRAFT_42", screenPhase)
+            assertTrue(returnToOriginCount >= 1)
+            assertEquals(
+                "Notes draft 42 must remain intact after WhatsApp -> return_to_origin",
+                "draft 42",
+                com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body")
+            )
+            if (spokenEngineCalls.isNotEmpty()) {
+                val retUtt = spokenEngineCalls.last().second
+                ttsManager.handleUtteranceStart(retUtt)
+                ttsManager.handleUtteranceDone(retUtt)
+                coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+            }
+
+            // =========================================================================
+            // 5. DELAYED PCM CHUNKS SEPARATED BY A 500ms GAP BEFORE turnComplete
+            //    - Chunk 1 plays -> 500ms empty-queue gap before server turnComplete ->
+            //      must NOT complete early -> Chunk 2 arrives after 500ms and plays ->
+            //      server turnComplete arrives -> hardware playback drains -> COMPLETED.
+            // =========================================================================
+            val sentWsFrames = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val mockWs = object : okhttp3.WebSocket {
+                override fun request(): okhttp3.Request =
+                    okhttp3.Request.Builder().url("wss://example.com/live").build()
+                override fun queueSize(): Long = 0L
+                override fun send(text: String): Boolean {
+                    sentWsFrames.add(text)
+                    return true
+                }
+                override fun send(bytes: okio.ByteString): Boolean = true
+                override fun close(code: Int, reason: String?): Boolean = true
+                override fun cancel() {}
+            }
+            val wsGen = liveEngine.attachLiveWebSocketForTest(mockWs, ready = true)
+            val gapCmdId = "cmd_pcm_500ms_gap"
+            liveEngine.startNewCommandTurn(
+                commandId = gapCmdId,
+                utterance = "Jarvis explain photosynthesis"
+            )
+
+            val pcmChunkBytes = ByteArray(480) { 10 }
+            val pcmChunkBase64 = android.util.Base64.encodeToString(pcmChunkBytes, android.util.Base64.NO_WRAP)
+            val pcmFrameJson = """{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"$pcmChunkBase64"}}]}}}"""
+
+            // Enqueue Chunk 1 and write it to hardware track
+            liveEngine.simulateLiveWebSocketMessageForTest(pcmFrameJson)
+            val writtenChunk1 = liveEngine.drainApplicationPcmQueueToHardwareBufferForTest()
+            assertEquals(1, writtenChunk1)
+
+            val diagAfterChunk1 = liveEngine.getCommandAudioDiagnostic(gapCmdId)!!
+            assertEquals(com.example.engine.CommandSpeechOutputState.STARTED, diagAfterChunk1.outputState)
+            assertEquals(1, diagAfterChunk1.audioFramesQueued)
+            assertEquals(1, diagAfterChunk1.audioFramesPlayed)
+            assertEquals(480, diagAfterChunk1.pcmBytesWrittenToHardware)
+            assertFalse(diagAfterChunk1.serverTurnCompleteObserved)
+
+            // Simulate 500ms empty-queue gap (10 ticks x 50ms) BEFORE server turnComplete
+            repeat(10) {
+                val completedEarly = liveEngine.pollEmptyPcmQueueTickForTest(gapCmdId)
+                assertFalse(
+                    "Empty PCM queue during 500ms inter-chunk gap before turnComplete must NOT mark command COMPLETED",
+                    completedEarly
+                )
+            }
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.STARTED,
+                liveEngine.getCommandAudioDiagnostic(gapCmdId)!!.outputState
+            )
+
+            // Enqueue Chunk 2 after the 500ms gap; it must be accepted and played
+            liveEngine.simulateLiveWebSocketMessageForTest(pcmFrameJson)
+            val writtenChunk2 = liveEngine.drainApplicationPcmQueueToHardwareBufferForTest()
+            assertEquals(1, writtenChunk2)
+
+            val diagAfterChunk2 = liveEngine.getCommandAudioDiagnostic(gapCmdId)!!
+            assertEquals(2, diagAfterChunk2.audioFramesQueued)
+            assertEquals(2, diagAfterChunk2.audioFramesPlayed)
+            assertEquals(960, diagAfterChunk2.pcmBytesWrittenToHardware)
+            assertEquals(com.example.engine.CommandSpeechOutputState.STARTED, diagAfterChunk2.outputState)
+
+            // Now deliver server turnComplete and drain the empty queue ticks
+            liveEngine.simulateLiveWebSocketMessageForTest("""{"serverContent":{"turnComplete":true}}""")
+            assertTrue(liveEngine.getCommandAudioDiagnostic(gapCmdId)!!.serverTurnCompleteObserved)
+
+            var completedAfterTurnComplete = false
+            repeat(5) {
+                if (liveEngine.pollEmptyPcmQueueTickForTest(gapCmdId)) {
+                    completedAfterTurnComplete = true
+                }
+            }
+            assertTrue(
+                "Command must transition to COMPLETED after turnComplete + empty hardware drain",
+                completedAfterTurnComplete
+            )
+            val diagFinalGap = liveEngine.getCommandAudioDiagnostic(gapCmdId)!!
+            assertEquals(com.example.engine.CommandSpeechOutputState.COMPLETED, diagFinalGap.outputState)
+            assertTrue(diagFinalGap.hardwarePlaybackDrained)
+            assertEquals(com.example.engine.CommandTurnStallStage.NONE, diagFinalGap.stallStage)
+
+            // =========================================================================
+            // 6. AUDIOTRACK HARDWARE WRITE FAILURE (< 0) & BOUNDED LOCAL TTS RECOVERY
+            //    - When AudioTrack.write returns < 0, audioFramesPlayed remains 0,
+            //      AudioOutputManager releases the unplayed slot (does NOT block fallback),
+            //      and bounded local TTS recovery speaks once.
+            // =========================================================================
+            spokenEngineCalls.clear()
+            val hwFailCmdId = "cmd_pcm_hw_write_error"
+            liveEngine.startNewCommandTurn(
+                commandId = hwFailCmdId,
+                utterance = "2 + 2 kya hota hai?"
+            )
+            liveEngine.audioTrackWriteInterceptorForTest = { _, _, _ ->
+                android.media.AudioTrack.ERROR_DEAD_OBJECT
+            }
+
+            liveEngine.simulateLiveWebSocketMessageForTest(pcmFrameJson)
+            val writtenOnError = liveEngine.drainApplicationPcmQueueToHardwareBufferForTest()
+            assertEquals("When AudioTrack.write returns < 0, 0 chunks must be counted as written", 0, writtenOnError)
+
+            val hwFailDeadline = System.currentTimeMillis() + 2_500L
+            while (spokenEngineCalls.isEmpty() && System.currentTimeMillis() < hwFailDeadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertEquals(
+                "AudioTrack hardware write failure must recover via bounded local TTS without deduplication block",
+                1,
+                spokenEngineCalls.size
+            )
+            val hwFallbackCall = spokenEngineCalls.single()
+            ttsManager.handleUtteranceStart(hwFallbackCall.second)
+            ttsManager.handleUtteranceDone(hwFallbackCall.second)
+
+            val diagHwFail = liveEngine.getCommandAudioDiagnostic(hwFailCmdId)!!
+            assertEquals("Audio frames played must remain 0 when AudioTrack.write < 0", 0, diagHwFail.audioFramesPlayed)
+            assertTrue("pcmWriteErrorCount must be >= 1", diagHwFail.pcmWriteErrorCount >= 1)
+            assertEquals(com.example.engine.CommandSpeechOutputState.COMPLETED, diagHwFail.outputState)
+            assertEquals("ANDROID_TTS_FALLBACK", diagHwFail.actualOutputProvider)
+
+            liveEngine.audioTrackWriteInterceptorForTest = null
+
+            // =========================================================================
+            // 7. NETWORK / WEBSOCKET send=false & DISCONNECT BOUNDED RECOVERY
+            // =========================================================================
+            spokenEngineCalls.clear()
+            screenPhase = "NOTEPAD_DRAFT_42"
+            val rejectWs = object : okhttp3.WebSocket {
+                override fun request(): okhttp3.Request =
+                    okhttp3.Request.Builder().url("wss://example.com/live").build()
+                override fun queueSize(): Long = 0L
+                override fun send(text: String): Boolean = false
+                override fun send(bytes: okio.ByteString): Boolean = false
+                override fun close(code: Int, reason: String?): Boolean = true
+                override fun cancel() {}
+            }
+            liveEngine.attachLiveWebSocketForTest(rejectWs, ready = true)
+
+            val wsSendFalseCmdId = "cmd_ws_send_false_recovery"
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = wsSendFalseCmdId
+                )
+            }
+            val wsFailDeadline = System.currentTimeMillis() + 2_500L
+            while (spokenEngineCalls.isEmpty() && System.currentTimeMillis() < wsFailDeadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertEquals(1, spokenEngineCalls.size)
+            val wsFallbackUtterance = spokenEngineCalls.single()
+            ttsManager.handleUtteranceStart(wsFallbackUtterance.second)
+            ttsManager.handleUtteranceDone(wsFallbackUtterance.second)
+
+            val diagWsFail = liveEngine.getCommandAudioDiagnostic(wsSendFalseCmdId)!!
+            assertEquals("ANDROID_TTS_FALLBACK", diagWsFail.actualOutputProvider)
+            assertEquals(com.example.engine.CommandSpeechOutputState.COMPLETED, diagWsFail.outputState)
+
+            // =========================================================================
+            // 8. STALE WEBSOCKET AND TTS CALLBACKS IGNORED
+            // =========================================================================
+            val staleWsBefore = liveEngine.staleWebSocketCallbacksIgnoredCount
+            liveEngine.simulateWebSocketMessageFromSocketForTest(mockWs, wsGen - 1L, pcmFrameJson)
+            assertTrue(
+                "Stale WebSocket message from older generation must be ignored",
+                liveEngine.staleWebSocketCallbacksIgnoredCount > staleWsBefore
+            )
+
+            val staleTtsBefore = ttsManager.getStaleCallbacksRejectedCount()
+            ttsManager.handleUtteranceDone("utt_999999_stale_cmd")
+            assertTrue(
+                "Stale TTS utterance callback must be rejected",
+                ttsManager.getStaleCallbacksRejectedCount() > staleTtsBefore
+            )
+
+            // =========================================================================
+            // 9. DELIBERATE MUTE AND STOP CLEAR CAPTURE READINESS AND PIN STATE
+            // =========================================================================
+            liveEngine.attachLiveWebSocketForTest(null, ready = false)
+            vm.launchJarvisAndStartListening(reason = "RELAUNCH_FOR_MUTE_STOP_CHECK")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            liveEngine.activeRecognitionListenerForTest?.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+
+            vm.toggleLiveMicMute()
+            assertFalse(
+                "Deliberate Mute must immediately clear hardware capture readiness",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.MUTED,
+                vm.observedCaptureState.value
+            )
+
+            vm.stopAllWakeAndSpeechAndPinToDevice()
+            assertFalse(liveEngine.isCaptureCurrentlyReady())
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.DISARMED_STOPPED,
+                coord.lifecycleState.value
+            )
+            liveEngine.ensureSessionAliveOnResume()
+            assertFalse(
+                "ensureSessionAliveOnResume must never override deliberate Stop",
+                vm.isLiveSessionActive.value
+            )
+        } finally {
+            liveEngine.audioTrackWriteInterceptorForTest = null
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+            com.example.engine.AudioOutputManager.resetAll()
+            ttsManager.shutdown()
+        }
+    }
+
     private fun measuredMsOrZero(ms: Long): Long = if (ms >= 0L) ms else 0L
 }
+
 
 

@@ -155,7 +155,8 @@ data class WakeAndAssistantReadinessReport(
     val requiresTapToRearm: Boolean,
     val actualLifecycleState: WakeSpeechLifecycleState,
     val inputRoute: AudioInputRouteType,
-    val statusSummary: String
+    val statusSummary: String,
+    val isLocalWakeDetectorReady: Boolean = false
 )
 
 /**
@@ -593,17 +594,17 @@ class AssistantAudioStateMachine(
             }
         }
 
-        /**
-         * Detects ordinary background conversation between other people or TV/media audio
-         * so it is never executed as a command.
-         */
-        fun isOrdinaryConversationOrTvAudio(
-            utterance: String,
-            context: Context? = null
-        ): Boolean {
-            val cleaned = normalizeText(utterance)
-            if (cleaned.isEmpty()) return true
+        @Volatile
+        var isLocalAcousticWakeDetectorAvailable: Boolean = false
 
+        /**
+         * Detects explicit background TV broadcast or multi-person room chatter markers.
+         * Kept separate from open-window user speech so ordinary questions, greetings, and
+         * Urdu-script speech are never rejected inside an explicitly activated conversation/command window.
+         */
+        fun isExplicitBackgroundTvOrChatterAudio(utterance: String): Boolean {
+            val cleaned = normalizeText(utterance)
+            if (cleaned.isEmpty()) return false
             val tvOrChatterMarkers = listOf(
                 "breaking news",
                 "tonight at nine",
@@ -625,8 +626,32 @@ class AssistantAudioStateMachine(
                 "who scored the goal",
                 "mein abhi baat kar raha tha"
             )
-            if (tvOrChatterMarkers.any { cleaned.contains(it) }) {
+            return tvOrChatterMarkers.any { cleaned.contains(it) }
+        }
+
+        /**
+         * Detects ordinary background conversation between other people or TV/media audio
+         * so it is never executed as a command.
+         *
+         * When [windowOpen] is `true` (an explicitly activated command/conversation window or
+         * inline after wake word), we do NOT require a hardcoded keyword whitelist—ordinary
+         * questions, greetings, and Urdu-script utterances are accepted unless they match
+         * explicit TV/background-chatter broadcast markers.
+         */
+        fun isOrdinaryConversationOrTvAudio(
+            utterance: String,
+            context: Context? = null,
+            windowOpen: Boolean = true
+        ): Boolean {
+            val cleaned = normalizeText(utterance)
+            if (cleaned.isEmpty()) return true
+
+            if (isExplicitBackgroundTvOrChatterAudio(utterance)) {
                 return true
+            }
+
+            if (windowOpen) {
+                return false
             }
 
             if (context != null) {
@@ -641,17 +666,11 @@ class AssistantAudioStateMachine(
                 } catch (_: Exception) {
                     false
                 }
-                if (tasks.isEmpty() && !isReturnCmd && !matchesCancelOrStopPhrase(utterance) && !matchesSleepPhrase(utterance)) {
-                    val directAssistantMarkers = listOf(
-                        "jarvis", "omni", "tum", "aap", "you", "your", "mujhe", "mera", "meri",
-                        "tell me", "batao", "sunao", "joke", "waqt", "time", "date", "mosam", "weather"
-                    )
-                    if (directAssistantMarkers.none { cleaned.contains(it) }) {
-                        return true
-                    }
+                if (!tasks.isEmpty() || isReturnCmd || matchesCancelOrStopPhrase(utterance) || matchesSleepPhrase(utterance)) {
+                    return false
                 }
             }
-            return false
+            return true
         }
 
         internal fun normalizeText(input: String): String {
@@ -1103,6 +1122,20 @@ class GlobalWakeSpeechCoordinator {
         }
     }
 
+    /**
+     * Clears the post-speech tail timer after playback hardware/TTS drain has completed so the next
+     * bounded conversation turn's capture can start immediately, while preserving [recentAssistantSpeechPhrases]
+     * for phrase-level self-echo rejection.
+     */
+    fun clearTailCooldownAfterDrain() {
+        synchronized(lock) {
+            isAssistantSpeakingNow = false
+            activeSpeechOwnerToken = null
+            lastAssistantSpeechEndedAtMs = 0L
+            refreshLifecycleStateLocked()
+        }
+    }
+
     suspend fun <T> withRealPlaybackSuppression(
         spokenText: String,
         source: String = "PLAYBACK",
@@ -1263,16 +1296,17 @@ class GlobalWakeSpeechCoordinator {
                 )
             }
 
-            if (AssistantAudioStateMachine.isOrdinaryConversationOrTvAudio(remainderAfterWake, context)) {
+            if (AssistantAudioStateMachine.isOrdinaryConversationOrTvAudio(remainderAfterWake, context, windowOpen = true)) {
                 ignoredBackgroundConversationCounter.incrementAndGet()
                 returnToWakeOnlyListening("IGNORED_NON_COMMAND_AFTER_WAKE")
+                Log.d("AssistantAudioStateMachine", "evaluateAudioCandidate rejected: IGNORED_ORDINARY_CONVERSATION_OR_TV_AUDIO (after_wake)")
                 return WakeSpeechEvaluationResult(
                     decision = WakeSpeechCandidateDecision.IGNORED_ORDINARY_CONVERSATION_OR_TV_AUDIO,
                     shouldExecuteCommand = false,
                     extractedCommandText = "",
                     lifecycleStateAfter = _lifecycleState.value,
                     micOwnerAfter = _activeMicOwner.value,
-                    reason = "Ignored non-command chatter after wake phrase"
+                    reason = "Ignored background TV/chatter audio after wake phrase"
                 )
             }
 
@@ -1286,22 +1320,23 @@ class GlobalWakeSpeechCoordinator {
                 extractedCommandText = remainderAfterWake,
                 lifecycleStateAfter = _lifecycleState.value,
                 micOwnerAfter = _activeMicOwner.value,
-                reason = "Wake word + inline command accepted -> executing '$remainderAfterWake' & returning to wake-only"
+                reason = "Wake word + inline command accepted"
             )
         }
 
         val effectiveCommand = remainderAfterWake.ifBlank { trimmed }
         if (effectiveCommand.isBlank() ||
-            AssistantAudioStateMachine.isOrdinaryConversationOrTvAudio(effectiveCommand, context)
+            AssistantAudioStateMachine.isOrdinaryConversationOrTvAudio(effectiveCommand, context, windowOpen = true)
         ) {
             ignoredBackgroundConversationCounter.incrementAndGet()
+            Log.d("AssistantAudioStateMachine", "evaluateAudioCandidate rejected: IGNORED_ORDINARY_CONVERSATION_OR_TV_AUDIO (open_window)")
             return WakeSpeechEvaluationResult(
                 decision = WakeSpeechCandidateDecision.IGNORED_ORDINARY_CONVERSATION_OR_TV_AUDIO,
                 shouldExecuteCommand = false,
                 extractedCommandText = "",
                 lifecycleStateAfter = _lifecycleState.value,
                 micOwnerAfter = _activeMicOwner.value,
-                reason = "Ignored ordinary conversation or TV audio during open command window"
+                reason = "Ignored background TV or chatter audio during open command window"
             )
         }
 
@@ -1315,7 +1350,7 @@ class GlobalWakeSpeechCoordinator {
             extractedCommandText = effectiveCommand,
             lifecycleStateAfter = _lifecycleState.value,
             micOwnerAfter = _activeMicOwner.value,
-            reason = "Command accepted inside active command window -> executing '$effectiveCommand' & returning to wake-only"
+            reason = "Command accepted inside active command window"
         )
     }
 
@@ -1512,13 +1547,15 @@ class GlobalWakeSpeechCoordinator {
         }
 
         val actualState = _lifecycleState.value
+        val detectorReady = AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable
         val requiresTapToRearm = actualState == WakeSpeechLifecycleState.NEEDS_TAP_TO_REARM || needsRearmFlag
         val canActivateBg = hasMicPerm &&
             armedPersisted &&
             !stoppedPersisted &&
             !mutedPersisted &&
             hasFgsMicType &&
-            (serviceRunning || roleAssistantHeld || visReady)
+            (serviceRunning || roleAssistantHeld || visReady) &&
+            detectorReady
 
         val summary = when (actualState) {
             WakeSpeechLifecycleState.PERMISSION_REVOKED ->
@@ -1534,7 +1571,11 @@ class GlobalWakeSpeechCoordinator {
             WakeSpeechLifecycleState.COMMAND_WINDOW_OPEN ->
                 "Command window open (${inputRoute.label}) — say your command or 'bas/stop/cancel'."
             WakeSpeechLifecycleState.WAKE_ONLY_LISTENING ->
-                "Wake-only listening active for 'Jarvis' (${inputRoute.label})."
+                if (detectorReady) {
+                    "Wake-only listening active for 'Jarvis' (${inputRoute.label})."
+                } else {
+                    "Standby (${inputRoute.label}) — acoustic wake detector not active; tap Launch Jarvis or Mic to speak."
+                }
         }
 
         return WakeAndAssistantReadinessReport(
@@ -1550,7 +1591,8 @@ class GlobalWakeSpeechCoordinator {
             requiresTapToRearm = requiresTapToRearm,
             actualLifecycleState = actualState,
             inputRoute = inputRoute,
-            statusSummary = summary
+            statusSummary = summary,
+            isLocalWakeDetectorReady = detectorReady
         )
     }
 
