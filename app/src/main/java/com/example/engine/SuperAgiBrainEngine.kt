@@ -872,21 +872,34 @@ object SuperAgiBrainEngine {
             else -> NluLanguageEnum.ROMAN_URDU_MIXED
         }
 
-        // If device tasks were found and there's no separate complex question attached, return immediately (<5ms latency!)
+        // If device tasks or return-to-origin commands were found and there's no separate complex question attached, return immediately (<5ms latency!)
+        val isReturnToOriginCmd = try {
+            com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(trimmed)
+        } catch (_: Exception) {
+            false
+        }
         val alsoHasComplexQuestion = Regex(
             "\\b(explain|why|how does|write code|calculate|kya hota hai|tafseel se batao)\\b",
             RegexOption.IGNORE_CASE
         ).containsMatchIn(lower)
 
-        if (extractedTasks.isNotEmpty() && !alsoHasComplexQuestion) {
-            val reply = buildSpokenSummaryForTasks(extractedTasks, detectedLang)
+        if ((extractedTasks.isNotEmpty() || isReturnToOriginCmd) && !alsoHasComplexQuestion) {
+            val reply = if (extractedTasks.isNotEmpty()) {
+                buildSpokenSummaryForTasks(extractedTasks, detectedLang)
+            } else {
+                when (detectedLang) {
+                    NluLanguageEnum.URDU_SCRIPT -> "پچھلی ونڈو پر واپس جا رہا ہوں۔"
+                    NluLanguageEnum.ENGLISH -> "Returning to the previous app."
+                    else -> "Pichli window par wapas ja raha hoon."
+                }
+            }
             recordTurnInMemory(trimmed, reply)
             return@withContext DeterministicNluEngine.enforceHardGuardrailValidator(
                 DeterministicNluResponse(
                     verbatimTranscript = trimmed,
                     detectedLanguage = detectedLang,
                     audioClarityScore = 98,
-                    chainOfThoughtReasoning = "SuperAgiBrainEngine extracted ${extractedTasks.size} device task(s) with <5ms zero-latency execution.",
+                    chainOfThoughtReasoning = "SuperAgiBrainEngine extracted ${extractedTasks.size} device task(s) (returnToOrigin=$isReturnToOriginCmd) with <5ms zero-latency execution.",
                     intentCategory = if (extractedTasks.size > 1) NluIntentCategory.MULTI_STEP_WORKFLOW else NluIntentCategory.SINGLE_DEVICE_TASK,
                     confidenceScore = 99,
                     tasksToExecute = extractedTasks,
@@ -895,8 +908,12 @@ object SuperAgiBrainEngine {
             )
         }
 
-        // 2. Try Live Cloud Gemini (REST with BuildConfig.GEMINI_API_KEY or Firebase AI Logic SDK)
-        val cloudReply = tryCloudGeminiAgiAnswer(context, trimmed, detectedLang)
+        // 2. Try Live Cloud Gemini (REST with BuildConfig.GEMINI_API_KEY or Firebase AI Logic SDK) only when online
+        val cloudReply = if (OmniAutonomousCoreEngine.isNetworkOnline.value) {
+            tryCloudGeminiAgiAnswer(context, trimmed, detectedLang)
+        } else {
+            null
+        }
         if (!cloudReply.isNullOrBlank()) {
             recordTurnInMemory(trimmed, cloudReply)
             return@withContext DeterministicNluEngine.enforceHardGuardrailValidator(
@@ -945,6 +962,9 @@ object SuperAgiBrainEngine {
         userPrompt: String,
         detectedLang: NluLanguageEnum
     ): String? {
+        if (!OmniAutonomousCoreEngine.isNetworkOnline.value) {
+            return null
+        }
         val recentMemory = getRecentMemorySummary()
         val systemPrompt = buildString {
             appendLine("You are OmniVoice Jarvis AGI — a super-intelligent, fast, deeply analytical AI assistant combining the capabilities of Google Gemini and ChatGPT with full Android OS control.")
@@ -984,8 +1004,8 @@ object SuperAgiBrainEngine {
                     }
                     val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                         requestMethod = "POST"
-                        connectTimeout = 2200
-                        readTimeout = 3500
+                        connectTimeout = 1400
+                        readTimeout = 2000
                         doOutput = true
                         setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     }
@@ -1008,11 +1028,13 @@ object SuperAgiBrainEngine {
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Cloud Gemini REST ($modelName) skipped: ${e.message}")
+                    return null
                 }
             }
+            return null
         }
 
-        // Path B: Firebase AI Logic SDK (single fast model call with timeout guard)
+        // Path B: Firebase AI Logic SDK (single fast model call with bounded 1800ms timeout guard)
         for (modelName in fastLiveModels) {
             try {
                 val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
@@ -1023,7 +1045,7 @@ object SuperAgiBrainEngine {
                     },
                     systemInstruction = content { text(systemPrompt) }
                 )
-                val response = kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                val response = kotlinx.coroutines.withTimeoutOrNull(1800L) {
                     model.generateContent(userPrompt)
                 }
                 val text = response?.text?.trim()

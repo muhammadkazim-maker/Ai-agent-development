@@ -927,6 +927,28 @@ class GlobalWakeSpeechCoordinator {
         Log.d("WakeSpeechCoord", "Command window OPENED for ${durationMs}ms ($reason)")
     }
 
+    /**
+     * Extends an already-open command window when speech onset or partial recognition is observed,
+     * ensuring natural Urdu/mixed mid-sentence pauses never cause the command window to expire
+     * while the user is actively speaking.
+     */
+    fun extendCommandWindowOnSpeechActivity(
+        nowMs: Long = System.currentTimeMillis(),
+        extensionMs: Long = AssistantAudioStateMachine.DEFAULT_COMMAND_WINDOW_TIMEOUT_MS
+    ): Boolean {
+        synchronized(lock) {
+            if (!_isCommandWindowOpenFlow.value || _isStoppedByUserFlow.value || _isDeviceMutedFlow.value) {
+                return false
+            }
+            val candidateExpiry = nowMs + extensionMs.coerceAtLeast(3_000L)
+            if (candidateExpiry > commandWindowExpiresAtMs) {
+                commandWindowExpiresAtMs = candidateExpiry
+            }
+            refreshLifecycleStateLocked()
+            return true
+        }
+    }
+
     fun closeCommandWindow() {
         synchronized(lock) {
             _isCommandWindowOpenFlow.value = false
@@ -936,11 +958,16 @@ class GlobalWakeSpeechCoordinator {
     }
 
     fun isCommandWindowOpen(nowMs: Long = System.currentTimeMillis()): Boolean {
+        var releaseCb: (() -> Unit)? = null
         synchronized(lock) {
             if (!_isCommandWindowOpenFlow.value) return false
             if (commandWindowExpiresAtMs in 1..nowMs) {
                 _isCommandWindowOpenFlow.value = false
                 commandWindowExpiresAtMs = 0L
+                val prevOwner = _activeMicOwner.value
+                if (prevOwner == MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
+                    releaseCb = activeOwnerReleaseCallbacks.remove(prevOwner)
+                }
                 if (_isUserArmedFlow.value && !_isStoppedByUserFlow.value && !_isDeviceMutedFlow.value) {
                     _activeMicOwner.value = MicComponentOwner.WAKE_WORD_SERVICE
                     currentActiveOwnersCount = 1
@@ -949,18 +976,28 @@ class GlobalWakeSpeechCoordinator {
                     currentActiveOwnersCount = 0
                 }
                 refreshLifecycleStateLocked()
-                return false
+            } else {
+                return true
             }
-            return true
         }
+        try {
+            releaseCb?.invoke()
+        } catch (_: Exception) {
+        }
+        return false
     }
 
     fun checkCommandWindowTimeout(nowMs: Long = System.currentTimeMillis()): Boolean {
+        var releaseCb: (() -> Unit)? = null
         synchronized(lock) {
             if (!_isCommandWindowOpenFlow.value) return false
             if (commandWindowExpiresAtMs in 1..nowMs) {
                 _isCommandWindowOpenFlow.value = false
                 commandWindowExpiresAtMs = 0L
+                val prevOwner = _activeMicOwner.value
+                if (prevOwner == MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
+                    releaseCb = activeOwnerReleaseCallbacks.remove(prevOwner)
+                }
                 if (_isUserArmedFlow.value && !_isStoppedByUserFlow.value && !_isDeviceMutedFlow.value) {
                     _activeMicOwner.value = MicComponentOwner.WAKE_WORD_SERVICE
                     currentActiveOwnersCount = 1
@@ -969,16 +1006,26 @@ class GlobalWakeSpeechCoordinator {
                     currentActiveOwnersCount = 0
                 }
                 refreshLifecycleStateLocked()
-                return true
+            } else {
+                return false
             }
-            return false
         }
+        try {
+            releaseCb?.invoke()
+        } catch (_: Exception) {
+        }
+        return true
     }
 
     fun returnToWakeOnlyListening(reason: String = "COMMAND_COMPLETED_OR_CANCELED") {
+        var releaseCb: (() -> Unit)? = null
         synchronized(lock) {
             _isCommandWindowOpenFlow.value = false
             commandWindowExpiresAtMs = 0L
+            val prevOwner = _activeMicOwner.value
+            if (prevOwner == MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
+                releaseCb = activeOwnerReleaseCallbacks.remove(prevOwner)
+            }
             if (_isUserArmedFlow.value && !_isStoppedByUserFlow.value && !_isDeviceMutedFlow.value) {
                 _activeMicOwner.value = MicComponentOwner.WAKE_WORD_SERVICE
                 currentActiveOwnersCount = 1
@@ -987,6 +1034,10 @@ class GlobalWakeSpeechCoordinator {
                 currentActiveOwnersCount = 0
             }
             refreshLifecycleStateLocked()
+        }
+        try {
+            releaseCb?.invoke()
+        } catch (_: Exception) {
         }
         Log.d("WakeSpeechCoord", "Returned to WAKE_ONLY_LISTENING ($reason)")
     }
@@ -1440,7 +1491,13 @@ class GlobalWakeSpeechCoordinator {
             _isStoppedByUserFlow.value = stoppedPersisted
             _isDeviceMutedFlow.value = mutedPersisted
 
-            if (!hasMicPerm && (armedPersisted || serviceRunning || _activeMicOwner.value != MicComponentOwner.NONE)) {
+            if (!hasMicPerm && (
+                    armedPersisted ||
+                        serviceRunning ||
+                        _activeMicOwner.value != MicComponentOwner.NONE ||
+                        _lifecycleState.value == WakeSpeechLifecycleState.PERMISSION_REVOKED
+                    )
+            ) {
                 releaseAllMicrophoneOwners()
                 _lifecycleState.value = WakeSpeechLifecycleState.PERMISSION_REVOKED
             } else if (stoppedPersisted) {

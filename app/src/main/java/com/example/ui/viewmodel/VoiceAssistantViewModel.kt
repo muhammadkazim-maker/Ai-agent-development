@@ -107,6 +107,8 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
 
     // --- Official Gemini Live Voice Session Flows (`BidiGenerateContent` / `ai.live.connect`) ---
     val liveConnectionState: StateFlow<LiveConnectionState> = omniLiveEngine.connectionState
+    val observedCaptureState: StateFlow<com.example.engine.ObservedAssistantCaptureState> = omniLiveEngine.observedCaptureState
+    val captureErrorDetail: StateFlow<String> = omniLiveEngine.captureErrorDetail
     val isLiveSessionActive: StateFlow<Boolean> = omniLiveEngine.isSessionActive
     val isLiveMicMuted: StateFlow<Boolean> = omniLiveEngine.isMicMuted
     val selectedLiveVoice: StateFlow<GeminiLiveVoice> = omniLiveEngine.selectedVoice
@@ -446,6 +448,10 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         coord.openCommandWindow(reason = "WAKE_WORD_TRIGGERED_JARVIS")
         if (isLiveSessionActive.value) {
             OmniAutonomousCoreEngine.resetInactivityTimer()
+            omniLiveEngine.launchSessionAndStartCommandListening(
+                reason = "WAKE_WORD_TRIGGERED_JARVIS",
+                openBoundedCommandWindow = true
+            )
             return
         }
         startListeningForCommand()
@@ -455,10 +461,14 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         val coord = AssistantAudioStateMachine.shared
         coord.armUserSessionAndPersist(context, "USER_START_LISTENING_FOR_COMMAND")
         coord.openCommandWindow(reason = "EXPLICIT_USER_COMMAND_WINDOW")
-        // Single-owner microphone rule: never start legacy STT recording while Gemini Live WebSocket owns the mic
+        // Single-owner microphone rule: when Gemini Live session is active, route command capture through OmniLiveSessionEngine
         if (isLiveSessionActive.value) {
             sttManager.stopListening()
             OmniAutonomousCoreEngine.resetInactivityTimer()
+            omniLiveEngine.launchSessionAndStartCommandListening(
+                reason = "EXPLICIT_USER_COMMAND_WINDOW",
+                openBoundedCommandWindow = true
+            )
             return
         }
         // Prevent duplicate listening session if already listening
@@ -1569,17 +1579,37 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
         refreshWakeAndSpeechState()
     }
 
-    fun startGeminiLiveSession(voice: GeminiLiveVoice = selectedLiveVoice.value) {
-        AssistantAudioStateMachine.shared.armUserSessionAndPersist(context, "USER_STARTED_GEMINI_LIVE")
+    /**
+     * Unified idempotent explicit launch + command-listening operation.
+     * Arms the session, pauses WakeWordForegroundService so it does not steal mic ownership,
+     * initializes the session, acquires the command microphone owner, starts actual capture,
+     * and opens a bounded initial command window without requiring a second microphone tap.
+     */
+    fun launchJarvisAndStartListening(
+        reason: String = "EXPLICIT_USER_LAUNCH",
+        voice: GeminiLiveVoice = selectedLiveVoice.value,
+        openBoundedCommandWindow: Boolean = true
+    ): Boolean {
+        _isHandsFreeAlwaysOn.value = true
         WakeWordForegroundService.pause(context, pinDeviceMute = false)
         sttManager.stopListening()
         ttsManager.stop()
         OmniAutonomousCoreEngine.resetInactivityTimer()
-        if (isLiveSessionActive.value && operatingMode.value != OmniOperatingMode.STATE_SLEEP_STANDBY) {
-            return
-        }
-        omniLiveEngine.selectVoice(voice)
-        omniLiveEngine.startLiveSession()
+        val started = omniLiveEngine.launchSessionAndStartCommandListening(
+            reason = reason,
+            voice = voice,
+            openBoundedCommandWindow = openBoundedCommandWindow
+        )
+        refreshWakeAndSpeechState()
+        return started
+    }
+
+    fun startGeminiLiveSession(voice: GeminiLiveVoice = selectedLiveVoice.value) {
+        launchJarvisAndStartListening(
+            reason = "USER_STARTED_GEMINI_LIVE",
+            voice = voice,
+            openBoundedCommandWindow = true
+        )
     }
 
     fun endGeminiLiveSession() {

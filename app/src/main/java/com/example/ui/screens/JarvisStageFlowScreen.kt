@@ -118,8 +118,8 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -199,6 +199,8 @@ fun JarvisStageFlowScreen(
     val isPermsCompleted by vaultManager.isPermissionsCompleted.collectAsState()
     val isLiveActive by viewModel.isLiveSessionActive.collectAsState()
     val liveState by viewModel.liveConnectionState.collectAsState()
+    val observedCaptureState by viewModel.observedCaptureState.collectAsState()
+    val captureErrorDetail by viewModel.captureErrorDetail.collectAsState()
     val selectedVoice by viewModel.selectedLiveVoice.collectAsState()
     val inputRms by viewModel.liveInputRms.collectAsState()
     val outputRms by viewModel.liveOutputRms.collectAsState()
@@ -271,18 +273,18 @@ fun JarvisStageFlowScreen(
             vaultManager.markPermissionsCompleted()
             when (action) {
                 "START_JARVIS_LIVE" -> {
-                    viewModel.armJarvisWakeAndSpeechSession()
-                    viewModel.startGeminiLiveSession()
+                    viewModel.launchJarvisAndStartListening(reason = "PERMISSION_GRANTED_LAUNCH_JARVIS")
                     currentStage = JarvisStage.STAGE_C_CORNER_ORB
                 }
                 "ARM_WAKE_ONLY" -> {
                     viewModel.armJarvisWakeAndSpeechSession()
                 }
                 "VOICE_LISTEN_WINDOW" -> {
-                    viewModel.armJarvisWakeAndSpeechSession()
-                    viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
+                    viewModel.launchJarvisAndStartListening(reason = "PERMISSION_GRANTED_BOTTOM_MIC")
                 }
             }
+        } else {
+            viewModel.refreshWakeAndSpeechState()
         }
     }
 
@@ -342,17 +344,36 @@ fun JarvisStageFlowScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
+                        val effectiveStatusLabel = when (observedCaptureState) {
+                            com.example.engine.ObservedAssistantCaptureState.STARTING -> "Starting"
+                            com.example.engine.ObservedAssistantCaptureState.LISTENING -> "Listening"
+                            com.example.engine.ObservedAssistantCaptureState.PROCESSING -> "Processing"
+                            com.example.engine.ObservedAssistantCaptureState.SPEAKING -> "Speaking"
+                            com.example.engine.ObservedAssistantCaptureState.MUTED -> "Muted"
+                            com.example.engine.ObservedAssistantCaptureState.ERROR -> "Error"
+                            com.example.engine.ObservedAssistantCaptureState.IDLE -> wakeLifecycleState.badgeLabel
+                        }
                         Text(
-                            text = "STATE: ${wakeLifecycleState.badgeLabel} • INPUT: ${activeInputRoute.label.uppercase()}",
+                            text = "STATE: $effectiveStatusLabel (${wakeLifecycleState.badgeLabel}) • INPUT: ${activeInputRoute.label.uppercase()}",
                             fontSize = 9.sp,
                             fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.Bold,
-                            color = if (isUserArmed) QuantumMint else QuantumAmber,
+                            color = if (observedCaptureState == com.example.engine.ObservedAssistantCaptureState.ERROR) {
+                                QuantumCrimson
+                            } else if (isUserArmed) {
+                                QuantumMint
+                            } else {
+                                QuantumAmber
+                            },
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "MIC OWNER: ${activeMicOwner.displayLabel}",
+                            text = if (captureErrorDetail.isNotBlank() && observedCaptureState == com.example.engine.ObservedAssistantCaptureState.ERROR) {
+                                "MIC OWNER: ${activeMicOwner.displayLabel} • $captureErrorDetail"
+                            } else {
+                                "MIC OWNER: ${activeMicOwner.displayLabel}"
+                            },
                             fontSize = 9.sp,
                             fontFamily = JetBrainsMonoFontFamily,
                             color = TextSecondary,
@@ -457,8 +478,7 @@ fun JarvisStageFlowScreen(
                             onSelectVoice = { voice -> viewModel.omniLiveEngine.selectVoice(voice) },
                             onStartJarvis = {
                                 requestMicInContextOrRun("START_JARVIS_LIVE") {
-                                    viewModel.armJarvisWakeAndSpeechSession()
-                                    viewModel.startGeminiLiveSession()
+                                    viewModel.launchJarvisAndStartListening(reason = "STAGE_B_LAUNCH_JARVIS_BUTTON")
                                     currentStage = JarvisStage.STAGE_C_CORNER_ORB
                                 }
                             },
@@ -467,8 +487,7 @@ fun JarvisStageFlowScreen(
                             },
                             onTriggerVoiceListen = {
                                 requestMicInContextOrRun("VOICE_LISTEN_WINDOW") {
-                                    viewModel.armJarvisWakeAndSpeechSession()
-                                    viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
+                                    viewModel.launchJarvisAndStartListening(reason = "STAGE_B_BOTTOM_MIC_BUTTON")
                                 }
                             },
                             onSendPrompt = { queryText ->
@@ -484,6 +503,7 @@ fun JarvisStageFlowScreen(
                     JarvisStage.STAGE_C_CORNER_ORB -> {
                         JarvisStageCCornerOrbView(
                             liveState = liveState,
+                            observedCaptureState = observedCaptureState,
                             inputRms = inputRms,
                             outputRms = outputRms,
                             actionState = kernelActionState,
@@ -496,8 +516,7 @@ fun JarvisStageFlowScreen(
                             },
                             onTriggerVoiceListen = {
                                 requestMicInContextOrRun("VOICE_LISTEN_WINDOW") {
-                                    viewModel.armJarvisWakeAndSpeechSession()
-                                    viewModel.omniLiveEngine.startNativeSpeechRecognizerLoop()
+                                    viewModel.launchJarvisAndStartListening(reason = "STAGE_C_BOTTOM_MIC_BUTTON")
                                 }
                             },
                             onExpandHud = { showExpandedHudDrawer = true },
@@ -1742,6 +1761,7 @@ private fun QuantumBentoActionTile(
 @Composable
 private fun JarvisStageCCornerOrbView(
     liveState: LiveConnectionState,
+    observedCaptureState: com.example.engine.ObservedAssistantCaptureState = com.example.engine.ObservedAssistantCaptureState.IDLE,
     inputRms: Float,
     outputRms: Float,
     actionState: JarvisOrbActionState,
@@ -1884,7 +1904,7 @@ private fun JarvisStageCCornerOrbView(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "LIVE NEURAL HUD // ${actionState.label.uppercase()}",
+                                text = "LIVE NEURAL HUD // ${observedCaptureState.displayLabel.uppercase()} • ${actionState.label.uppercase()}",
                                 fontSize = 10.sp,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 fontWeight = FontWeight.Bold,

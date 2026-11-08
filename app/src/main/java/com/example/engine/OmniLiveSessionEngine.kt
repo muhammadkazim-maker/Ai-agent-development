@@ -23,6 +23,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -110,6 +111,25 @@ data class LiveSlideUpCard(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+enum class ObservedAssistantCaptureState(val displayLabel: String) {
+    IDLE("Idle"),
+    STARTING("Starting"),
+    LISTENING("Listening"),
+    PROCESSING("Processing"),
+    SPEAKING("Speaking"),
+    MUTED("Muted"),
+    ERROR("Error")
+}
+
+enum class CommandTurnStallStage {
+    NONE,
+    SOUND_DETECTED_NO_ACCEPTED_COMMAND,
+    COMMAND_ACCEPTED_REQUEST_NOT_SENT,
+    SERVER_OR_TOOL_DELAY,
+    GENERATED_REPLY_NO_AUDIO,
+    RECEIVED_AUDIO_PLAYBACK_FAILED
+}
+
 enum class CommandSpeechOutputState {
     NONE,
     REQUESTED,
@@ -151,10 +171,48 @@ data class CommandAudioDiagnosticEntry(
     val ttsErrorCount: Int = 0,
     val recoveryTriggered: Boolean = false,
     val lateDuplicateFramesSuppressed: Int = 0,
-    val cancellationReason: String = "NONE"
+    val cancellationReason: String = "NONE",
+    val launchRequestedElapsedMs: Long = 0L,
+    val captureReadyElapsedMs: Long = 0L,
+    val speechOnsetElapsedMs: Long = 0L,
+    val speechEndElapsedMs: Long = 0L,
+    val commandAcceptedElapsedMs: Long = 0L,
+    val requestSentElapsedMs: Long = 0L,
+    val firstResponseReceivedElapsedMs: Long = 0L,
+    val audioReceivedElapsedMs: Long = 0L,
+    val playbackStartedElapsedMs: Long = 0L,
+    val playbackCompletedElapsedMs: Long = 0L,
+    val partialRecognitionCount: Int = 0,
+    val finalRecognitionObserved: Boolean = false,
+    val stallStage: CommandTurnStallStage = CommandTurnStallStage.NONE
 ) {
     val sessionGeneration: Long
         get() = wsGeneration
+
+    val startupToCaptureReadyLatencyMs: Long
+        get() = if (launchRequestedElapsedMs > 0L && captureReadyElapsedMs >= launchRequestedElapsedMs) {
+            captureReadyElapsedMs - launchRequestedElapsedMs
+        } else {
+            -1L
+        }
+
+    val speechEndToFirstResponseLatencyMs: Long
+        get() = if (speechEndElapsedMs > 0L && firstResponseReceivedElapsedMs >= speechEndElapsedMs) {
+            firstResponseReceivedElapsedMs - speechEndElapsedMs
+        } else if (commandAcceptedElapsedMs > 0L && firstResponseReceivedElapsedMs >= commandAcceptedElapsedMs) {
+            firstResponseReceivedElapsedMs - commandAcceptedElapsedMs
+        } else {
+            -1L
+        }
+
+    val speechEndToFirstAudioPlayLatencyMs: Long
+        get() = if (speechEndElapsedMs > 0L && playbackStartedElapsedMs >= speechEndElapsedMs) {
+            playbackStartedElapsedMs - speechEndElapsedMs
+        } else if (commandAcceptedElapsedMs > 0L && playbackStartedElapsedMs >= commandAcceptedElapsedMs) {
+            playbackStartedElapsedMs - commandAcceptedElapsedMs
+        } else {
+            -1L
+        }
 
     fun toRedactedDiagnosticLine(): String {
         return "cmd=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(commandId.ifBlank { "NONE" })} | " +
@@ -173,7 +231,22 @@ data class CommandAudioDiagnosticEntry(
             "pitch=$pitch | " +
             "fallbackReason=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(fallbackOrReconnectReason.ifBlank { "NONE" })} | " +
             "outputState=${outputState.name} | " +
+            "stallStage=${stallStage.name} | " +
             "engine=${outputEngine.ifBlank { "NONE" }} | " +
+            "tCaptureReady=$captureReadyElapsedMs | " +
+            "tSpeechOnset=$speechOnsetElapsedMs | " +
+            "tSpeechEnd=$speechEndElapsedMs | " +
+            "tAccepted=$commandAcceptedElapsedMs | " +
+            "tReqSent=$requestSentElapsedMs | " +
+            "tFirstResp=$firstResponseReceivedElapsedMs | " +
+            "tAudioRecv=$audioReceivedElapsedMs | " +
+            "tPlayStart=$playbackStartedElapsedMs | " +
+            "tPlayEnd=$playbackCompletedElapsedMs | " +
+            "latStartupMs=$startupToCaptureReadyLatencyMs | " +
+            "latFirstRespMs=$speechEndToFirstResponseLatencyMs | " +
+            "latFirstPlayMs=$speechEndToFirstAudioPlayLatencyMs | " +
+            "partialRec=$partialRecognitionCount | " +
+            "finalRec=$finalRecognitionObserved | " +
             "wsGen=$wsGeneration | " +
             "wsClose=${wsCloseCode?.toString() ?: "NONE"} | " +
             "wsCloseReason=${OmniLiveSessionEngine.redactPrivateTextAndCredentials(wsCloseReason.ifBlank { "NONE" })} | " +
@@ -229,7 +302,20 @@ data class LiveTurnExecutionReport(
     val resolvedLocaleTag: String = language.ttsLocale.toLanguageTag(),
     val speechRate: Float = 1.0f,
     val pitch: Float = 1.0f,
-    val fallbackOrReconnectReason: String = "NONE"
+    val fallbackOrReconnectReason: String = "NONE",
+    val launchRequestedElapsedMs: Long = 0L,
+    val captureReadyElapsedMs: Long = 0L,
+    val speechOnsetElapsedMs: Long = 0L,
+    val speechEndElapsedMs: Long = 0L,
+    val commandAcceptedElapsedMs: Long = 0L,
+    val requestSentElapsedMs: Long = 0L,
+    val firstResponseReceivedElapsedMs: Long = 0L,
+    val audioReceivedElapsedMs: Long = 0L,
+    val playbackStartedElapsedMs: Long = 0L,
+    val playbackCompletedElapsedMs: Long = 0L,
+    val partialRecognitionCount: Int = 0,
+    val finalRecognitionObserved: Boolean = false,
+    val stallStage: CommandTurnStallStage = CommandTurnStallStage.NONE
 ) {
     val spokenReply: String
         get() = spokenText
@@ -878,8 +964,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     put("realtimeInputConfig", JSONObject().apply {
                         put("automaticActivityDetection", JSONObject().apply {
                             put("disabled", false)
-                            put("silenceDurationMs", 260)
-                            put("prefixPaddingMs", 80)
+                            put("silenceDurationMs", 620)
+                            put("prefixPaddingMs", 120)
                         })
                     })
                     put("tools", buildLiveToolsJson())
@@ -1007,6 +1093,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     private val _connectionState = MutableStateFlow(LiveConnectionState.DISCONNECTED)
     val connectionState: StateFlow<LiveConnectionState> = _connectionState.asStateFlow()
 
+    private val _observedCaptureState = MutableStateFlow(ObservedAssistantCaptureState.IDLE)
+    val observedCaptureState: StateFlow<ObservedAssistantCaptureState> = _observedCaptureState.asStateFlow()
+
+    private val _captureErrorDetail = MutableStateFlow("")
+    val captureErrorDetail: StateFlow<String> = _captureErrorDetail.asStateFlow()
+
     private val _isSessionActive = MutableStateFlow(false)
     val isSessionActive: StateFlow<Boolean> = _isSessionActive.asStateFlow()
 
@@ -1094,6 +1186,41 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         LanguageProcessor.LanguageResolution(DetectedLanguage.ENGLISH, "INITIAL")
         private set
 
+    @Volatile
+    var lastLaunchRequestElapsedMs: Long = 0L
+        private set
+
+    @Volatile
+    var lastCaptureReadyElapsedMs: Long = 0L
+        private set
+
+    @Volatile
+    var pendingSpeechOnsetElapsedMs: Long = 0L
+        private set
+
+    @Volatile
+    var pendingSpeechEndElapsedMs: Long = 0L
+        private set
+
+    @Volatile
+    var pendingPartialRecognitionCount: Int = 0
+        private set
+
+    @Volatile
+    var pendingFinalRecognitionObserved: Boolean = false
+        private set
+
+    @Volatile
+    var autoConfirmCaptureReadyInTest: Boolean = true
+
+    private val _activeRecognizerInstanceCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val activeRecognizerInstanceCount: Int
+        get() = _activeRecognizerInstanceCount.get()
+
+    private val _activeAudioRecordInstanceCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val activeAudioRecordInstanceCount: Int
+        get() = _activeAudioRecordInstanceCount.get()
+
     private val _turnReportsHistory = java.util.concurrent.CopyOnWriteArrayList<LiveTurnExecutionReport>()
     val turnReportsHistory: List<LiveTurnExecutionReport>
         get() = _turnReportsHistory.toList()
@@ -1105,7 +1232,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     private val postActionAudioWatchdogJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     @Volatile
-    var liveAudioDeliveryTimeoutMs: Long = 2800L
+    var liveAudioDeliveryTimeoutMs: Long = 1400L
 
     fun clearTurnReportsForTest() {
         SpeechPreferenceStore.resetForTest(context)
@@ -1120,6 +1247,25 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         postActionAudioWatchdogJobs.clear()
         staleWebSocketCallbacksIgnoredCount = 0
         currentTurnStartedFromInputTranscription = false
+        lastLaunchRequestElapsedMs = 0L
+        lastCaptureReadyElapsedMs = 0L
+        pendingSpeechOnsetElapsedMs = 0L
+        pendingSpeechEndElapsedMs = 0L
+        pendingPartialRecognitionCount = 0
+        pendingFinalRecognitionObserved = false
+        _captureErrorDetail.value = ""
+    }
+
+    fun recordSpeechCaptureProgressForTest(
+        onsetElapsedMs: Long,
+        endElapsedMs: Long,
+        partialCount: Int = 1,
+        finalObserved: Boolean = true
+    ) {
+        pendingSpeechOnsetElapsedMs = onsetElapsedMs
+        pendingSpeechEndElapsedMs = endElapsedMs
+        pendingPartialRecognitionCount = partialCount
+        pendingFinalRecognitionObserved = finalObserved
     }
 
     fun getCommandAudioDiagnostic(commandId: String = activeCommandId): CommandAudioDiagnosticEntry? =
@@ -1194,6 +1340,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         isWebSocketReady.set(isReady)
         _isSessionActive.value = isReady
         _connectionState.value = if (isReady) LiveConnectionState.LIVE_LISTENING else LiveConnectionState.DISCONNECTED
+        _observedCaptureState.value = if (isReady) ObservedAssistantCaptureState.LISTENING else ObservedAssistantCaptureState.IDLE
+        if (isReady && lastCaptureReadyElapsedMs == 0L) {
+            lastCaptureReadyElapsedMs = SystemClock.elapsedRealtime()
+        }
         return nextGen
     }
 
@@ -1303,9 +1453,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         val authoritativePitch = SpeechPreferenceStore.getPitch(context)
 
         if (tts == null) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+            _captureErrorDetail.value = "Local speech output (TTS) is unavailable on this device."
             updateCommandDiagnostic(commandId) {
                 it.copy(
                     outputState = CommandSpeechOutputState.FAILED,
+                    stallStage = CommandTurnStallStage.RECEIVED_AUDIO_PLAYBACK_FAILED,
                     outputEngine = actualProvider,
                     requestedOutputProvider = requestedProvider,
                     actualOutputProvider = actualProvider,
@@ -1328,28 +1481,43 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             AudioOutputManager.releaseUnplayedTurnSlot(commandId)
         }
         _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
+        _observedCaptureState.value = ObservedAssistantCaptureState.SPEAKING
         tts.onSpeechCompleted = {
             if (activeCommandId == commandId) {
-                _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                coord.returnToWakeOnlyListening(
+                val nowElapsed = SystemClock.elapsedRealtime()
+                updateCommandDiagnostic(commandId) { current ->
+                    current.copy(
+                        playbackCompletedElapsedMs = if (current.playbackCompletedElapsedMs > 0L) {
+                            current.playbackCompletedElapsedMs
+                        } else {
+                            nowElapsed
+                        }
+                    )
+                }
+                handoffToPostTurnCapture(
                     if (isRecovery) "TTS_BOUNDED_RECOVERY_COMPLETED" else "TTS_TURN_COMPLETED"
                 )
-                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                    com.example.service.WakeWordForegroundService.resume(context)
-                }
             }
         }
         val prevListener = tts.onLifecycleEvent
         tts.onLifecycleEvent = { event ->
             prevListener?.invoke(event)
             if (event.commandId == commandId) {
+                val nowElapsed = SystemClock.elapsedRealtime()
                 val mappedState = when (event.state) {
                     TtsOutputLifecycleState.REQUESTED -> CommandSpeechOutputState.REQUESTED
                     TtsOutputLifecycleState.QUEUED -> CommandSpeechOutputState.QUEUED
-                    TtsOutputLifecycleState.STARTED -> CommandSpeechOutputState.STARTED
+                    TtsOutputLifecycleState.STARTED -> {
+                        _observedCaptureState.value = ObservedAssistantCaptureState.SPEAKING
+                        CommandSpeechOutputState.STARTED
+                    }
                     TtsOutputLifecycleState.COMPLETED -> CommandSpeechOutputState.COMPLETED
                     TtsOutputLifecycleState.INTERRUPTED -> CommandSpeechOutputState.INTERRUPTED
-                    TtsOutputLifecycleState.FAILED -> CommandSpeechOutputState.FAILED
+                    TtsOutputLifecycleState.FAILED -> {
+                        _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+                        _captureErrorDetail.value = "Speech playback failed (${event.reason.ifBlank { "TTS_ERROR" }})."
+                        CommandSpeechOutputState.FAILED
+                    }
                 }
                 val snap = event.configSnapshot
                 val updatedDiag = updateCommandDiagnostic(commandId) { current ->
@@ -1383,6 +1551,36 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         } else {
                             current.ttsErrorCount
                         },
+                        audioReceivedElapsedMs = if (current.audioReceivedElapsedMs > 0L) {
+                            current.audioReceivedElapsedMs
+                        } else if (event.state == TtsOutputLifecycleState.QUEUED || event.state == TtsOutputLifecycleState.STARTED) {
+                            nowElapsed
+                        } else {
+                            current.audioReceivedElapsedMs
+                        },
+                        playbackStartedElapsedMs = if (current.playbackStartedElapsedMs > 0L) {
+                            current.playbackStartedElapsedMs
+                        } else if (event.state == TtsOutputLifecycleState.STARTED) {
+                            nowElapsed
+                        } else {
+                            current.playbackStartedElapsedMs
+                        },
+                        playbackCompletedElapsedMs = if (current.playbackCompletedElapsedMs > 0L) {
+                            current.playbackCompletedElapsedMs
+                        } else if (event.state == TtsOutputLifecycleState.COMPLETED) {
+                            nowElapsed
+                        } else {
+                            current.playbackCompletedElapsedMs
+                        },
+                        stallStage = when (event.state) {
+                            TtsOutputLifecycleState.FAILED -> CommandTurnStallStage.RECEIVED_AUDIO_PLAYBACK_FAILED
+                            TtsOutputLifecycleState.COMPLETED -> if (current.stallStage == CommandTurnStallStage.RECEIVED_AUDIO_PLAYBACK_FAILED) {
+                                CommandTurnStallStage.NONE
+                            } else {
+                                current.stallStage
+                            }
+                            else -> current.stallStage
+                        },
                         recoveryTriggered = current.recoveryTriggered || isRecovery,
                         cancellationReason = if (event.reason.isNotBlank()) event.reason else current.cancellationReason
                     )
@@ -1402,10 +1600,22 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         fallbackOrReconnectReason = updatedDiag.fallbackOrReconnectReason,
                         recoveryTriggered = updatedDiag.recoveryTriggered,
                         audioFramesReceived = updatedDiag.audioFramesReceived,
-                        audioFramesPlayed = updatedDiag.audioFramesPlayed
+                        audioFramesPlayed = updatedDiag.audioFramesPlayed,
+                        audioReceivedElapsedMs = updatedDiag.audioReceivedElapsedMs,
+                        playbackStartedElapsedMs = updatedDiag.playbackStartedElapsedMs,
+                        playbackCompletedElapsedMs = updatedDiag.playbackCompletedElapsedMs,
+                        stallStage = updatedDiag.stallStage
                     )
                 }
             }
+        }
+        val nowReqElapsed = SystemClock.elapsedRealtime()
+        updateCommandDiagnostic(commandId) { current ->
+            current.copy(
+                requestSentElapsedMs = if (current.requestSentElapsedMs > 0L) current.requestSentElapsedMs else nowReqElapsed,
+                firstResponseReceivedElapsedMs = if (current.firstResponseReceivedElapsedMs > 0L) current.firstResponseReceivedElapsedMs else nowReqElapsed,
+                audioReceivedElapsedMs = if (current.audioReceivedElapsedMs > 0L) current.audioReceivedElapsedMs else nowReqElapsed
+            )
         }
         tts.speak(
             text = spokenReply,
@@ -1473,9 +1683,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             resolveCommandReplyLanguage(utterance, mutateHistoryIfGenuine = false)
         }
 
+        val inferredStallStage = when {
+            reason.contains("SEND_FALSE", ignoreCase = true) || reason.contains("NOT_SENT", ignoreCase = true) ->
+                CommandTurnStallStage.COMMAND_ACCEPTED_REQUEST_NOT_SENT
+            reason.contains("SERVER", ignoreCase = true) || reason.contains("TOOL_DELAY", ignoreCase = true) ->
+                CommandTurnStallStage.SERVER_OR_TOOL_DELAY
+            reason.contains("PLAYBACK_FAILED", ignoreCase = true) ->
+                CommandTurnStallStage.RECEIVED_AUDIO_PLAYBACK_FAILED
+            currentDiag?.firstResponseReceivedElapsedMs ?: 0L > 0L || spokenText.isNotBlank() ->
+                CommandTurnStallStage.GENERATED_REPLY_NO_AUDIO
+            else ->
+                CommandTurnStallStage.SERVER_OR_TOOL_DELAY
+        }
+
         updateCommandDiagnostic(commandId) {
             it.copy(
                 recoveryTriggered = true,
+                stallStage = if (it.stallStage != CommandTurnStallStage.NONE) it.stallStage else inferredStallStage,
                 requestedOutputProvider = "GEMINI_LIVE (${_selectedVoice.value.voiceName})",
                 actualOutputProvider = "ANDROID_TTS_FALLBACK",
                 requestedVoiceId = _selectedVoice.value.voiceName,
@@ -1527,6 +1751,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 diag.outputState != CommandSpeechOutputState.INTERRUPTED &&
                 !diag.recoveryTriggered
             ) {
+                val stage = if (diag.firstResponseReceivedElapsedMs > 0L || lastSpokenReplyForCurrentCommand.isNotBlank()) {
+                    CommandTurnStallStage.GENERATED_REPLY_NO_AUDIO
+                } else {
+                    CommandTurnStallStage.SERVER_OR_TOOL_DELAY
+                }
+                updateCommandDiagnostic(commandId) { current ->
+                    current.copy(stallStage = stage)
+                }
                 triggerBoundedSpeechRecoveryForCommand(
                     commandId = commandId,
                     reason = "LIVE_AUDIO_DELIVERY_TIMEOUT_${timeoutMs}MS"
@@ -1594,7 +1826,20 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             resolvedLocaleTag = resLocale,
             speechRate = rate,
             pitch = pitchVal,
-            fallbackOrReconnectReason = fbReason
+            fallbackOrReconnectReason = fbReason,
+            launchRequestedElapsedMs = diag?.launchRequestedElapsedMs ?: lastLaunchRequestElapsedMs,
+            captureReadyElapsedMs = diag?.captureReadyElapsedMs ?: lastCaptureReadyElapsedMs,
+            speechOnsetElapsedMs = diag?.speechOnsetElapsedMs ?: 0L,
+            speechEndElapsedMs = diag?.speechEndElapsedMs ?: 0L,
+            commandAcceptedElapsedMs = diag?.commandAcceptedElapsedMs ?: 0L,
+            requestSentElapsedMs = diag?.requestSentElapsedMs ?: 0L,
+            firstResponseReceivedElapsedMs = diag?.firstResponseReceivedElapsedMs ?: 0L,
+            audioReceivedElapsedMs = diag?.audioReceivedElapsedMs ?: 0L,
+            playbackStartedElapsedMs = diag?.playbackStartedElapsedMs ?: 0L,
+            playbackCompletedElapsedMs = diag?.playbackCompletedElapsedMs ?: 0L,
+            partialRecognitionCount = diag?.partialRecognitionCount ?: 0,
+            finalRecognitionObserved = diag?.finalRecognitionObserved ?: false,
+            stallStage = diag?.stallStage ?: CommandTurnStallStage.NONE
         )
         lastTurnReport = report
         _turnReportsHistory.add(report)
@@ -1634,6 +1879,17 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
         val liveVoice = _selectedVoice.value.voiceName
         val isLiveReady = isGeminiLiveWebSocketConnected()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val captureReady = if (lastCaptureReadyElapsedMs > 0L) lastCaptureReadyElapsedMs else nowElapsed
+        val onset = if (pendingSpeechOnsetElapsedMs > 0L) pendingSpeechOnsetElapsedMs else captureReady
+        val speechEnd = if (pendingSpeechEndElapsedMs > 0L) pendingSpeechEndElapsedMs else nowElapsed
+        val partials = pendingPartialRecognitionCount
+        val finalRec = pendingFinalRecognitionObserved || trimmedUtterance.isNotEmpty()
+        pendingSpeechOnsetElapsedMs = 0L
+        pendingSpeechEndElapsedMs = 0L
+        pendingPartialRecognitionCount = 0
+        pendingFinalRecognitionObserved = false
+
         commandDiagnosticsMap[commandId] = CommandAudioDiagnosticEntry(
             commandId = commandId,
             route = if (currentTurnHasPendingOrExecutedAction) "ACTION_TURN" else "CONVERSATIONAL_TURN",
@@ -1648,7 +1904,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             speechRate = SpeechPreferenceStore.getSpeechRate(context),
             pitch = SpeechPreferenceStore.getPitch(context),
             chosenReplyLanguage = langRes.language,
-            languageSelectionReason = langRes.reason
+            languageSelectionReason = langRes.reason,
+            launchRequestedElapsedMs = lastLaunchRequestElapsedMs,
+            captureReadyElapsedMs = captureReady,
+            speechOnsetElapsedMs = onset,
+            speechEndElapsedMs = speechEnd,
+            commandAcceptedElapsedMs = nowElapsed,
+            partialRecognitionCount = partials,
+            finalRecognitionObserved = finalRec,
+            stallStage = CommandTurnStallStage.NONE
         )
         if (trimmedUtterance.isNotEmpty()) {
             _liveUserTranscript.value = trimmedUtterance
@@ -2346,62 +2610,283 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     }
 
     /**
-     * Starts the Gemini Live bidirectional voice streaming session.
-     * Enforces single-owner audio pipeline by immediately stopping local TTS and acquiring
-     * single-owner microphone arbitration via [AssistantAudioStateMachine.shared].
+     * Single idempotent start-session-and-listen operation shared by both "Launch Jarvis"
+     * and the bottom microphone control.
+     *
+     * - Initializes the session at most once when already active (no duplicate sockets/recorders/recognizers).
+     * - Pre-warms output routes (24kHz AudioTrack + local TTS).
+     * - Releases any previous microphone owner before starting active capture.
+     * - Opens a bounded initial command window without requiring a second microphone tap.
+     * - Shows `STARTING` until capture hardware/recognizer is actually ready, then transitions to `LISTENING`.
      */
-    fun startLiveSession() {
+    fun launchSessionAndStartCommandListening(
+        reason: String = "EXPLICIT_USER_LAUNCH",
+        voice: GeminiLiveVoice? = null,
+        openBoundedCommandWindow: Boolean = true
+    ): Boolean {
+        lastLaunchRequestElapsedMs = SystemClock.elapsedRealtime()
+        val coord = AssistantAudioStateMachine.shared
         val hasMicPerm = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         if (!hasMicPerm) {
-            Log.w(TAG, "Cannot start Gemini Live without RECORD_AUDIO permission")
-            AssistantAudioStateMachine.shared.inspectWakeAndAssistantReadiness(context)
-            return
+            Log.w(TAG, "Cannot launch Jarvis listening without RECORD_AUDIO permission ($reason)")
+            coord.armUserSessionAndPersist(context, reason)
+            _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+            _captureErrorDetail.value = "Microphone permission (RECORD_AUDIO) is required. Tap to grant microphone access."
+            _liveAiTranscript.value = _captureErrorDetail.value
+            return false
         }
 
-        val coord = AssistantAudioStateMachine.shared
-        coord.armUserSessionAndPersist(context, "START_GEMINI_LIVE_SESSION")
+        _captureErrorDetail.value = ""
+        coord.armUserSessionAndPersist(context, reason)
+        _isMicMuted.value = false
 
-        // Single audio pipeline rule: cancel local TTS immediately so it never talks over Gemini Live
+        // Pause background wake service before acquiring command/live capture so onStartCommand never steals the mic
+        if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+            com.example.service.WakeWordForegroundService.pause(context)
+        }
+
+        // Single audio pipeline rule: cancel local TTS immediately so it never talks over active listening
         ttsFallback?.stop()
         OmniAutonomousCoreEngine.resetInactivityTimer()
 
-        if (_isSessionActive.value) {
+        if (voice != null) {
+            selectVoice(voice)
+        } else {
+            restoreAuthoritativeSpeechPreferences()
+        }
+
+        val assistantName = OmniAutonomousCoreEngine.permanentMemory.value.assistantName
+        val wasAlreadyActive = _isSessionActive.value
+
+        if (!wasAlreadyActive) {
+            _isSessionActive.value = true
+            _liveSessionStartCount.incrementAndGet()
+            _observedCaptureState.value = ObservedAssistantCaptureState.STARTING
+            _connectionState.value = LiveConnectionState.CONNECTING
+            _liveUserTranscript.value = ""
+            _liveAiTranscript.value =
+                "$assistantName Starting (${_selectedVoice.value.voiceName}) • Preparing microphone..."
+            triedFallbackModel = false
+
+            JarvisHandsFreeEngine.setKeepAliveCarrierActive(true)
+            start24kHzGaplessOutputQueue()
+            connectBidiWebSocket(LIVE_MODEL_PRIMARY)
+            start60SecondInactivityWatchdog()
+        } else {
             if (OmniAutonomousCoreEngine.operatingMode.value == OmniOperatingMode.STATE_SLEEP_STANDBY) {
-                wakeUpFromStandby()
+                OmniAutonomousCoreEngine.wakeUpToActiveListening(context)
             }
+            if (outputPlaybackJob?.isActive != true) {
+                start24kHzGaplessOutputQueue()
+            }
+            if (activeWebSocket == null && OmniAutonomousCoreEngine.refreshOnlineState(context)) {
+                connectBidiWebSocket(LIVE_MODEL_PRIMARY)
+            }
+            if (inactivityTimerJob?.isActive != true) {
+                start60SecondInactivityWatchdog()
+            }
+            if (!isCaptureCurrentlyReady()) {
+                _observedCaptureState.value = ObservedAssistantCaptureState.STARTING
+                _liveAiTranscript.value =
+                    "$assistantName Starting (${_selectedVoice.value.voiceName}) • Preparing microphone..."
+            }
+        }
+
+        if (openBoundedCommandWindow) {
+            coord.openCommandWindow(reason = reason)
+        }
+        startActiveCommandCapture(reason = reason)
+        return true
+    }
+
+    fun isCaptureCurrentlyReady(): Boolean {
+        val recReady = micAudioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        return isNativeRecognizerListening || recReady || lastCaptureReadyElapsedMs > 0L
+    }
+
+    fun markCaptureReady(source: String = "CAPTURE_READY") {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        lastCaptureReadyElapsedMs = nowElapsed
+        val coord = AssistantAudioStateMachine.shared
+        if (!_isSessionActive.value ||
+            _isMicMuted.value ||
+            coord.isStoppedByUserInMemory() ||
+            coord.isDeviceMutedInMemory()
+        ) {
             return
         }
-        restoreAuthoritativeSpeechPreferences()
-        _isSessionActive.value = true
-        _liveSessionStartCount.incrementAndGet()
-        _isMicMuted.value = false
-        _connectionState.value = LiveConnectionState.CONNECTING
-        _liveUserTranscript.value = ""
-        val assistantName = OmniAutonomousCoreEngine.permanentMemory.value.assistantName
-        _liveAiTranscript.value = "$assistantName Live Active (${_selectedVoice.value.voiceName}) • Listening..."
-        triedFallbackModel = false
-
-        JarvisHandsFreeEngine.setKeepAliveCarrierActive(true)
-        start24kHzGaplessOutputQueue()
-        connectBidiWebSocket(LIVE_MODEL_PRIMARY)
-
-        val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (_: Exception) { "" }
-        val hasCloudKey = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.startsWith("YOUR_")
-        if (!hasCloudKey && isNativeSpeechRecognitionAvailableSafe()) {
-            // Open an explicit bounded command window for single-turn recognition (NEVER a continuous SpeechRecognizer loop!)
-            coord.openCommandWindow(reason = "START_SESSION_BOUNDED_COMMAND_WINDOW")
-            startNativeSpeechRecognizerLoop()
-        } else {
-            coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
-                releaseMicAudioRecord()
-                stopNativeSpeechRecognizerLoop()
-            }
-            start16kHzMicrophonePcmStream()
+        if (_observedCaptureState.value != ObservedAssistantCaptureState.SPEAKING &&
+            _observedCaptureState.value != ObservedAssistantCaptureState.PROCESSING
+        ) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
         }
-        start60SecondInactivityWatchdog()
+        if (_connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING &&
+            _connectionState.value != LiveConnectionState.LIVE_EXECUTING_TOOL
+        ) {
+            _connectionState.value = LiveConnectionState.LIVE_LISTENING
+            val currentText = _liveAiTranscript.value
+            if (currentText.isBlank() ||
+                currentText.contains("Starting") ||
+                currentText.contains("Preparing microphone") ||
+                currentText.contains("Connecting")
+            ) {
+                val assistantName = OmniAutonomousCoreEngine.permanentMemory.value.assistantName
+                _liveAiTranscript.value =
+                    "$assistantName Listening (${_selectedVoice.value.voiceName}) • Speak in English, اردو, or Roman Urdu"
+            }
+        }
+        if (activeCommandId.isNotBlank()) {
+            updateCommandDiagnostic(activeCommandId) { current ->
+                if (current.captureReadyElapsedMs > 0L) {
+                    current
+                } else {
+                    current.copy(captureReadyElapsedMs = nowElapsed)
+                }
+            }
+        }
+        Log.d(TAG, "Microphone capture READY via $source at elapsed=${nowElapsed}ms")
+    }
+
+    private fun startActiveCommandCapture(reason: String) {
+        val coord = AssistantAudioStateMachine.shared
+        if (_isMicMuted.value || coord.isStoppedByUserInMemory() || coord.isDeviceMutedInMemory()) {
+            return
+        }
+        if (!coord.isCommandWindowOpen()) {
+            coord.openCommandWindow(reason = reason)
+        }
+        if (isNativeSpeechRecognitionAvailableSafe()) {
+            startNativeSpeechRecognizerLoop(ensureSessionIfNeeded = false)
+        } else {
+            val acquired = coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
+                releaseMicAudioRecord()
+            }
+            if (acquired && micStreamingJob?.isActive != true) {
+                start16kHzMicrophonePcmStream()
+            }
+            if (autoConfirmCaptureReadyInTest) {
+                markCaptureReady("PCM_FALLBACK_CAPTURE_READY")
+            }
+        }
+    }
+
+    /**
+     * Releases the completed command window capture and immediately hands off to the replacement
+     * owner (`WAKE_WORD_SERVICE` or `LIVE_SESSION_ENGINE`) when armed, never leaving the app with
+     * `MicComponentOwner.NONE` while armed and never overriding a deliberate Stop or Mute.
+     */
+    fun handoffToPostTurnCapture(reason: String) {
+        val coord = AssistantAudioStateMachine.shared
+        if (coord.isStoppedByUserInMemory() || coord.isStoppedByUserPersisted(context)) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
+            _connectionState.value = LiveConnectionState.DISCONNECTED
+            return
+        }
+        if (_isMicMuted.value || coord.isDeviceMutedInMemory() || coord.isDeviceMutedPersisted(context)) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.MUTED
+            return
+        }
+        coord.returnToWakeOnlyListening(reason)
+        if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+            com.example.service.WakeWordForegroundService.resume(context)
+        } else if (_isSessionActive.value && coord.activeMicOwner.value == MicComponentOwner.NONE) {
+            coord.acquireMicrophoneOwnership(MicComponentOwner.WAKE_WORD_SERVICE)
+        }
+        if (_isSessionActive.value) {
+            _connectionState.value = LiveConnectionState.LIVE_LISTENING
+            _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
+        } else {
+            _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
+        }
+    }
+
+    /**
+     * Records a turn where sound/speech onset was detected during an active listening window
+     * but no actionable or conversational command could be accepted, surfacing a truthful,
+     * localized message instead of waiting silently.
+     */
+    fun recordSoundDetectedNoAcceptedCommand(
+        reason: String,
+        candidateUtterance: String = ""
+    ): LiveTurnExecutionReport {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val cmdId = "cmd_no_match_${System.currentTimeMillis()}_${(1000..9999).random()}"
+        val langRes = resolveCommandReplyLanguage(candidateUtterance, mutateHistoryIfGenuine = false)
+        val lang = langRes.language
+        val actionableMsg = when (lang) {
+            DetectedLanguage.URDU_NASTALIQ ->
+                "آواز سنائی دی لیکن واضح کمانڈ سمجھ نہیں آئی۔ دوبارہ بولیں یا مائیک دبائیں۔"
+            DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED ->
+                "Awaaz sunai di lekin wazeh command samajh nahin aayi. Dobara bolein ya mic dabayein."
+            DetectedLanguage.ENGLISH ->
+                "Sound was detected, but no clear command was recognized. Please speak again or tap the mic."
+        }
+        val captureReady = if (lastCaptureReadyElapsedMs > 0L) lastCaptureReadyElapsedMs else nowElapsed
+        val onset = if (pendingSpeechOnsetElapsedMs > 0L) pendingSpeechOnsetElapsedMs else captureReady
+        val speechEnd = if (pendingSpeechEndElapsedMs > 0L) pendingSpeechEndElapsedMs else nowElapsed
+        val partials = pendingPartialRecognitionCount
+        pendingSpeechOnsetElapsedMs = 0L
+        pendingSpeechEndElapsedMs = 0L
+        pendingPartialRecognitionCount = 0
+        pendingFinalRecognitionObserved = false
+
+        val liveVoice = _selectedVoice.value.voiceName
+        commandDiagnosticsMap[cmdId] = CommandAudioDiagnosticEntry(
+            commandId = cmdId,
+            route = "VOICE_NO_ACCEPTED_COMMAND",
+            observedActionResult = "SOUND_DETECTED_NO_ACCEPTED_COMMAND",
+            outputState = CommandSpeechOutputState.NONE,
+            outputEngine = "NONE",
+            requestedOutputProvider = "NONE",
+            actualOutputProvider = "NONE",
+            requestedVoiceId = liveVoice,
+            resolvedVoiceId = liveVoice,
+            resolvedLocaleTag = lang.ttsLocale.toLanguageTag(),
+            speechRate = SpeechPreferenceStore.getSpeechRate(context),
+            pitch = SpeechPreferenceStore.getPitch(context),
+            chosenReplyLanguage = lang,
+            languageSelectionReason = langRes.reason,
+            fallbackOrReconnectReason = reason,
+            wsGeneration = activeWebSocketGeneration,
+            cancellationReason = reason,
+            launchRequestedElapsedMs = lastLaunchRequestElapsedMs,
+            captureReadyElapsedMs = captureReady,
+            speechOnsetElapsedMs = onset,
+            speechEndElapsedMs = speechEnd,
+            partialRecognitionCount = partials,
+            finalRecognitionObserved = candidateUtterance.isNotBlank(),
+            stallStage = CommandTurnStallStage.SOUND_DETECTED_NO_ACCEPTED_COMMAND
+        )
+        _liveAiTranscript.value = actionableMsg
+        _captureErrorDetail.value = actionableMsg
+        val report = recordTurnExecutionReport(
+            commandId = cmdId,
+            utterance = candidateUtterance,
+            outputEngine = "NONE",
+            language = lang,
+            languageSelectionReason = langRes.reason,
+            liveConnected = isGeminiLiveWebSocketConnected(),
+            finalStatus = "SOUND_DETECTED_NO_ACCEPTED_COMMAND",
+            spokenText = actionableMsg,
+            diagnosticText = "$actionableMsg ($reason)",
+            fallbackOrReconnectReason = reason
+        )
+        handoffToPostTurnCapture(reason)
+        return report
+    }
+
+    /**
+     * Starts the Gemini Live bidirectional voice streaming session and opens the initial
+     * bounded command window via the shared idempotent [launchSessionAndStartCommandListening] path.
+     */
+    fun startLiveSession() {
+        launchSessionAndStartCommandListening(
+            reason = "START_GEMINI_LIVE_SESSION",
+            openBoundedCommandWindow = true
+        )
     }
 
     private fun isNativeSpeechRecognitionAvailableSafe(): Boolean {
@@ -2421,43 +2906,67 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      * This method runs ONLY for an active command window, never auto-restarts on error or silence,
      * and returns microphone ownership to wake-only listening (`WakeWordForegroundService`) upon completion or timeout.
      */
-    fun startNativeSpeechRecognizerLoop() {
-        mainHandler.post {
-            val coord = AssistantAudioStateMachine.shared
+    fun startNativeSpeechRecognizerLoop(ensureSessionIfNeeded: Boolean = true) {
+        val coord = AssistantAudioStateMachine.shared
+        if (_isMicMuted.value ||
+            coord.isStoppedByUserInMemory() ||
+            coord.isDeviceMutedInMemory() ||
+            coord.isSelfTriggerSuppressed()
+        ) {
+            return
+        }
+        // Explicit capture must NEVER silently return just because the Live session was not started yet!
+        if (!_isSessionActive.value) {
+            if (ensureSessionIfNeeded) {
+                launchSessionAndStartCommandListening(
+                    reason = "EXPLICIT_MIC_CAPTURE_START",
+                    openBoundedCommandWindow = true
+                )
+            }
+            return
+        }
+        if (!coord.isCommandWindowOpen()) {
+            coord.openCommandWindow(reason = "EXPLICIT_COMMAND_WINDOW_STT")
+        }
+        val acquired = coord.acquireMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
+            stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership = false)
+        }
+        if (!acquired) return
+
+        val startRecognizerBlock = Runnable {
             if (!_isSessionActive.value ||
                 _isMicMuted.value ||
                 coord.isStoppedByUserInMemory() ||
                 coord.isDeviceMutedInMemory() ||
                 coord.isSelfTriggerSuppressed()
             ) {
-                return@post
+                return@Runnable
             }
-            if (!coord.isCommandWindowOpen()) {
-                coord.openCommandWindow(reason = "EXPLICIT_COMMAND_WINDOW_STT")
-            }
-            val acquired = coord.acquireMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
-                stopNativeSpeechRecognizerLoop()
-            }
-            if (!acquired) return@post
-
             try {
                 if (nativeSpeechRecognizer == null) {
                     nativeSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                        _activeRecognizerInstanceCount.incrementAndGet()
                         setRecognitionListener(object : RecognitionListener {
                             override fun onReadyForSpeech(params: Bundle?) {
                                 isNativeRecognizerListening = true
-                                if (_connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING) {
-                                    _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                                }
+                                markCaptureReady("SPEECH_RECOGNIZER_ON_READY")
                             }
 
                             override fun onBeginningOfSpeech() {
+                                pendingSpeechOnsetElapsedMs = SystemClock.elapsedRealtime()
                                 OmniAutonomousCoreEngine.resetInactivityTimer()
+                                coord.extendCommandWindowOnSpeechActivity()
                             }
 
                             override fun onRmsChanged(rmsdB: Float) {
                                 val scaled = ((rmsdB + 2f) * 8f).coerceIn(0f, 100f)
                                 _inputAudioRms.value = scaled
+                                if (scaled >= 15f) {
+                                    if (pendingSpeechOnsetElapsedMs == 0L) {
+                                        pendingSpeechOnsetElapsedMs = SystemClock.elapsedRealtime()
+                                    }
+                                    coord.extendCommandWindowOnSpeechActivity()
+                                }
                             }
 
                             override fun onBufferReceived(buffer: ByteArray?) {}
@@ -2465,33 +2974,38 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                             override fun onEndOfSpeech() {
                                 isNativeRecognizerListening = false
                                 _inputAudioRms.value = 0f
+                                pendingSpeechEndElapsedMs = SystemClock.elapsedRealtime()
+                                if (_observedCaptureState.value == ObservedAssistantCaptureState.LISTENING) {
+                                    _observedCaptureState.value = ObservedAssistantCaptureState.PROCESSING
+                                }
                             }
 
                             override fun onError(error: Int) {
                                 isNativeRecognizerListening = false
                                 _inputAudioRms.value = 0f
-                                // NEVER auto-restart SpeechRecognizer in a loop!
-                                // Return cleanly to wake-only listening when the bounded command window ends or errors.
-                                coord.returnToWakeOnlyListening("STT_BOUNDED_WINDOW_ERROR_$error")
-                                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                                    com.example.service.WakeWordForegroundService.resume(context)
+                                if (pendingSpeechEndElapsedMs == 0L) {
+                                    pendingSpeechEndElapsedMs = SystemClock.elapsedRealtime()
                                 }
+                                // NEVER auto-restart SpeechRecognizer in a loop!
+                                recordSoundDetectedNoAcceptedCommand("STT_BOUNDED_WINDOW_ERROR_$error")
                             }
 
                             override fun onResults(results: Bundle?) {
                                 isNativeRecognizerListening = false
                                 _inputAudioRms.value = 0f
+                                if (pendingSpeechEndElapsedMs == 0L) {
+                                    pendingSpeechEndElapsedMs = SystemClock.elapsedRealtime()
+                                }
                                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                                 val topText = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
                                 if (topText.isNotBlank()) {
+                                    pendingFinalRecognitionObserved = true
+                                    _observedCaptureState.value = ObservedAssistantCaptureState.PROCESSING
                                     scope.launch {
                                         processConsentedVoiceAudioTurn(topText)
                                     }
                                 } else {
-                                    coord.returnToWakeOnlyListening("STT_EMPTY_RESULT_RETURN_TO_WAKE")
-                                    if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                                        com.example.service.WakeWordForegroundService.resume(context)
-                                    }
+                                    recordSoundDetectedNoAcceptedCommand("STT_EMPTY_RESULT_RETURN_TO_WAKE")
                                 }
                             }
 
@@ -2502,6 +3016,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                     ?.trim()
                                     .orEmpty()
                                 if (partial.isNotBlank()) {
+                                    pendingPartialRecognitionCount += 1
+                                    if (pendingSpeechOnsetElapsedMs == 0L) {
+                                        pendingSpeechOnsetElapsedMs = SystemClock.elapsedRealtime()
+                                    }
+                                    coord.extendCommandWindowOnSpeechActivity()
                                     _liveUserTranscript.value = partial
                                 }
                             }
@@ -2518,24 +3037,39 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "ur-PK", "hi-IN"))
                         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 420L)
-                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 320L)
+                        // Balanced endpointing so natural Urdu/mixed pauses are never cut off mid-command
+                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 750L)
+                        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 550L)
                     }
                     nativeSpeechRecognizer?.startListening(intent)
                     isNativeRecognizerListening = true
+                    if (autoConfirmCaptureReadyInTest) {
+                        markCaptureReady("SPEECH_RECOGNIZER_START_LISTENING")
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Native SpeechRecognizer fallback to 16kHz PCM stream: ${e.message}")
                 isNativeRecognizerListening = false
-                if (micStreamingJob?.isActive != true) {
+                val pcmAcquired = coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
+                    releaseMicAudioRecord()
+                }
+                if (pcmAcquired && micStreamingJob?.isActive != true) {
                     start16kHzMicrophonePcmStream()
+                }
+                if (autoConfirmCaptureReadyInTest) {
+                    markCaptureReady("PCM_FALLBACK_AFTER_STT_EXCEPTION")
                 }
             }
         }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            startRecognizerBlock.run()
+        } else {
+            mainHandler.post(startRecognizerBlock)
+        }
     }
 
-    fun stopNativeSpeechRecognizerLoop() {
-        mainHandler.post {
+    fun stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership: Boolean = true) {
+        val stopBlock = Runnable {
             try {
                 isNativeRecognizerListening = false
                 nativeSpeechRecognizer?.stopListening()
@@ -2543,9 +3077,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 nativeSpeechRecognizer?.destroy()
             } catch (_: Exception) {
             } finally {
-                nativeSpeechRecognizer = null
-                AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
+                if (nativeSpeechRecognizer != null) {
+                    nativeSpeechRecognizer = null
+                    _activeRecognizerInstanceCount.updateAndGet { (it - 1).coerceAtLeast(0) }
+                }
+                if (releaseCoordinatorOwnership) {
+                    AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
+                }
             }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            stopBlock.run()
+        } else {
+            mainHandler.post(stopBlock)
         }
     }
 
@@ -2625,10 +3169,17 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             triedFallbackModel = false
             connectBidiWebSocket(LIVE_MODEL_PRIMARY)
         } else {
-            ttsFallback?.speak(wakeGreeting, 1.0f, 1.0f, DetectedLanguage.ROMAN_URDU.ttsLocale)
+            val savedPitch = SpeechPreferenceStore.getPitch(context)
+            val savedRate = SpeechPreferenceStore.getSpeechRate(context)
+            ttsFallback?.speak(wakeGreeting, savedPitch, savedRate, DetectedLanguage.ROMAN_URDU.ttsLocale)
         }
         if (initialCommandAfterWake.isNotBlank()) {
             sendTextMessageToLiveSession(initialCommandAfterWake)
+        } else {
+            launchSessionAndStartCommandListening(
+                reason = "WAKE_UP_FROM_STANDBY",
+                openBoundedCommandWindow = true
+            )
         }
     }
 
@@ -2636,16 +3187,22 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      * Auto-Resume on Focus / Visibility Return (`visibilitychange` / `window.onfocus` / `onResume`):
      * Immediately resumes the 24kHz AudioTrack + 1Hz sub-audible carrier, restarts 16kHz mic capture if paused,
      * and reconnects the Gemini Live WebSocket if Android paused or dropped it while in WhatsApp.
+     *
+     * CRITICAL: Never overrides a deliberate Stop or Mute.
      */
     fun ensureSessionAliveOnResume() {
         restoreAuthoritativeSpeechPreferences()
         val coord = AssistantAudioStateMachine.shared
         // Respect user's armed/stopped/muted choice on resume!
-        if (!_isSessionActive.value ||
-            coord.isStoppedByUserPersisted(context) ||
-            !coord.isUserArmedPersisted(context) ||
-            coord.isDeviceMutedPersisted(context)
-        ) {
+        if (coord.isStoppedByUserPersisted(context) || coord.isStoppedByUserInMemory()) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
+            return
+        }
+        if (_isMicMuted.value || coord.isDeviceMutedPersisted(context) || coord.isDeviceMutedInMemory()) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.MUTED
+            return
+        }
+        if (!_isSessionActive.value || !coord.isUserArmedPersisted(context)) {
             return
         }
         val hasMicPerm = ContextCompat.checkSelfPermission(
@@ -2654,6 +3211,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         ) == PackageManager.PERMISSION_GRANTED
         if (!hasMicPerm) {
             coord.inspectWakeAndAssistantReadiness(context)
+            _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+            _captureErrorDetail.value = "Microphone permission (RECORD_AUDIO) is required."
             return
         }
 
@@ -2671,9 +3230,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             if (hasCloudKey) {
                 coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
                     releaseMicAudioRecord()
-                    stopNativeSpeechRecognizerLoop()
                 }
                 start16kHzMicrophonePcmStream()
+            } else if (coord.activeMicOwner.value == MicComponentOwner.NONE) {
+                coord.acquireMicrophoneOwnership(MicComponentOwner.WAKE_WORD_SERVICE)
             }
         }
         if (inactivityTimerJob?.isActive != true) {
@@ -2695,10 +3255,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         _isSessionActive.value = false
         _isMicMuted.value = false
         isWebSocketReady.set(false)
+        lastCaptureReadyElapsedMs = 0L
         inactivityTimerJob?.cancel()
         inactivityTimerJob = null
         JarvisHandsFreeEngine.setKeepAliveCarrierActive(false)
         _connectionState.value = LiveConnectionState.DISCONNECTED
+        _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
         _inputAudioRms.value = 0f
         _outputAudioRms.value = 0f
         _activeFrequencyBands.value = List(8) { 0.08f }
@@ -2712,7 +3274,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         micStreamingJob?.cancel()
         micStreamingJob = null
         releaseMicAudioRecord()
-        stopNativeSpeechRecognizerLoop()
+        stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership = true)
         AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE)
         AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
 
@@ -2731,8 +3293,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         AssistantAudioStateMachine.shared.setDeviceMutedPinned(context, nextMute, "LIVE_MUTE_TOGGLE")
         if (nextMute) {
             _inputAudioRms.value = 0f
+            _observedCaptureState.value = ObservedAssistantCaptureState.MUTED
             releaseMicAudioRecord()
-            stopNativeSpeechRecognizerLoop()
+            stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership = true)
+        } else {
+            if (_isSessionActive.value && !AssistantAudioStateMachine.shared.isStoppedByUserInMemory()) {
+                startActiveCommandCapture("UNMUTE_RESUME_CAPTURE")
+            } else {
+                _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
+            }
         }
         return nextMute
     }
@@ -2899,34 +3468,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             return
         }
 
-        // SUPER-FAST LOCAL TASK EXECUTION (< 5ms):
-        // If the utterance contains any deterministic device task (play video, search, open app, flashlight, WhatsApp, etc.),
-        // execute it immediately via processFallbackLiveTurn without waiting for WebSocket round-trip latency!
-        val instantDeviceTasks = SuperAgiBrainEngine.extractAllDeviceTasks(context, effectiveUtterance)
-        val isReturnToOrigin = com.omnivoice.agentfix.UiTools.isReturnToPreviousAppCommand(effectiveUtterance)
-        val ws = activeWebSocket
-        val isOnlineOrLiveReady = (ws != null && isWebSocketReady.get()) || OmniAutonomousCoreEngine.refreshOnlineState(context)
-        if (isReturnToOrigin || instantDeviceTasks.isNotEmpty() || ws == null || !isWebSocketReady.get() || !isOnlineOrLiveReady) {
-            scope.launch {
-                processFallbackLiveTurn(effectiveUtterance, null, turnCommandId)
-            }
-        } else {
-            val clientContentMsg = JSONObject().apply {
-                put("clientContent", JSONObject().apply {
-                    put("turns", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("role", "user")
-                            put("parts", JSONArray().apply {
-                                put(JSONObject().put("text", effectiveUtterance))
-                            })
-                        })
-                    })
-                    put("turnComplete", true)
-                })
-            }
-            val serializedClientContent = clientContentMsg.toString()
-            lastSentClientContentJson = serializedClientContent
-            ws.send(serializedClientContent)
+        // Route both deterministic device tasks and conversational turns through processFallbackLiveTurn,
+        // which supports live WebSocket clientContent with a bounded audio-delivery watchdog AND fast local task execution.
+        scope.launch {
+            processFallbackLiveTurn(effectiveUtterance, null, turnCommandId)
         }
     }
 
@@ -2946,8 +3491,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY" || !OmniAutonomousCoreEngine.refreshOnlineState(context)) {
             Log.i(TAG, "Running Hybrid Live Streaming mode (online=${OmniAutonomousCoreEngine.isNetworkOnline.value})")
-            _connectionState.value = LiveConnectionState.LIVE_LISTENING
-            _liveAiTranscript.value = "$assistantName Live Ready (${authoritativeVoice.voiceName}) • Speak in English, اردو, or Roman Urdu"
+            if (isCaptureCurrentlyReady()) {
+                _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
+                _liveAiTranscript.value = "$assistantName Listening (${authoritativeVoice.voiceName}) • Speak in English, اردو, or Roman Urdu"
+            }
             return
         }
 
@@ -3012,10 +3560,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         triedFallbackModel = true
                         connectBidiWebSocket(LIVE_MODEL_FALLBACK)
                     } else if (_isSessionActive.value) {
-                        _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                        if (_liveAiTranscript.value.startsWith("Connecting")) {
-                            _liveAiTranscript.value =
-                                "$assistantName Live Active (${_selectedVoice.value.voiceName}) • Speak naturally"
+                        if (isCaptureCurrentlyReady()) {
+                            _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                            _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
+                            if (_liveAiTranscript.value.startsWith("Connecting") || _liveAiTranscript.value.contains("Starting")) {
+                                _liveAiTranscript.value =
+                                    "$assistantName Listening (${_selectedVoice.value.voiceName}) • Speak naturally"
+                            }
                         }
                     }
                 }
@@ -3033,15 +3584,23 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
         try {
             val root = JSONObject(rawJson)
+            val nowElapsed = SystemClock.elapsedRealtime()
 
             // 1. setupComplete
             if (root.has("setupComplete")) {
                 isWebSocketReady.set(true)
-                _connectionState.value = LiveConnectionState.LIVE_LISTENING
                 val currentVoice = restoreAuthoritativeSpeechPreferences()
                 val assistantName = OmniAutonomousCoreEngine.permanentMemory.value.assistantName
-                _liveAiTranscript.value =
-                    "$assistantName Live Connected (${currentVoice.voiceName}) • Listening..."
+                if (isCaptureCurrentlyReady()) {
+                    _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                    _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
+                    _liveAiTranscript.value =
+                        "$assistantName Live Connected (${currentVoice.voiceName}) • Listening..."
+                } else {
+                    _observedCaptureState.value = ObservedAssistantCaptureState.STARTING
+                    _liveAiTranscript.value =
+                        "$assistantName Live Connected (${currentVoice.voiceName}) • Starting microphone..."
+                }
                 Log.d(TAG, "Gemini Live setupComplete received (gen=$socketGeneration, voice=${currentVoice.voiceName})")
                 return
             }
@@ -3054,7 +3613,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 ?.optString("text", "")
                 .orEmpty()
             if (inlineInputTranscriptChunk.isNotEmpty()) {
-                if (currentVoiceTurnCompleted) {
+                if (currentVoiceTurnCompleted || activeCommandId.isBlank()) {
                     startNewCommandTurn()
                     _liveUserTranscript.value = ""
                     currentTurnStartedFromInputTranscription = true
@@ -3063,6 +3622,16 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 com.omnivoice.agentfix.AgentSession.onUserUtterance(_liveUserTranscript.value)
                 resolveCommandReplyLanguage(_liveUserTranscript.value, mutateHistoryIfGenuine = true)
                 OmniAutonomousCoreEngine.analyzeUserMood(_liveUserTranscript.value, _inputAudioRms.value)
+                AssistantAudioStateMachine.shared.extendCommandWindowOnSpeechActivity()
+                updateCommandDiagnostic(activeCommandId) { current ->
+                    current.copy(
+                        speechOnsetElapsedMs = if (current.speechOnsetElapsedMs > 0L) current.speechOnsetElapsedMs else nowElapsed,
+                        speechEndElapsedMs = nowElapsed,
+                        commandAcceptedElapsedMs = if (current.commandAcceptedElapsedMs > 0L) current.commandAcceptedElapsedMs else nowElapsed,
+                        partialRecognitionCount = current.partialRecognitionCount + 1,
+                        finalRecognitionObserved = true
+                    )
+                }
             }
 
             val hasEmbeddedToolCall = root.optJSONObject("toolCall") != null ||
@@ -3071,7 +3640,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     (0 until partsArr.length()).any { idx -> partsArr.optJSONObject(idx)?.optJSONObject("functionCall") != null }
                 } == true)
             if (hasEmbeddedToolCall) {
-                if (currentVoiceTurnCompleted && !currentTurnStartedFromInputTranscription && inlineInputTranscriptChunk.isEmpty()) {
+                if ((currentVoiceTurnCompleted || activeCommandId.isBlank()) && !currentTurnStartedFromInputTranscription && inlineInputTranscriptChunk.isEmpty()) {
                     startNewCommandTurn()
                     // Clear the per-turn transcript and AgentSession utterance so stale return-to-origin
                     // intents from previous turns cannot leak, while SpeechPreferenceStore preserves
@@ -3081,6 +3650,13 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
                 currentTurnHasPendingOrExecutedAction = true
                 awaitingVerifiedToolOutcome = true
+                _observedCaptureState.value = ObservedAssistantCaptureState.PROCESSING
+                updateCommandDiagnostic(activeCommandId) { current ->
+                    current.copy(
+                        requestSentElapsedMs = if (current.requestSentElapsedMs > 0L) current.requestSentElapsedMs else nowElapsed,
+                        firstResponseReceivedElapsedMs = if (current.firstResponseReceivedElapsedMs > 0L) current.firstResponseReceivedElapsedMs else nowElapsed
+                    )
+                }
                 clearPlaybackQueueAndStopImmediately(interruptReason = "INCOMING_SERVER_TOOL_CALL")
             }
 
@@ -3093,6 +3669,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     Log.d(TAG, "Gemini Live interrupted by user speech — clearing 24kHz audio queue")
                     clearPlaybackQueueAndStopImmediately(interruptReason = "SERVER_INTERRUPTED")
                     _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                    if (isCaptureCurrentlyReady()) {
+                        _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
+                    }
                 }
 
                 // Real-time output audio transcription (what Gemini is saying)
@@ -3100,9 +3679,24 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 if (outputTrans != null) {
                     val aiChunk = outputTrans.optString("text", "")
                     if (aiChunk.isNotEmpty()) {
+                        if (activeCommandId.isNotBlank()) {
+                            updateCommandDiagnostic(activeCommandId) { current ->
+                                current.copy(
+                                    firstResponseReceivedElapsedMs = if (current.firstResponseReceivedElapsedMs > 0L) {
+                                        current.firstResponseReceivedElapsedMs
+                                    } else {
+                                        nowElapsed
+                                    }
+                                )
+                            }
+                        }
                         val candidateTranscript = if (_liveAiTranscript.value.contains("Live Connected") ||
                             _liveAiTranscript.value.contains("Live Active") ||
-                            _liveAiTranscript.value.startsWith("Connecting")
+                            _liveAiTranscript.value.contains("Listening") ||
+                            _liveAiTranscript.value.contains("Starting") ||
+                            _liveAiTranscript.value.startsWith("Connecting") ||
+                            _liveAiTranscript.value.startsWith("Processing") ||
+                            _liveAiTranscript.value.startsWith("Soch raha")
                         ) {
                             aiChunk.trimStart()
                         } else {
@@ -3306,13 +3900,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                 if (recorder.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord 16kHz failed to initialize")
+                    _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+                    _captureErrorDetail.value = "Microphone hardware failed to initialize."
                     return@launch
                 }
 
                 micAudioRecord = recorder
+                _activeAudioRecordInstanceCount.incrementAndGet()
                 AssistantAudioStateMachine.shared.applyPreferredInputDevice(context, recorder)
                 attachHardwareAudioFilters(recorder.audioSessionId)
                 recorder.startRecording()
+                if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING && autoConfirmCaptureReadyInTest) {
+                    markCaptureReady("AUDIO_RECORD_16KHZ")
+                }
 
                 // 40ms low-latency chunk at 16kHz = 640 samples (1280 bytes) for ultra-fast streaming
                 val shortBuffer = ShortArray(640)
@@ -3356,6 +3956,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
                         if (scaledRms >= 14f && OmniAutonomousCoreEngine.operatingMode.value == OmniOperatingMode.STATE_ACTIVE_LISTENING) {
                             OmniAutonomousCoreEngine.resetInactivityTimer()
+                            if (pendingSpeechOnsetElapsedMs == 0L) {
+                                pendingSpeechOnsetElapsedMs = SystemClock.elapsedRealtime()
+                            }
+                            AssistantAudioStateMachine.shared.extendCommandWindowOnSpeechActivity()
                         }
 
                         // If Gemini is not currently speaking, drive the Orb spectrum from the user's voice
@@ -3397,6 +4001,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                 if (!fallbackSpeechActive) {
                                     fallbackSpeechActive = true
                                     fallbackTurnStartMs = now
+                                    pendingSpeechOnsetElapsedMs = SystemClock.elapsedRealtime()
                                     fallbackTurnPcmBuffer.reset()
                                     if (!isStandby) {
                                         _liveUserTranscript.value = "Listening..."
@@ -3408,10 +4013,11 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                                 fallbackTurnPcmBuffer.write(chunkBytes)
                                 val silenceMs = now - fallbackLastVoiceMs
                                 val durationMs = now - fallbackTurnStartMs
-                                if (silenceMs >= 260L && durationMs >= 180L) {
+                                if (silenceMs >= 620L && durationMs >= 180L) {
                                     val capturedPcm = fallbackTurnPcmBuffer.toByteArray()
                                     fallbackTurnPcmBuffer.reset()
                                     fallbackSpeechActive = false
+                                    pendingSpeechEndElapsedMs = SystemClock.elapsedRealtime()
                                     if (isStandby) {
                                         // Wake from Standby when voice wake phrase is spoken
                                         wakeUpFromStandby()
@@ -3502,7 +4108,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         val alignedBytes = ensure24kHzPcm16Mono(taggedChunk.pcmBytes, OUTPUT_SAMPLE_RATE)
                         if (alignedBytes.isNotEmpty()) {
                             recordPcmFrameWrittenToHardware(taggedChunk.commandId)
-                            track.write(alignedBytes, 0, alignedBytes.size)
+                            val written = track.write(alignedBytes, 0, alignedBytes.size)
+                            if (written < 0) {
+                                recordPcmPlaybackFailure(taggedChunk.commandId, "AUDIO_TRACK_WRITE_ERROR_$written")
+                            }
                         }
                     } else {
                         if (isPcmHardwareDrainInProgress) {
@@ -3531,41 +4140,89 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
     }
 
+    fun recordPcmPlaybackFailure(commandId: String = activeCommandId, reason: String = "AUDIO_TRACK_PLAYBACK_FAILED") {
+        val cmdId = commandId.ifBlank { activeCommandId }
+        isPcmHardwareDrainInProgress = false
+        activePcmPlaybackCommandId = ""
+        _outputAudioRms.value = 0f
+        _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+        val errMsg = "Received audio reply, but speaker playback failed ($reason)."
+        _captureErrorDetail.value = errMsg
+        _liveAiTranscript.value = errMsg
+        if (cmdId.isNotBlank()) {
+            val updatedDiag = updateCommandDiagnostic(cmdId) { current ->
+                current.copy(
+                    outputState = CommandSpeechOutputState.FAILED,
+                    stallStage = CommandTurnStallStage.RECEIVED_AUDIO_PLAYBACK_FAILED,
+                    cancellationReason = reason
+                )
+            }
+            if (lastTurnReport?.commandId == cmdId) {
+                lastTurnReport = lastTurnReport?.copy(
+                    outputState = updatedDiag.outputState,
+                    stallStage = updatedDiag.stallStage
+                )
+            }
+            AudioOutputManager.releaseTurnOutput(cmdId, AudioOutputManager.OutputModality.CLOUD_PCM_24KHZ)
+            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
+                source = "PCM_PLAYBACK_FAILED",
+                ownerToken = cmdId,
+                immediateCooldownClear = true
+            )
+        }
+    }
+
     private fun recordPcmFrameWrittenToHardware(commandId: String) {
         val cmdId = commandId.ifBlank { activeCommandId.ifBlank { "live_stream_turn" } }
+        val nowElapsed = SystemClock.elapsedRealtime()
         activePcmPlaybackCommandId = cmdId
         isPcmHardwareDrainInProgress = true
         _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
+        _observedCaptureState.value = ObservedAssistantCaptureState.SPEAKING
         val updatedDiag = updateCommandDiagnostic(cmdId) { current ->
             current.copy(
                 outputState = CommandSpeechOutputState.STARTED,
-                audioFramesPlayed = current.audioFramesPlayed + 1
+                audioFramesPlayed = current.audioFramesPlayed + 1,
+                playbackStartedElapsedMs = if (current.playbackStartedElapsedMs > 0L) {
+                    current.playbackStartedElapsedMs
+                } else {
+                    nowElapsed
+                }
             )
         }
         if (lastTurnReport?.commandId == cmdId) {
             lastTurnReport = lastTurnReport?.copy(
                 outputState = updatedDiag.outputState,
                 audioFramesReceived = updatedDiag.audioFramesReceived,
-                audioFramesPlayed = updatedDiag.audioFramesPlayed
+                audioFramesPlayed = updatedDiag.audioFramesPlayed,
+                playbackStartedElapsedMs = updatedDiag.playbackStartedElapsedMs
             )
         }
     }
 
     private fun completePcmPlaybackDrain(commandId: String) {
         val cmdId = commandId.ifBlank { activePcmPlaybackCommandId }
+        val nowElapsed = SystemClock.elapsedRealtime()
         isPcmHardwareDrainInProgress = false
         activePcmPlaybackCommandId = ""
         _outputAudioRms.value = 0f
-        _connectionState.value = LiveConnectionState.LIVE_LISTENING
         if (cmdId.isNotBlank()) {
             val updatedDiag = updateCommandDiagnostic(cmdId) { current ->
-                current.copy(outputState = CommandSpeechOutputState.COMPLETED)
+                current.copy(
+                    outputState = CommandSpeechOutputState.COMPLETED,
+                    playbackCompletedElapsedMs = if (current.playbackCompletedElapsedMs > 0L) {
+                        current.playbackCompletedElapsedMs
+                    } else {
+                        nowElapsed
+                    }
+                )
             }
             if (lastTurnReport?.commandId == cmdId) {
                 lastTurnReport = lastTurnReport?.copy(
                     outputState = updatedDiag.outputState,
                     audioFramesReceived = updatedDiag.audioFramesReceived,
-                    audioFramesPlayed = updatedDiag.audioFramesPlayed
+                    audioFramesPlayed = updatedDiag.audioFramesPlayed,
+                    playbackCompletedElapsedMs = updatedDiag.playbackCompletedElapsedMs
                 )
             }
             AudioOutputManager.releaseTurnOutput(cmdId, AudioOutputManager.OutputModality.CLOUD_PCM_24KHZ)
@@ -3578,6 +4235,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 source = "GEMINI_LIVE_PCM_DRAINED"
             )
         }
+        handoffToPostTurnCapture("GEMINI_LIVE_PCM_DRAINED")
     }
 
     /**
@@ -3618,10 +4276,12 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             }
             return false
         }
+        val nowElapsed = SystemClock.elapsedRealtime()
         postActionAudioWatchdogJobs.remove(cmdId)?.cancel()
         activePcmPlaybackCommandId = cmdId
         isPcmHardwareDrainInProgress = true
         _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
+        _observedCaptureState.value = ObservedAssistantCaptureState.SPEAKING
         AssistantAudioStateMachine.shared.notifyAssistantSpeechStarted(
             spokenText = _liveAiTranscript.value.ifBlank { lastSpokenReplyForCurrentCommand },
             source = "GEMINI_LIVE_PCM",
@@ -3635,14 +4295,26 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             }
             current.copy(
                 outputState = nextState,
-                audioFramesReceived = current.audioFramesReceived + 1
+                audioFramesReceived = current.audioFramesReceived + 1,
+                firstResponseReceivedElapsedMs = if (current.firstResponseReceivedElapsedMs > 0L) {
+                    current.firstResponseReceivedElapsedMs
+                } else {
+                    nowElapsed
+                },
+                audioReceivedElapsedMs = if (current.audioReceivedElapsedMs > 0L) {
+                    current.audioReceivedElapsedMs
+                } else {
+                    nowElapsed
+                }
             )
         }
         if (lastTurnReport?.commandId == cmdId) {
             lastTurnReport = lastTurnReport?.copy(
                 outputState = updatedDiag.outputState,
                 audioFramesReceived = updatedDiag.audioFramesReceived,
-                audioFramesPlayed = updatedDiag.audioFramesPlayed
+                audioFramesPlayed = updatedDiag.audioFramesPlayed,
+                firstResponseReceivedElapsedMs = updatedDiag.firstResponseReceivedElapsedMs,
+                audioReceivedElapsedMs = updatedDiag.audioReceivedElapsedMs
             )
         }
         pcm24kPlaybackQueue.offer(CommandTaggedPcmChunk(cmdId, pcm24kBytes))
@@ -5218,23 +5890,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 activeCommandId = ""
                 awaitingVerifiedToolOutcome = false
                 currentTurnHasPendingOrExecutedAction = false
-                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                    com.example.service.WakeWordForegroundService.resume(context)
-                }
+                handoffToPostTurnCapture("VOICE_CANCEL_BAS_STOP")
             }
             WakeSpeechCandidateDecision.WAKE_WORD_DETECTED_OPEN_WINDOW -> {
                 _liveUserTranscript.value = recognizedTranscript
                 _liveAiTranscript.value = "Jee, hukum karein."
+                _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
             }
             WakeSpeechCandidateDecision.WAKE_AND_INLINE_COMMAND_ACCEPTED,
             WakeSpeechCandidateDecision.COMMAND_ACCEPTED_IN_WINDOW -> {
                 if (eval.shouldExecuteCommand && eval.extractedCommandText.isNotBlank()) {
                     processFallbackLiveTurn(eval.extractedCommandText, null, nowMs = nowMs)
                 }
-                coord.returnToWakeOnlyListening("COMMAND_TURN_FINISHED")
-                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                    com.example.service.WakeWordForegroundService.resume(context)
-                }
+                handoffToPostTurnCapture("COMMAND_TURN_FINISHED")
             }
             else -> {
                 // Suppressed during TTS/notification, or ignored background conversation / TV audio / stopped
@@ -5258,12 +5926,40 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             return
         }
 
-        if (!isGeminiLiveWebSocketConnected()) {
-            _connectionState.value = LiveConnectionState.CONNECTING
+        val initialText = textInput?.trim().orEmpty()
+        val preTurnId = if (!commandIdOverride.isNullOrBlank()) {
+            if (activeCommandId != commandIdOverride) {
+                startNewCommandTurn(commandId = commandIdOverride, utterance = initialText)
+            } else {
+                commandIdOverride
+            }
+        } else if (initialText.isNotEmpty()) {
+            startNewCommandTurn(utterance = initialText)
+        } else {
+            ""
         }
 
-        val rawResult = if (!textInput.isNullOrBlank()) {
-            SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(context, textInput)
+        if (preTurnId.isNotBlank()) {
+            _observedCaptureState.value = ObservedAssistantCaptureState.PROCESSING
+            val preLang = resolveCommandReplyLanguage(initialText, mutateHistoryIfGenuine = false).language
+            _liveAiTranscript.value = when (preLang) {
+                DetectedLanguage.URDU_NASTALIQ -> "کارروائی جاری ہے..."
+                DetectedLanguage.ROMAN_URDU, DetectedLanguage.MIXED -> "Processing... Soch raha hoon..."
+                DetectedLanguage.ENGLISH -> "Processing..."
+            }
+        }
+
+        val reqSentAtElapsed = SystemClock.elapsedRealtime()
+        if (preTurnId.isNotBlank()) {
+            updateCommandDiagnostic(preTurnId) { current ->
+                current.copy(
+                    requestSentElapsedMs = if (current.requestSentElapsedMs > 0L) current.requestSentElapsedMs else reqSentAtElapsed
+                )
+            }
+        }
+
+        val rawResult = if (initialText.isNotEmpty()) {
+            SuperAgiBrainEngine.analyzeAndRespondLikeGeminiAndChatGpt(context, initialText)
         } else if (wavBytes != null) {
             val audioRes = DeterministicNluEngine.analyzeAudioDeterministically(context, wavBytes, "audio/wav")
             if (audioRes.verbatimTranscript.isNotBlank()) {
@@ -5277,25 +5973,25 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         // CRITICAL FIX: Never endlessly speak "Jee main sun raha hoon, hukum karein." on unverified silence/background noise,
         // and NEVER restart SpeechRecognizer in a continuous wake loop!
-        if (rawResult.verbatimTranscript.isBlank() && textInput.isNullOrBlank()) {
-            _connectionState.value = LiveConnectionState.LIVE_LISTENING
-            coord.returnToWakeOnlyListening("SILENT_TURN_RETURN_TO_WAKE")
-            if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                com.example.service.WakeWordForegroundService.resume(context)
-            }
+        if (rawResult.verbatimTranscript.isBlank() && initialText.isBlank()) {
+            recordSoundDetectedNoAcceptedCommand("SILENT_OR_UNRECOGNIZED_AUDIO_TURN")
             return
         }
 
-        val cleanUtterance = rawResult.verbatimTranscript.ifBlank { textInput.orEmpty().trim() }
-        val turnCommandId = if (!commandIdOverride.isNullOrBlank()) {
-            if (activeCommandId != commandIdOverride) {
-                startNewCommandTurn(commandId = commandIdOverride, utterance = cleanUtterance)
-            } else {
-                commandIdOverride
-            }
+        val cleanUtterance = rawResult.verbatimTranscript.ifBlank { initialText }
+        val turnCommandId = if (preTurnId.isNotBlank()) {
+            preTurnId
         } else {
             startNewCommandTurn(utterance = cleanUtterance)
         }
+        val firstRespElapsed = SystemClock.elapsedRealtime()
+        updateCommandDiagnostic(turnCommandId) { current ->
+            current.copy(
+                requestSentElapsedMs = if (current.requestSentElapsedMs > 0L) current.requestSentElapsedMs else reqSentAtElapsed,
+                firstResponseReceivedElapsedMs = if (current.firstResponseReceivedElapsedMs > 0L) current.firstResponseReceivedElapsedMs else firstRespElapsed
+            )
+        }
+
         if (cleanUtterance.isNotBlank()) {
             _liveUserTranscript.value = cleanUtterance
             OmniAutonomousCoreEngine.analyzeUserMood(cleanUtterance, _inputAudioRms.value)
@@ -5313,46 +6009,45 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         var finalSpokenReply = if (hasActionTasks) "" else sanitizeSpokenText(rawResult.spokenReply, cleanUtterance)
 
         if (!hasActionTasks) {
+            lastCompletedCommandId = turnCommandId
+            lastFinalStatusForCurrentCommand = "CONVERSATIONAL"
+            lastSpokenReplyForCurrentCommand = finalSpokenReply
+            lastDiagnosticTextForCurrentCommand = finalSpokenReply
             _liveAiTranscript.value = finalSpokenReply
             val liveConnectedNow = isGeminiLiveWebSocketConnected()
             if (liveConnectedNow) {
                 val ws = activeWebSocket
-                if (ws != null) {
-                    val clientContentMsg = JSONObject().apply {
-                        put("clientContent", JSONObject().apply {
-                            put("turns", JSONArray().apply {
-                                put(JSONObject().apply {
-                                    put("role", "user")
-                                    put("parts", JSONArray().apply {
-                                        put(JSONObject().put("text", cleanUtterance))
-                                    })
+                val clientContentMsg = JSONObject().apply {
+                    put("clientContent", JSONObject().apply {
+                        put("turns", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("role", "user")
+                                put("parts", JSONArray().apply {
+                                    put(JSONObject().put("text", cleanUtterance))
                                 })
                             })
-                            put("turnComplete", true)
                         })
-                    }
-                    val serializedClientContent = clientContentMsg.toString()
-                    lastSentClientContentJson = serializedClientContent
-                    val sentOk = try {
+                        put("turnComplete", true)
+                    })
+                }
+                val serializedClientContent = clientContentMsg.toString()
+                lastSentClientContentJson = serializedClientContent
+                val sentOk = if (ws != null && isWebSocketReady.get()) {
+                    try {
                         ws.send(serializedClientContent)
                     } catch (_: Exception) {
                         false
                     }
-                    if (!sentOk) {
-                        deliverCommandSpeechViaLocalTts(
-                            commandId = turnCommandId,
-                            utterance = cleanUtterance,
-                            spokenReply = finalSpokenReply,
-                            diagnosticText = finalSpokenReply,
-                            finalStatus = "CONVERSATIONAL",
-                            language = userLang,
-                            languageSelectionReason = langResolution.reason,
-                            isRecovery = true,
-                            recoveryReason = "WS_CONVERSATION_SEND_FALSE"
-                        )
-                    }
+                } else {
+                    false
                 }
-                _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                updateCommandDiagnostic(turnCommandId) { current ->
+                    current.copy(
+                        wsSendSucceeded = sentOk,
+                        outputState = CommandSpeechOutputState.REQUESTED,
+                        stallStage = if (!sentOk) CommandTurnStallStage.COMMAND_ACCEPTED_REQUEST_NOT_SENT else current.stallStage
+                    )
+                }
                 recordTurnExecutionReport(
                     commandId = turnCommandId,
                     utterance = cleanUtterance,
@@ -5364,6 +6059,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     languageSelectionReason = langResolution.reason,
                     liveConnected = true
                 )
+                if (sentOk) {
+                    schedulePostActionLiveAudioWatchdog(turnCommandId)
+                } else {
+                    triggerBoundedSpeechRecoveryForCommand(
+                        commandId = turnCommandId,
+                        reason = "WS_CONVERSATION_SEND_FALSE"
+                    )
+                }
             } else {
                 deliverCommandSpeechViaLocalTts(
                     commandId = turnCommandId,
@@ -5679,13 +6382,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
                 val serializedAck = ackClientContentMsg.toString()
                 lastSentClientContentJson = serializedAck
-                updateCommandDiagnostic(turnCommandId) { current ->
-                    current.copy(
-                        route = "LOCAL_FAST_PATH_LIVE_ACK",
-                        observedActionResult = finalStatusForTurn,
-                        outputState = CommandSpeechOutputState.REQUESTED
-                    )
-                }
                 val sentOk = if (ws != null && isWebSocketReady.get()) {
                     try {
                         ws.send(serializedAck)
@@ -5696,8 +6392,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 } else {
                     false
                 }
-                _connectionState.value = LiveConnectionState.LIVE_LISTENING
-                coord.returnToWakeOnlyListening("LIVE_ACTION_TURN_REQUESTED_SPEECH")
+                val ackSentElapsed = SystemClock.elapsedRealtime()
+                updateCommandDiagnostic(turnCommandId) { current ->
+                    current.copy(
+                        route = "LOCAL_FAST_PATH_LIVE_ACK",
+                        observedActionResult = finalStatusForTurn,
+                        wsSendSucceeded = sentOk,
+                        requestSentElapsedMs = if (current.requestSentElapsedMs > 0L) current.requestSentElapsedMs else ackSentElapsed,
+                        firstResponseReceivedElapsedMs = if (current.firstResponseReceivedElapsedMs > 0L) current.firstResponseReceivedElapsedMs else ackSentElapsed,
+                        outputState = CommandSpeechOutputState.REQUESTED,
+                        stallStage = if (!sentOk) CommandTurnStallStage.COMMAND_ACCEPTED_REQUEST_NOT_SENT else current.stallStage
+                    )
+                }
+                handoffToPostTurnCapture("LIVE_ACTION_TURN_REQUESTED_SPEECH")
                 if (sentOk) {
                     schedulePostActionLiveAudioWatchdog(turnCommandId)
                 } else {
@@ -5831,6 +6538,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
 
         val rec = micAudioRecord ?: return
         micAudioRecord = null
+        _activeAudioRecordInstanceCount.updateAndGet { (it - 1).coerceAtLeast(0) }
         try {
             if (rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                 rec.stop()

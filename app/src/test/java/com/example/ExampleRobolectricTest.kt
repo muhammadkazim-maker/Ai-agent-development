@@ -6524,4 +6524,467 @@ class ExampleRobolectricTest {
             ttsManager.shutdown()
         }
     }
+
+    @Test
+    fun repairAFollowUp_launchListeningLatencyAndStageDiagnostics() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val shadowApp = org.robolectric.Shadows.shadowOf(context as android.app.Application)
+        shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+
+        val coord = com.example.engine.AssistantAudioStateMachine.shared
+        coord.resetTelemetryCounters()
+        coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+        com.example.engine.SpeechPreferenceStore.resetForTest(context)
+        com.example.engine.AudioOutputManager.resetAll()
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+
+        val vm = com.example.ui.viewmodel.VoiceAssistantViewModel(context as android.app.Application)
+        val liveEngine = vm.omniLiveEngine
+        val ttsManager = vm.ttsManager
+        liveEngine.clearTurnReportsForTest()
+
+        val spokenEngineCalls = mutableListOf<Triple<String, String, Int>>()
+        ttsManager.setInitializedStateForTest(
+            initialized = true,
+            urduPkInstalled = true,
+            englishPkInstalled = true
+        )
+        ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+            spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+            android.speech.tts.TextToSpeech.SUCCESS
+        }
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            windowId: Int,
+            titleGuess: String,
+            drafts: Map<String, String> = emptyMap(),
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList()
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + 10L,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = -1,
+                activityComponent = "$pkg.MainActivity",
+                visibleApplicationPackages = setOf(pkg),
+                editableFieldDrafts = drafts
+            )
+        }
+
+        var openAppCount = 0
+        var returnToOriginCount = 0
+        var screenPhase = "NOTEPAD_DRAFT_42"
+
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notepad",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            screenPhase = "HOME_SCREEN"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                openAppCount += 1
+                screenPhase = "WHATSAPP_FOREGROUND"
+                true
+            } else {
+                false
+            }
+        }
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            returnToOriginCount += 1
+            screenPhase = "NOTEPAD_DRAFT_42"
+            true
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (screenPhase) {
+                "NOTEPAD_DRAFT_42" -> buildSnapshot(
+                    pkg = "com.example.notepad",
+                    label = "Notepad",
+                    windowId = 101,
+                    titleGuess = "Notepad - Draft 42",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                "HOME_SCREEN" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    windowId = 202,
+                    titleGuess = "Home",
+                    nodes = listOf(
+                        com.omnivoice.agentfix.UiNodeSummary(
+                            index = 1,
+                            viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                            className = "android.widget.TextView",
+                            packageName = "com.google.android.apps.nexuslauncher",
+                            text = "WhatsApp",
+                            contentDescription = "WhatsApp",
+                            hintText = "",
+                            isClickable = true,
+                            isLongClickable = false,
+                            isEditable = false,
+                            isScrollable = false,
+                            isFocused = false,
+                            isEnabled = true,
+                            bounds = android.graphics.Rect(100, 400, 260, 580)
+                        )
+                    )
+                )
+                "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    windowId = 303,
+                    titleGuess = "WhatsApp Chats"
+                )
+                else -> null
+            }
+        }
+
+        try {
+            // =========================================================================
+            // 1. PERMISSION-GRANT CONTINUATION & COLD LAUNCH -> STARTING -> LISTENING
+            //    - Denied permission sets ERROR + PERMISSION_REVOKED and does not claim Listening.
+            //    - Granting permission and launching transitions STARTING -> LISTENING
+            //      and opens bounded command window WITHOUT a second microphone tap.
+            // =========================================================================
+            shadowApp.denyPermissions(android.Manifest.permission.RECORD_AUDIO)
+            val deniedStart = vm.launchJarvisAndStartListening(reason = "COLD_LAUNCH_NO_PERMISSION")
+            assertFalse("Launch without RECORD_AUDIO must return false", deniedStart)
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.ERROR,
+                vm.observedCaptureState.value
+            )
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.PERMISSION_REVOKED,
+                coord.lifecycleState.value
+            )
+            assertFalse("Command window must not open without RECORD_AUDIO", coord.isCommandWindowOpen())
+
+            // Grant permission and test STARTING state before capture hardware confirms ready
+            shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+            liveEngine.autoConfirmCaptureReadyInTest = false
+            val startedAfterGrant = vm.launchJarvisAndStartListening(
+                reason = "PERMISSION_GRANTED_LAUNCH_JARVIS",
+                voice = com.example.engine.GeminiLiveVoice.PUCK
+            )
+            assertTrue("Launch after granting RECORD_AUDIO must succeed", startedAfterGrant)
+            assertEquals(
+                "Before capture readiness callback fires, state must be STARTING (never Listening)",
+                com.example.engine.ObservedAssistantCaptureState.STARTING,
+                vm.observedCaptureState.value
+            )
+            assertFalse(
+                "Transcript while STARTING must not claim Listening",
+                vm.liveAiTranscript.value.contains("Listening", ignoreCase = true)
+            )
+            assertTrue("Command window must be opened by Launch Jarvis without a second tap", coord.isCommandWindowOpen())
+            assertEquals(
+                com.example.engine.MicComponentOwner.COMMAND_WINDOW_CAPTURE,
+                coord.activeMicOwner.value
+            )
+
+            // Confirm capture ready -> transitions to LISTENING with monotonic timestamp
+            liveEngine.markCaptureReady("TEST_SPEECH_RECOGNIZER_READY")
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.LISTENING,
+                vm.observedCaptureState.value
+            )
+            assertTrue(liveEngine.lastLaunchRequestElapsedMs > 0L)
+            assertTrue(liveEngine.lastCaptureReadyElapsedMs >= liveEngine.lastLaunchRequestElapsedMs)
+            val measuredStartupMs = liveEngine.lastCaptureReadyElapsedMs - liveEngine.lastLaunchRequestElapsedMs
+            println("MEASURED_ROBOLECTRIC_STARTUP_TO_CAPTURE_READY_MS=${measuredMsOrZero(measuredStartupMs)}")
+
+            // =========================================================================
+            // 2. IDEMPOTENT REPEATED LAUNCH TAPS & OPTIONAL BOTTOM MIC TAPS
+            //    - Must not create duplicate sessions, duplicate recognizers, or >1 mic owner.
+            // =========================================================================
+            liveEngine.autoConfirmCaptureReadyInTest = true
+            val sessionStartsBeforeRepeat = liveEngine.liveSessionStartCount
+            vm.launchJarvisAndStartListening(reason = "REPEAT_LAUNCH_TAP_1")
+            vm.startGeminiLiveSession(com.example.engine.GeminiLiveVoice.PUCK)
+            vm.launchJarvisAndStartListening(reason = "STAGE_C_BOTTOM_MIC_BUTTON")
+            assertEquals(
+                "Repeated Launch Jarvis and bottom mic taps must reuse active session",
+                sessionStartsBeforeRepeat,
+                liveEngine.liveSessionStartCount
+            )
+            assertTrue(
+                "At most 1 SpeechRecognizer instance may be active",
+                liveEngine.activeRecognizerInstanceCount <= 1
+            )
+            assertEquals(
+                "Strictly 1 microphone owner at a time",
+                1,
+                coord.getMaxConcurrentMicOwnersObserved()
+            )
+
+            // =========================================================================
+            // 3. FIRST & SECOND COMMANDS IN SEQUENCE + MONOTONIC TIMESTAMPS & HANDOFF
+            //    - Command 1: "WhatsApp kholo" (from Notes draft 42)
+            //    - Command 2: "Uss previous screen par le kar jao jahan main pehle work kar raha tha"
+            // =========================================================================
+            val speechTs1 = android.os.SystemClock.elapsedRealtime()
+            liveEngine.recordSpeechCaptureProgressForTest(
+                onsetElapsedMs = speechTs1,
+                endElapsedMs = speechTs1,
+                partialCount = 2,
+                finalObserved = true
+            )
+            spokenEngineCalls.clear()
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = "cmd_seq_1"
+                )
+            }
+            assertEquals(1, openAppCount)
+            assertEquals("WHATSAPP_FOREGROUND", screenPhase)
+            assertEquals("com.example.notepad", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.packageName)
+            assertEquals("draft 42", com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body"))
+            val lastUtt1 = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(lastUtt1)
+            ttsManager.handleUtteranceDone(lastUtt1)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_seq_1")
+
+            val diag1 = liveEngine.getCommandAudioDiagnostic("cmd_seq_1")!!
+            assertTrue(diag1.captureReadyElapsedMs > 0L)
+            assertTrue(diag1.speechOnsetElapsedMs > 0L)
+            assertTrue(diag1.speechEndElapsedMs >= diag1.speechOnsetElapsedMs)
+            assertTrue(diag1.commandAcceptedElapsedMs >= diag1.speechEndElapsedMs)
+            assertTrue(diag1.requestSentElapsedMs >= diag1.commandAcceptedElapsedMs)
+            assertTrue(diag1.firstResponseReceivedElapsedMs >= diag1.requestSentElapsedMs)
+            assertTrue(diag1.audioReceivedElapsedMs >= diag1.firstResponseReceivedElapsedMs)
+            assertTrue(diag1.playbackStartedElapsedMs >= diag1.audioReceivedElapsedMs)
+            assertTrue(diag1.playbackCompletedElapsedMs >= diag1.playbackStartedElapsedMs)
+            assertEquals(2, diag1.partialRecognitionCount)
+            assertTrue(diag1.finalRecognitionObserved)
+            assertEquals(com.example.engine.CommandTurnStallStage.NONE, diag1.stallStage)
+            assertEquals(com.example.engine.DetectedLanguage.ROMAN_URDU, diag1.chosenReplyLanguage)
+            assertFalse(
+                "Reply to Urdu command must not be hardcoded English 'Opened WhatsApp'",
+                spokenEngineCalls.last().first.trim().equals("Opened WhatsApp", ignoreCase = true)
+            )
+            println(
+                "MEASURED_CMD1_TIMINGS_MS: startup=${diag1.startupToCaptureReadyLatencyMs}, " +
+                    "firstResp=${diag1.speechEndToFirstResponseLatencyMs}, " +
+                    "firstAudio=${diag1.speechEndToFirstAudioPlayLatencyMs}"
+            )
+
+            // Verify post-turn capture handoff never leaves MicComponentOwner.NONE while armed
+            assertTrue(
+                "Post-turn capture handoff must not leave app with no active mic owner",
+                coord.activeMicOwner.value != com.example.engine.MicComponentOwner.NONE
+            )
+
+            // Second command in sequence (return_to_origin -> back to Notepad draft 42)
+            val speechTs2 = android.os.SystemClock.elapsedRealtime()
+            liveEngine.recordSpeechCaptureProgressForTest(
+                onsetElapsedMs = speechTs2,
+                endElapsedMs = speechTs2,
+                partialCount = 1,
+                finalObserved = true
+            )
+            spokenEngineCalls.clear()
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "Uss previous screen par le kar jao jahan main pehle work kar raha tha",
+                    commandIdOverride = "cmd_seq_2"
+                )
+            }
+            assertEquals("NOTEPAD_DRAFT_42", screenPhase)
+            assertTrue(returnToOriginCount >= 1)
+            val lastUtt2 = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(lastUtt2)
+            ttsManager.handleUtteranceDone(lastUtt2)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_seq_2")
+            val diag2 = liveEngine.getCommandAudioDiagnostic("cmd_seq_2")!!
+            assertEquals(com.example.engine.CommandTurnStallStage.NONE, diag2.stallStage)
+            assertTrue(
+                diag2.chosenReplyLanguage == com.example.engine.DetectedLanguage.ROMAN_URDU ||
+                    diag2.chosenReplyLanguage == com.example.engine.DetectedLanguage.MIXED
+            )
+            assertTrue(
+                "Return-to-origin fast path must complete in well under 500ms (actual=${diag2.speechEndToFirstAudioPlayLatencyMs}ms)",
+                diag2.speechEndToFirstAudioPlayLatencyMs in 0L..500L
+            )
+            println(
+                "MEASURED_CMD2_TIMINGS_MS: firstResp=${diag2.speechEndToFirstResponseLatencyMs}, " +
+                    "firstAudio=${diag2.speechEndToFirstAudioPlayLatencyMs}"
+            )
+
+            // =========================================================================
+            // 4. DISTINGUISH ALL 5 STALL / FAILURE STAGES & BOUNDED NO-AUDIO WATCHDOG
+            // =========================================================================
+            // (a) SOUND_DETECTED_NO_ACCEPTED_COMMAND
+            val unacceptedReport = liveEngine.recordSoundDetectedNoAcceptedCommand(
+                reason = "ERROR_NO_MATCH",
+                candidateUtterance = ""
+            )
+            assertEquals(
+                com.example.engine.CommandTurnStallStage.SOUND_DETECTED_NO_ACCEPTED_COMMAND,
+                unacceptedReport.stallStage
+            )
+            assertTrue(
+                "Actionable error message must be shown when speech is not recognized",
+                vm.liveAiTranscript.value.contains("mic", ignoreCase = true) ||
+                    vm.liveAiTranscript.value.contains("Awaaz", ignoreCase = true)
+            )
+
+            // (b) GENERATED_REPLY_NO_AUDIO -> bounded watchdog recovers via TTS without repeating action
+            var sentFramesCount = 0
+            val silentMockWs = object : okhttp3.WebSocket {
+                override fun request(): okhttp3.Request =
+                    okhttp3.Request.Builder().url("wss://example.com/live").build()
+                override fun queueSize(): Long = 0L
+                override fun send(text: String): Boolean {
+                    sentFramesCount += 1
+                    return true // Socket accepts frame, but server never sends audio!
+                }
+                override fun send(bytes: okio.ByteString): Boolean = true
+                override fun close(code: Int, reason: String?): Boolean = true
+                override fun cancel() {}
+            }
+            liveEngine.attachLiveWebSocketForTest(silentMockWs, ready = true)
+            liveEngine.liveAudioDeliveryTimeoutMs = 90L
+            screenPhase = "NOTEPAD_DRAFT_42"
+            val openAppBeforeWatchdog = openAppCount
+            spokenEngineCalls.clear()
+
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = "cmd_no_audio_watchdog"
+                )
+                // Wait for bounded 90ms watchdog to trigger single TTS fallback
+                kotlinx.coroutines.delay(220L)
+            }
+            assertEquals(
+                "Action must execute at most once even when Live audio times out",
+                openAppBeforeWatchdog + 1,
+                openAppCount
+            )
+            assertTrue("Watchdog must trigger bounded local TTS fallback", spokenEngineCalls.isNotEmpty())
+            val watchdogUttId = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(watchdogUttId)
+            ttsManager.handleUtteranceDone(watchdogUttId)
+            coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, ownerToken = "cmd_no_audio_watchdog")
+            val watchdogDiag = liveEngine.getCommandAudioDiagnostic("cmd_no_audio_watchdog")!!
+            assertEquals("ANDROID_TTS_FALLBACK", watchdogDiag.actualOutputProvider)
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.COMPLETED,
+                watchdogDiag.outputState
+            )
+            // Late cloud PCM arriving after watchdog recovery must be suppressed
+            assertFalse(
+                liveEngine.enqueue24kHzPcmChunk(ByteArray(480), commandId = "cmd_no_audio_watchdog")
+            )
+
+            // (c) RECEIVED_AUDIO_PLAYBACK_FAILED when TTS speak() returns ERROR
+            liveEngine.attachLiveWebSocketForTest(null, ready = false)
+            screenPhase = "NOTEPAD_DRAFT_42"
+            ttsManager.speakEngineInterceptorForTest = { _, _, _ -> android.speech.tts.TextToSpeech.ERROR }
+            kotlinx.coroutines.runBlocking {
+                liveEngine.executeLocalOrLiveTurnForTest(
+                    textInput = "WhatsApp kholo",
+                    commandIdOverride = "cmd_playback_failed"
+                )
+            }
+            val failedPlaybackDiag = liveEngine.getCommandAudioDiagnostic("cmd_playback_failed")!!
+            assertEquals(
+                com.example.engine.CommandTurnStallStage.RECEIVED_AUDIO_PLAYBACK_FAILED,
+                failedPlaybackDiag.stallStage
+            )
+            assertEquals(
+                com.example.engine.CommandSpeechOutputState.FAILED,
+                failedPlaybackDiag.outputState
+            )
+            ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+                spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+                android.speech.tts.TextToSpeech.SUCCESS
+            }
+
+            // (d) Direct classification checks for COMMAND_ACCEPTED_REQUEST_NOT_SENT & SERVER_OR_TOOL_DELAY
+            val notSentDiag = com.example.engine.CommandAudioDiagnosticEntry(
+                commandId = "cmd_not_sent",
+                commandAcceptedElapsedMs = 100L,
+                requestSentElapsedMs = 0L,
+                outputState = com.example.engine.CommandSpeechOutputState.FAILED,
+                stallStage = com.example.engine.CommandTurnStallStage.COMMAND_ACCEPTED_REQUEST_NOT_SENT
+            )
+            val serverDelayDiag = com.example.engine.CommandAudioDiagnosticEntry(
+                commandId = "cmd_server_delay",
+                commandAcceptedElapsedMs = 100L,
+                requestSentElapsedMs = 105L,
+                firstResponseReceivedElapsedMs = 0L,
+                outputState = com.example.engine.CommandSpeechOutputState.FAILED,
+                stallStage = com.example.engine.CommandTurnStallStage.SERVER_OR_TOOL_DELAY
+            )
+            assertTrue(notSentDiag.toRedactedDiagnosticLine().contains("stallStage=COMMAND_ACCEPTED_REQUEST_NOT_SENT"))
+            assertTrue(serverDelayDiag.toRedactedDiagnosticLine().contains("stallStage=SERVER_OR_TOOL_DELAY"))
+
+            // =========================================================================
+            // 5. DELIBERATE MUTE AND STOP PERSISTENCE ACROSS LIFECYCLE RESUME
+            //    - Mute must show ObservedAssistantCaptureState.MUTED and survive onResume.
+            //    - Stop must pin to device and survive ensureSessionAliveOnResume().
+            // =========================================================================
+            vm.launchJarvisAndStartListening(reason = "RELAUNCH_BEFORE_MUTE_TEST")
+            vm.toggleLiveMicMute()
+            assertTrue(vm.isLiveMicMuted.value)
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.MUTED,
+                vm.observedCaptureState.value
+            )
+            liveEngine.ensureSessionAliveOnResume()
+            assertTrue("Resume must not unmute a deliberately muted mic", vm.isLiveMicMuted.value)
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.MUTED,
+                vm.observedCaptureState.value
+            )
+
+            // Deliberate Stop
+            vm.stopAllWakeAndSpeechAndPinToDevice()
+            assertFalse(vm.isLiveSessionActive.value)
+            assertEquals(
+                com.example.engine.WakeSpeechLifecycleState.DISARMED_STOPPED,
+                coord.lifecycleState.value
+            )
+            liveEngine.ensureSessionAliveOnResume()
+            assertFalse(
+                "ensureSessionAliveOnResume must NOT override a deliberate user Stop",
+                vm.isLiveSessionActive.value
+            )
+            assertEquals(
+                com.example.engine.MicComponentOwner.NONE,
+                coord.activeMicOwner.value
+            )
+        } finally {
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+            com.example.engine.AudioOutputManager.resetAll()
+            ttsManager.shutdown()
+        }
+    }
+
+    private fun measuredMsOrZero(ms: Long): Long = if (ms >= 0L) ms else 0L
 }
+
+
