@@ -140,6 +140,75 @@ enum class CommandSpeechOutputState {
     FAILED
 }
 
+enum class RecognitionFailureCategory {
+    NONE,
+    INTENTIONAL_CANCELLATION,
+    NO_MATCH_OR_SILENCE,
+    TRANSIENT_RECOGNITION_ERROR,
+    PERMISSION_OR_SERVICE_FAILURE
+}
+
+interface SpeechCaptureAdapter {
+    fun startListening(intent: Intent, listener: RecognitionListener, generation: Long)
+    fun stopListening(generation: Long) {}
+    fun cancel(generation: Long) {}
+    fun destroy(generation: Long) {}
+}
+
+data class LiveSessionDiagnosticSnapshot(
+    val buildCommitId: String = OmniLiveSessionEngine.BUILD_COMMIT_ID,
+    val sessionState: String = ObservedAssistantCaptureState.IDLE.displayLabel,
+    val recognitionErrorName: String = "NONE",
+    val recognitionErrorCode: Int = 0,
+    val activeCaptureGeneration: Long = 0L,
+    val readyCaptureGeneration: Long = 0L,
+    val recognitionRetryCount: Int = 0,
+    val maxRecognitionRetries: Int = 2,
+    val acceptedOrRejectedDecision: String = "NONE",
+    val commandId: String = "NONE",
+    val requestedOutputProvider: String = "NONE",
+    val actualOutputProvider: String = "NONE",
+    val ttsState: String = CommandSpeechOutputState.NONE.name,
+    val ttsError: String = "NONE",
+    val pcmFramesReceived: Int = 0,
+    val pcmFramesPlayed: Int = 0,
+    val pcmBytesWritten: Int = 0,
+    val stickyErrorSummary: String = "NONE"
+) {
+    fun toRedactedCopyText(): String {
+        val safeDecision = OmniLiveSessionEngine.redactPrivateTextAndCredentials(acceptedOrRejectedDecision.ifBlank { "NONE" })
+        val safeCmdId = OmniLiveSessionEngine.redactPrivateTextAndCredentials(commandId.ifBlank { "NONE" })
+        val safeReqOut = OmniLiveSessionEngine.redactPrivateTextAndCredentials(requestedOutputProvider.ifBlank { "NONE" })
+        val safeActOut = OmniLiveSessionEngine.redactPrivateTextAndCredentials(actualOutputProvider.ifBlank { "NONE" })
+        val safeTtsErr = OmniLiveSessionEngine.redactPrivateTextAndCredentials(ttsError.ifBlank { "NONE" })
+        val safeStickyErr = OmniLiveSessionEngine.redactPrivateTextAndCredentials(stickyErrorSummary.ifBlank { "NONE" })
+        return buildString {
+            appendLine("commit=$buildCommitId")
+            appendLine("sessionState=$sessionState")
+            appendLine("recognitionError=$recognitionErrorName($recognitionErrorCode)")
+            appendLine("captureGeneration=active:$activeCaptureGeneration/ready:$readyCaptureGeneration(retry:$recognitionRetryCount/$maxRecognitionRetries)")
+            appendLine("decision=$safeDecision")
+            appendLine("commandId=$safeCmdId")
+            appendLine("outputProvider=$safeReqOut->$safeActOut")
+            appendLine("ttsState=$ttsState")
+            appendLine("ttsError=$safeTtsErr")
+            appendLine("pcmProgress=recv:$pcmFramesReceived/played:$pcmFramesPlayed/bytes:$pcmBytesWritten")
+            append("lastError=$safeStickyErr")
+        }
+    }
+
+    fun toCompactHudLine(): String {
+        val shortCommit = buildCommitId.take(8)
+        val safeDecision = OmniLiveSessionEngine.redactPrivateTextAndCredentials(acceptedOrRejectedDecision.ifBlank { "NONE" })
+        val safeCmd = OmniLiveSessionEngine.redactPrivateTextAndCredentials(commandId.ifBlank { "NONE" })
+        val safeActOut = OmniLiveSessionEngine.redactPrivateTextAndCredentials(actualOutputProvider.ifBlank { "NONE" })
+        val safeTtsErr = OmniLiveSessionEngine.redactPrivateTextAndCredentials(ttsError.ifBlank { "NONE" })
+        val safeErr = OmniLiveSessionEngine.redactPrivateTextAndCredentials(stickyErrorSummary.ifBlank { "NONE" })
+        val errTail = if (safeErr.isNotBlank() && safeErr != "NONE") " • ERR:$safeErr" else ""
+        return "COMMIT:$shortCommit • GEN:$activeCaptureGeneration(r:$readyCaptureGeneration) • STT:$recognitionErrorName($recognitionErrorCode) • DEC:$safeDecision • CMD:$safeCmd • OUT:$safeActOut • TTS:$ttsState($safeTtsErr) • PCM:$pcmFramesPlayed/$pcmFramesReceived$errTail"
+    }
+}
+
 data class CommandAudioDiagnosticEntry(
     val commandId: String,
     val route: String = "CONVERSATIONAL",
@@ -346,17 +415,42 @@ class OmniLiveSessionEngine(
 
         fun getInstance(): OmniLiveSessionEngine? = instance
 
+        const val BUILD_COMMIT_ID = "1599cab37fbb53d25e5f1767f502bf145192e5af"
+        const val BUILD_SHORT_COMMIT_ID = "1599cab3"
+
         const val LIVE_MODEL_PRIMARY = "models/gemini-2.5-flash-native-audio-preview-09-2025"
         const val LIVE_MODEL_FALLBACK = "models/gemini-2.0-flash-exp"
 
         const val INPUT_SAMPLE_RATE = 16000
         const val OUTPUT_SAMPLE_RATE = 24000
 
+        fun speechRecognizerErrorName(errorCode: Int): String = when (errorCode) {
+            0 -> "NONE"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+            SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+            SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
+            SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+            SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
+            SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+            10 -> "ERROR_TOO_MANY_REQUESTS"
+            11 -> "ERROR_SERVER_DISCONNECTED"
+            12 -> "ERROR_LANGUAGE_NOT_SUPPORTED"
+            13 -> "ERROR_LANGUAGE_UNAVAILABLE"
+            14 -> "ERROR_CANNOT_CHECK_SUPPORT"
+            15 -> "ERROR_CANNOT_LISTEN_IN_BACKGROUND"
+            -1 -> "EMPTY_RECOGNITION_RESULTS"
+            -2 -> "RECOGNIZER_SERVICE_UNAVAILABLE"
+            else -> "ERROR_UNKNOWN_$errorCode"
+        }
+
         fun redactPrivateTextAndCredentials(raw: String?): String {
             val text = raw?.trim().orEmpty()
             if (text.isEmpty()) return ""
             return text
-                .replace(Regex("(?i)(key|api_key|token|secret|password|authorization)\\s*[:=]\\s*[^\\s&\"',|]+"), "$1=[REDACTED]")
+                .replace(Regex("(?i)(key|api_key|token|secret|password|authorization|transcript|utterance)\\s*[:=]\\s*[^\\s&\"',|]+"), "$1=[REDACTED]")
                 .replace(Regex("AIza[0-9A-Za-z_-]{10,}"), "[REDACTED_KEY]")
                 .replace(Regex("(?i)Bearer\\s+[0-9A-Za-z._-]+"), "Bearer [REDACTED]")
                 .replace(Regex("\\b\\+?\\d[\\d\\s()-]{6,}\\d\\b"), "[REDACTED_PHONE]")
@@ -1221,10 +1315,24 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         private set
 
     @Volatile
-    var autoConfirmCaptureReadyInTest: Boolean = true
+    var testSpeechCaptureAdapter: SpeechCaptureAdapter? = null
 
     private val captureGenerationCounter = java.util.concurrent.atomic.AtomicLong(0L)
     private val captureHandoffLock = Any()
+    private val retiredCaptureGenerations = java.util.Collections.synchronizedSet(java.util.LinkedHashSet<Long>())
+    private val intentionalCancelGenerations = java.util.Collections.synchronizedSet(java.util.LinkedHashSet<Long>())
+    private val liveRecognizerInstances = java.util.Collections.synchronizedSet(
+        java.util.Collections.newSetFromMap(java.util.IdentityHashMap<SpeechRecognizer, Boolean>())
+    )
+
+    @Volatile
+    private var activeRecognizerInstance: SpeechRecognizer? = null
+
+    @Volatile
+    private var activeRecognizerBoundGeneration: Long = 0L
+
+    @Volatile
+    private var finalResultAcceptedForCaptureGen: Long = 0L
 
     @Volatile
     var activeCaptureGeneration: Long = 0L
@@ -1241,6 +1349,90 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     @Volatile
     var staleRecognitionCallbacksIgnoredCount: Int = 0
         private set
+
+    @Volatile
+    var consecutiveRecognitionRetryCount: Int = 0
+        private set
+
+    @Volatile
+    var maxRecognitionRetriesPerTurn: Int = 2
+
+    @Volatile
+    var lastRecognitionErrorCode: Int = 0
+        private set
+
+    @Volatile
+    var lastRecognitionErrorName: String = "NONE"
+        private set
+
+    @Volatile
+    var lastRecognitionDecision: String = "NONE"
+        private set
+
+    @Volatile
+    var lastTtsErrorReason: String = "NONE"
+        private set
+
+    @Volatile
+    var lastStickyDiagnosticError: String = ""
+        private set
+
+    private val _diagnosticSnapshot = MutableStateFlow(LiveSessionDiagnosticSnapshot())
+    val diagnosticSnapshot: StateFlow<LiveSessionDiagnosticSnapshot> = _diagnosticSnapshot.asStateFlow()
+
+    fun setStickyCaptureError(errorMessage: String) {
+        val clean = errorMessage.trim()
+        if (clean.isNotEmpty()) {
+            _captureErrorDetail.value = clean
+            lastStickyDiagnosticError = redactPrivateTextAndCredentials(clean)
+        }
+        refreshDiagnosticSnapshot()
+    }
+
+    fun refreshDiagnosticSnapshot() {
+        val cmdId = activeCommandId.ifBlank { lastCompletedCommandId }
+        val diag = if (cmdId.isNotBlank()) commandDiagnosticsMap[cmdId] else null
+        val reqOut = diag?.requestedOutputProvider?.takeIf { it.isNotBlank() && it != "NONE" }
+            ?: lastTurnReport?.requestedOutputProvider?.takeIf { it.isNotBlank() }
+            ?: "NONE"
+        val actOut = diag?.actualOutputProvider?.takeIf { it.isNotBlank() && it != "NONE" }
+            ?: diag?.outputEngine?.takeIf { it.isNotBlank() && it != "NONE" }
+            ?: lastTurnReport?.actualOutputProvider?.takeIf { it.isNotBlank() }
+            ?: "NONE"
+        val outState = diag?.outputState?.name
+            ?: lastTurnReport?.outputState?.name
+            ?: CommandSpeechOutputState.NONE.name
+        val ttsErr = when {
+            lastTtsErrorReason.isNotBlank() && lastTtsErrorReason != "NONE" -> lastTtsErrorReason
+            ttsFallback?.lastErrorReason?.isNotBlank() == true && ttsFallback.lastErrorReason != "NONE" -> ttsFallback.lastErrorReason
+            else -> "NONE"
+        }
+        val stickyErr = when {
+            _captureErrorDetail.value.isNotBlank() -> redactPrivateTextAndCredentials(_captureErrorDetail.value)
+            lastStickyDiagnosticError.isNotBlank() -> lastStickyDiagnosticError
+            else -> "NONE"
+        }
+        _diagnosticSnapshot.value = LiveSessionDiagnosticSnapshot(
+            buildCommitId = BUILD_COMMIT_ID,
+            sessionState = _observedCaptureState.value.displayLabel,
+            recognitionErrorName = lastRecognitionErrorName.ifBlank { "NONE" },
+            recognitionErrorCode = lastRecognitionErrorCode,
+            activeCaptureGeneration = activeCaptureGeneration,
+            readyCaptureGeneration = readyCaptureGeneration,
+            recognitionRetryCount = consecutiveRecognitionRetryCount,
+            maxRecognitionRetries = maxRecognitionRetriesPerTurn,
+            acceptedOrRejectedDecision = lastRecognitionDecision.ifBlank { "NONE" },
+            commandId = cmdId.ifBlank { "NONE" },
+            requestedOutputProvider = reqOut,
+            actualOutputProvider = actOut,
+            ttsState = outState,
+            ttsError = ttsErr,
+            pcmFramesReceived = diag?.audioFramesReceived ?: lastTurnReport?.audioFramesReceived ?: 0,
+            pcmFramesPlayed = diag?.audioFramesPlayed ?: lastTurnReport?.audioFramesPlayed ?: 0,
+            pcmBytesWritten = diag?.pcmBytesWrittenToHardware ?: 0,
+            stickyErrorSummary = stickyErr
+        )
+    }
 
     @Volatile
     var isBoundedConversationModeActive: Boolean = false
@@ -1298,6 +1490,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         commandDiagnosticsMap.clear()
         postActionAudioWatchdogJobs.values.forEach { it.cancel() }
         postActionAudioWatchdogJobs.clear()
+        retiredCaptureGenerations.clear()
+        intentionalCancelGenerations.clear()
+        finalResultAcceptedForCaptureGen = 0L
+        consecutiveRecognitionRetryCount = 0
+        lastRecognitionErrorCode = 0
+        lastRecognitionErrorName = "NONE"
+        lastRecognitionDecision = "NONE"
+        lastTtsErrorReason = "NONE"
+        lastStickyDiagnosticError = ""
         staleWebSocketCallbacksIgnoredCount = 0
         staleRecognitionCallbacksIgnoredCount = 0
         currentTurnStartedFromInputTranscription = false
@@ -1310,6 +1511,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         pendingPartialRecognitionCount = 0
         pendingFinalRecognitionObserved = false
         _captureErrorDetail.value = ""
+        refreshDiagnosticSnapshot()
     }
 
     fun recordSpeechCaptureProgressForTest(
@@ -1345,6 +1547,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         )
         val updated = transform(current)
         commandDiagnosticsMap[commandId] = updated
+        refreshDiagnosticSnapshot()
         return updated
     }
 
@@ -1509,8 +1712,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         val authoritativePitch = SpeechPreferenceStore.getPitch(context)
 
         if (tts == null) {
+            lastTtsErrorReason = "TTS_UNAVAILABLE"
+            setStickyCaptureError("Local speech output (TTS) is unavailable on this device.")
             _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
-            _captureErrorDetail.value = "Local speech output (TTS) is unavailable on this device."
             updateCommandDiagnostic(commandId) {
                 it.copy(
                     outputState = CommandSpeechOutputState.FAILED,
@@ -1530,6 +1734,21 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     cancellationReason = recoveryReason.ifBlank { "TTS_UNAVAILABLE" }
                 )
             }
+            AudioOutputManager.completeTurnOutput(commandId)
+            coord.notifyAssistantSpeechEnded(
+                immediateCooldownClear = true,
+                ownerToken = commandId,
+                forceRelease = true
+            )
+            if (_isSessionActive.value &&
+                !coord.isStoppedByUserInMemory() &&
+                !_isMicMuted.value &&
+                !coord.isDeviceMutedInMemory()
+            ) {
+                handoffToPostTurnCapture("TTS_UNAVAILABLE_RESTORE_CAPTURE", preserveErrorDetail = true)
+            } else {
+                refreshDiagnosticSnapshot()
+            }
             return
         }
         if (isRecovery) {
@@ -1538,23 +1757,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
         _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
         _observedCaptureState.value = ObservedAssistantCaptureState.SPEAKING
-        tts.onSpeechCompleted = {
-            if (activeCommandId == commandId) {
-                val nowElapsed = SystemClock.elapsedRealtime()
-                updateCommandDiagnostic(commandId) { current ->
-                    current.copy(
-                        playbackCompletedElapsedMs = if (current.playbackCompletedElapsedMs > 0L) {
-                            current.playbackCompletedElapsedMs
-                        } else {
-                            nowElapsed
-                        }
-                    )
-                }
-                handoffToPostTurnCapture(
-                    if (isRecovery) "TTS_BOUNDED_RECOVERY_COMPLETED" else "TTS_TURN_COMPLETED"
-                )
-            }
-        }
+        refreshDiagnosticSnapshot()
+
+        val terminalHandledForInvocation = AtomicBoolean(false)
         tts.registerCommandLifecycleListener(commandId) { event ->
             if (event.commandId == commandId) {
                 val nowElapsed = SystemClock.elapsedRealtime()
@@ -1562,14 +1767,20 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     TtsOutputLifecycleState.REQUESTED -> CommandSpeechOutputState.REQUESTED
                     TtsOutputLifecycleState.QUEUED -> CommandSpeechOutputState.QUEUED
                     TtsOutputLifecycleState.STARTED -> {
+                        _connectionState.value = LiveConnectionState.LIVE_AI_SPEAKING
                         _observedCaptureState.value = ObservedAssistantCaptureState.SPEAKING
                         CommandSpeechOutputState.STARTED
                     }
-                    TtsOutputLifecycleState.COMPLETED -> CommandSpeechOutputState.COMPLETED
+                    TtsOutputLifecycleState.COMPLETED -> {
+                        lastTtsErrorReason = "NONE"
+                        CommandSpeechOutputState.COMPLETED
+                    }
                     TtsOutputLifecycleState.INTERRUPTED -> CommandSpeechOutputState.INTERRUPTED
                     TtsOutputLifecycleState.FAILED -> {
+                        val failReason = event.reason.ifBlank { "TTS_ERROR" }
+                        lastTtsErrorReason = failReason
                         _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
-                        _captureErrorDetail.value = "Speech playback failed (${event.reason.ifBlank { "TTS_ERROR" }})."
+                        setStickyCaptureError("Speech playback failed ($failReason).")
                         CommandSpeechOutputState.FAILED
                     }
                 }
@@ -1660,6 +1871,79 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                         playbackCompletedElapsedMs = updatedDiag.playbackCompletedElapsedMs,
                         stallStage = updatedDiag.stallStage
                     )
+                }
+                refreshDiagnosticSnapshot()
+
+                // Command-scoped terminal cleanup & capture restoration for EVERY terminal state
+                when (event.state) {
+                    TtsOutputLifecycleState.COMPLETED -> {
+                        if (terminalHandledForInvocation.compareAndSet(false, true)) {
+                            AudioOutputManager.completeTurnOutput(commandId)
+                            coord.notifyAssistantSpeechEnded(
+                                source = "LOCAL_TTS_COMPLETED",
+                                ownerToken = commandId
+                            )
+                            if (activeCommandId == commandId || activeCommandId.isBlank()) {
+                                handoffToPostTurnCapture(
+                                    if (isRecovery) "TTS_BOUNDED_RECOVERY_COMPLETED" else "TTS_TURN_COMPLETED"
+                                )
+                            }
+                        }
+                    }
+                    TtsOutputLifecycleState.FAILED -> {
+                        if (terminalHandledForInvocation.compareAndSet(false, true)) {
+                            val failReason = event.reason.ifBlank { "TTS_ERROR" }
+                            AudioOutputManager.completeTurnOutput(commandId)
+                            coord.notifyAssistantSpeechEnded(
+                                immediateCooldownClear = true,
+                                ownerToken = commandId,
+                                forceRelease = true
+                            )
+                            if ((activeCommandId == commandId || activeCommandId.isBlank()) &&
+                                _isSessionActive.value &&
+                                !coord.isStoppedByUserInMemory() &&
+                                !_isMicMuted.value &&
+                                !coord.isDeviceMutedInMemory()
+                            ) {
+                                handoffToPostTurnCapture(
+                                    reason = "TTS_OUTPUT_FAILED_RESTORE_CAPTURE_$failReason",
+                                    preserveErrorDetail = true
+                                )
+                            } else {
+                                refreshDiagnosticSnapshot()
+                            }
+                        }
+                    }
+                    TtsOutputLifecycleState.INTERRUPTED -> {
+                        if (terminalHandledForInvocation.compareAndSet(false, true)) {
+                            val intReason = event.reason.ifBlank { "TTS_INTERRUPTED" }
+                            AudioOutputManager.completeTurnOutput(commandId)
+                            coord.notifyAssistantSpeechEnded(
+                                immediateCooldownClear = true,
+                                ownerToken = commandId,
+                                forceRelease = true
+                            )
+                            val supersededByNewTurn = intReason.startsWith("SUPERSEDED_BY_NEW_TURN")
+                            val stoppedByUser = intReason.contains("STOP", ignoreCase = true) ||
+                                intReason.contains("SHUTDOWN", ignoreCase = true)
+                            if (!supersededByNewTurn &&
+                                !stoppedByUser &&
+                                activeCommandId == commandId &&
+                                _isSessionActive.value &&
+                                !coord.isStoppedByUserInMemory() &&
+                                !_isMicMuted.value &&
+                                !coord.isDeviceMutedInMemory()
+                            ) {
+                                handoffToPostTurnCapture(
+                                    reason = "TTS_INTERRUPTED_RESTORE_CAPTURE_$intReason",
+                                    preserveErrorDetail = true
+                                )
+                            } else {
+                                refreshDiagnosticSnapshot()
+                            }
+                        }
+                    }
+                    else -> {}
                 }
             }
         }
@@ -2736,12 +3020,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             Log.w(TAG, "Cannot launch Jarvis listening without RECORD_AUDIO permission ($reason)")
             coord.armUserSessionAndPersist(context, reason)
             _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
-            _captureErrorDetail.value = "Microphone permission (RECORD_AUDIO) is required. Tap to grant microphone access."
+            lastRecognitionErrorCode = SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
+            lastRecognitionErrorName = "ERROR_INSUFFICIENT_PERMISSIONS"
+            lastRecognitionDecision = "REJECTED_PERMISSION_DENIED"
+            setStickyCaptureError("Microphone permission (RECORD_AUDIO) is required. Tap to grant microphone access.")
             _liveAiTranscript.value = _captureErrorDetail.value
             return false
         }
 
-        _captureErrorDetail.value = ""
+        consecutiveRecognitionRetryCount = 0
         coord.armUserSessionAndPersist(context, reason)
         _isMicMuted.value = false
 
@@ -2778,7 +3065,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             connectBidiWebSocket(LIVE_MODEL_PRIMARY)
             start60SecondInactivityWatchdog()
         } else {
-            if (OmniAutonomousCoreEngine.operatingMode.value == OmniOperatingMode.STATE_SLEEP_STANDBY) {
+            if (OmniAutonomousCoreEngine.operatingMode.value == OmniAutonomousCoreEngine.operatingMode.value &&
+                OmniAutonomousCoreEngine.operatingMode.value == OmniOperatingMode.STATE_SLEEP_STANDBY
+            ) {
                 OmniAutonomousCoreEngine.wakeUpToActiveListening(context)
             }
             if (outputPlaybackJob?.isActive != true) {
@@ -2802,7 +3091,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             boundedConversationRemainingTurns = maxBoundedConversationTurnsPerLaunch
             coord.openCommandWindow(reason = reason)
         }
-        startActiveCommandCapture(reason = reason)
+        startActiveCommandCapture(reason = reason, preserveErrorDetail = true)
+        refreshDiagnosticSnapshot()
         return true
     }
 
@@ -2829,7 +3119,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (!validCommandOwner || currentOwner != readyCaptureOwner) {
             return false
         }
-        if (activeCaptureGeneration <= 0L || readyCaptureGeneration != activeCaptureGeneration) {
+        val gen = activeCaptureGeneration
+        if (gen <= 0L || readyCaptureGeneration != gen || retiredCaptureGenerations.contains(gen)) {
             return false
         }
         val recReady = micAudioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
@@ -2839,9 +3130,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     fun clearCaptureReadiness(reason: String = "CAPTURE_RELEASED") {
         readyCaptureGeneration = 0L
         readyCaptureOwner = MicComponentOwner.NONE
+        refreshDiagnosticSnapshot()
         Log.d(TAG, "Cleared capture readiness ($reason, activeGen=$activeCaptureGeneration)")
     }
 
+    /**
+     * Marks capture ready ONLY when a real readiness callback (`SpeechRecognizer.onReadyForSpeech`
+     * having set `isNativeRecognizerListening = true`) or `AudioRecord.RECORDSTATE_RECORDING`
+     * is genuinely active for [generation]. Never invents `isNativeRecognizerListening = true`.
+     */
     fun markCaptureReady(
         source: String = "CAPTURE_READY",
         generation: Long = activeCaptureGeneration,
@@ -2856,7 +3153,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             return
         }
         val resolvedGen = if (generation > 0L) generation else activeCaptureGeneration
-        if (resolvedGen <= 0L || resolvedGen != activeCaptureGeneration) {
+        if (resolvedGen <= 0L ||
+            resolvedGen != activeCaptureGeneration ||
+            retiredCaptureGenerations.contains(resolvedGen)
+        ) {
             staleRecognitionCallbacksIgnoredCount += 1
             Log.d(TAG, "Ignored stale markCaptureReady from $source (callbackGen=$resolvedGen, activeGen=$activeCaptureGeneration)")
             return
@@ -2871,13 +3171,19 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         ) {
             return
         }
+        val isRealRecognizerReady = isNativeRecognizerListening
+        val isRealAudioRecordReady = micAudioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
+        if (!isRealRecognizerReady && !isRealAudioRecordReady) {
+            Log.w(
+                TAG,
+                "Rejected markCaptureReady($source) for gen=$resolvedGen: neither SpeechRecognizer.onReadyForSpeech nor AudioRecord.RECORDSTATE_RECORDING is active"
+            )
+            return
+        }
         val nowElapsed = SystemClock.elapsedRealtime()
         lastCaptureReadyElapsedMs = nowElapsed
         readyCaptureGeneration = resolvedGen
         readyCaptureOwner = resolvedOwner
-        if (!isNativeRecognizerListening && micAudioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            isNativeRecognizerListening = true
-        }
         if (!coord.isSelfTriggerSuppressed() ||
             (_observedCaptureState.value != ObservedAssistantCaptureState.SPEAKING &&
                 _observedCaptureState.value != ObservedAssistantCaptureState.PROCESSING)
@@ -2909,6 +3215,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
             }
         }
+        refreshDiagnosticSnapshot()
         Log.d(TAG, "Microphone capture READY via $source (gen=$resolvedGen, owner=$resolvedOwner) at elapsed=${nowElapsed}ms")
     }
 
@@ -2927,6 +3234,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (!_isSessionActive.value) {
             _isSessionActive.value = true
         }
+        consecutiveRecognitionRetryCount = 0
         isBoundedConversationModeActive = true
         if (boundedConversationRemainingTurns <= 0) {
             boundedConversationRemainingTurns = maxBoundedConversationTurnsPerLaunch
@@ -2934,19 +3242,28 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (!coord.isCommandWindowOpen(nowMs)) {
             coord.openCommandWindow(nowMs = nowMs, reason = reason)
         }
-        startActiveCommandCapture(reason = reason, nowMs = nowMs)
+        startActiveCommandCapture(reason = reason, nowMs = nowMs, preserveErrorDetail = true)
     }
 
     private fun startActiveCommandCapture(
         reason: String,
-        nowMs: Long = System.currentTimeMillis()
+        nowMs: Long = System.currentTimeMillis(),
+        preserveErrorDetail: Boolean = true
     ) {
+        val prevRecognizerAndGen: Pair<SpeechRecognizer?, Long>
+        val nextCaptureGen: Long
         synchronized(captureHandoffLock) {
             val coord = AssistantAudioStateMachine.shared
             if (_isMicMuted.value || coord.isStoppedByUserInMemory() || coord.isDeviceMutedInMemory()) {
                 return
             }
+            // 1. Invalidate/retire the old capture generation BEFORE stopping/releasing old recognizer
+            val oldGen = activeCaptureGeneration.takeIf { it > 0L } ?: activeRecognizerBoundGeneration
+            prevRecognizerAndGen = retireCaptureGenerationLocked(oldGen, "BEFORE_START_ACTIVE_CAPTURE_$reason")
             clearCaptureReadiness("BEFORE_START_ACTIVE_CAPTURE_$reason")
+            if (!preserveErrorDetail) {
+                _captureErrorDetail.value = ""
+            }
             _observedCaptureState.value = ObservedAssistantCaptureState.STARTING
             if (_connectionState.value == LiveConnectionState.LIVE_AI_SPEAKING) {
                 _connectionState.value = LiveConnectionState.LIVE_LISTENING
@@ -2954,26 +3271,39 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             if (!coord.isCommandWindowOpen(nowMs)) {
                 coord.openCommandWindow(nowMs = nowMs, reason = reason)
             }
-            val nextCaptureGen = captureGenerationCounter.incrementAndGet()
+            nextCaptureGen = captureGenerationCounter.incrementAndGet()
             activeCaptureGeneration = nextCaptureGen
-            startNativeSpeechRecognizerLoop(
-                ensureSessionIfNeeded = false,
-                captureGeneration = nextCaptureGen,
-                nowMs = nowMs
-            )
+            refreshDiagnosticSnapshot()
         }
+        // 2. Await main-thread release of the retired recognizer BEFORE starting its replacement
+        releaseRetiredRecognizerOnMainThreadSync(
+            recognizerToRelease = prevRecognizerAndGen.first,
+            retiredGeneration = prevRecognizerAndGen.second,
+            adapter = testSpeechCaptureAdapter
+        )
+        // 3. Start the new recognizer bound to nextCaptureGen
+        startNativeSpeechRecognizerLoop(
+            ensureSessionIfNeeded = false,
+            captureGeneration = nextCaptureGen,
+            nowMs = nowMs
+        )
     }
 
     /**
      * Serializes post-turn microphone handoff after playback drain and echo suppression cooldown:
      * - Respects deliberate Stop and Mute.
+     * - Preserves diagnostic errors (`preserveErrorDetail = true` by default) even when transitioning to IDLE or LISTENING.
      * - When in an explicit bounded conversation session (`isBoundedConversationModeActive && boundedConversationRemainingTurns > 0`),
      *   waits for any remaining post-speech echo cooldown and automatically starts real capture for the next turn
      *   (`STARTING` -> `onReadyForSpeech` -> `LISTENING`) without endless background wake restarts.
      * - When returning to wake-only mode without an active bounded conversation turn, never claims `LISTENING`
      *   if no local acoustic wake detector is active.
      */
-    fun handoffToPostTurnCapture(reason: String) {
+    fun handoffToPostTurnCapture(
+        reason: String,
+        preserveErrorDetail: Boolean = true
+    ) {
+        val shouldStartNextBoundedTurn: Boolean
         synchronized(captureHandoffLock) {
             val coord = AssistantAudioStateMachine.shared
             clearCaptureReadiness("HANDOFF_$reason")
@@ -2982,47 +3312,54 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 boundedConversationRemainingTurns = 0
                 _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
                 _connectionState.value = LiveConnectionState.DISCONNECTED
+                refreshDiagnosticSnapshot()
                 return
             }
             if (_isMicMuted.value || coord.isDeviceMutedInMemory() || coord.isDeviceMutedPersisted(context)) {
                 _observedCaptureState.value = ObservedAssistantCaptureState.MUTED
+                refreshDiagnosticSnapshot()
                 return
             }
             if (_connectionState.value == LiveConnectionState.LIVE_AI_SPEAKING && _isSessionActive.value) {
                 _connectionState.value = LiveConnectionState.LIVE_LISTENING
             }
 
-            // If we are in an active bounded conversation session launched by the user,
-            // automatically start real capture for the next turn after playback and echo cooldown!
-            if (isBoundedConversationModeActive &&
+            shouldStartNextBoundedTurn = isBoundedConversationModeActive &&
                 _isSessionActive.value &&
                 boundedConversationRemainingTurns > 0 &&
                 !reason.contains("CANCEL", ignoreCase = true)
-            ) {
+
+            if (shouldStartNextBoundedTurn) {
                 boundedConversationRemainingTurns -= 1
+                consecutiveRecognitionRetryCount = 0
                 coord.clearTailCooldownAfterDrain()
                 coord.openCommandWindow(reason = "BOUNDED_CONVERSATION_FOLLOWUP_$reason")
-                startActiveCommandCapture(reason = "BOUNDED_CONVERSATION_FOLLOWUP_$reason")
-                return
-            }
-
-            coord.returnToWakeOnlyListening(reason)
-            if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
-                com.example.service.WakeWordForegroundService.resume(context)
-            } else if (coord.lifecycleState.value != WakeSpeechLifecycleState.DISARMED_STOPPED &&
-                coord.activeMicOwner.value == MicComponentOwner.NONE
-            ) {
-                coord.acquireMicrophoneOwnership(MicComponentOwner.WAKE_WORD_SERVICE)
-            }
-            // Truthfulness rule: wake-only mode without a real local acoustic wake detector must NEVER display LISTENING!
-            if (AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable) {
-                _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
             } else {
-                _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
-                if (_isSessionActive.value) {
-                    _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                coord.returnToWakeOnlyListening(reason)
+                if (com.example.service.WakeWordForegroundService.isServiceActive.value) {
+                    com.example.service.WakeWordForegroundService.resume(context)
+                } else if (coord.lifecycleState.value != WakeSpeechLifecycleState.DISARMED_STOPPED &&
+                    coord.activeMicOwner.value == MicComponentOwner.NONE
+                ) {
+                    coord.acquireMicrophoneOwnership(MicComponentOwner.WAKE_WORD_SERVICE)
                 }
+                // Truthfulness rule: wake-only mode without a real local acoustic wake detector must NEVER display LISTENING!
+                if (AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable) {
+                    _observedCaptureState.value = ObservedAssistantCaptureState.LISTENING
+                } else {
+                    _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
+                    if (_isSessionActive.value) {
+                        _connectionState.value = LiveConnectionState.LIVE_LISTENING
+                    }
+                }
+                refreshDiagnosticSnapshot()
             }
+        }
+        if (shouldStartNextBoundedTurn) {
+            startActiveCommandCapture(
+                reason = "BOUNDED_CONVERSATION_FOLLOWUP_$reason",
+                preserveErrorDetail = preserveErrorDetail
+            )
         }
     }
 
@@ -3033,7 +3370,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      */
     fun recordSoundDetectedNoAcceptedCommand(
         reason: String,
-        candidateUtterance: String = ""
+        candidateUtterance: String = "",
+        suppressPostTurnHandoff: Boolean = false,
+        preserveErrorDetail: Boolean = true
     ): LiveTurnExecutionReport {
         clearCaptureReadiness("NO_ACCEPTED_COMMAND_$reason")
         val nowElapsed = SystemClock.elapsedRealtime()
@@ -3085,7 +3424,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             stallStage = CommandTurnStallStage.SOUND_DETECTED_NO_ACCEPTED_COMMAND
         )
         _liveAiTranscript.value = actionableMsg
-        _captureErrorDetail.value = actionableMsg
+        setStickyCaptureError("$actionableMsg [$reason]")
         val report = recordTurnExecutionReport(
             commandId = cmdId,
             utterance = candidateUtterance,
@@ -3098,7 +3437,10 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             diagnosticText = "$actionableMsg ($reason)",
             fallbackOrReconnectReason = reason
         )
-        handoffToPostTurnCapture(reason)
+        refreshDiagnosticSnapshot()
+        if (!suppressPostTurnHandoff) {
+            handoffToPostTurnCapture(reason, preserveErrorDetail = preserveErrorDetail)
+        }
         return report
     }
 
@@ -3121,11 +3463,321 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
     }
 
-    private fun createGenerationBoundRecognitionListener(captureGen: Long): RecognitionListener {
+    fun classifyRecognitionFailure(errorCode: Int, captureGen: Long): RecognitionFailureCategory {
+        val coord = AssistantAudioStateMachine.shared
+        synchronized(captureHandoffLock) {
+            if (finalResultAcceptedForCaptureGen == captureGen ||
+                retiredCaptureGenerations.contains(captureGen) ||
+                intentionalCancelGenerations.contains(captureGen) ||
+                captureGen != activeCaptureGeneration ||
+                !_isSessionActive.value ||
+                _isMicMuted.value ||
+                coord.isDeviceMutedInMemory() ||
+                coord.isStoppedByUserInMemory()
+            ) {
+                return RecognitionFailureCategory.INTENTIONAL_CANCELLATION
+            }
+        }
+        return when (errorCode) {
+            SpeechRecognizer.ERROR_CLIENT -> {
+                if (coord.isSelfTriggerSuppressed()) {
+                    RecognitionFailureCategory.INTENTIONAL_CANCELLATION
+                } else {
+                    RecognitionFailureCategory.TRANSIENT_RECOGNITION_ERROR
+                }
+            }
+            SpeechRecognizer.ERROR_NO_MATCH,
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+            -1 -> RecognitionFailureCategory.NO_MATCH_OR_SILENCE
+
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+            SpeechRecognizer.ERROR_NETWORK,
+            SpeechRecognizer.ERROR_AUDIO,
+            SpeechRecognizer.ERROR_SERVER,
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+            11 -> RecognitionFailureCategory.TRANSIENT_RECOGNITION_ERROR
+
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS,
+            10,
+            12,
+            13,
+            14,
+            15,
+            -2 -> RecognitionFailureCategory.PERMISSION_OR_SERVICE_FAILURE
+
+            else -> RecognitionFailureCategory.TRANSIENT_RECOGNITION_ERROR
+        }
+    }
+
+    private fun retireCaptureGenerationLocked(
+        genToRetire: Long,
+        reason: String
+    ): Pair<SpeechRecognizer?, Long> {
+        if (genToRetire > 0L) {
+            retiredCaptureGenerations.add(genToRetire)
+            intentionalCancelGenerations.add(genToRetire)
+            while (retiredCaptureGenerations.size > 64) {
+                val first = retiredCaptureGenerations.firstOrNull() ?: break
+                retiredCaptureGenerations.remove(first)
+            }
+            while (intentionalCancelGenerations.size > 64) {
+                val first = intentionalCancelGenerations.firstOrNull() ?: break
+                intentionalCancelGenerations.remove(first)
+            }
+        }
+        if (genToRetire > 0L && activeCaptureGeneration == genToRetire) {
+            activeCaptureGeneration = 0L
+        }
+        if (genToRetire > 0L && readyCaptureGeneration == genToRetire) {
+            readyCaptureGeneration = 0L
+            readyCaptureOwner = MicComponentOwner.NONE
+        }
+        val recognizerToRelease: SpeechRecognizer?
+        val boundGen: Long
+        if (genToRetire <= 0L || activeRecognizerBoundGeneration == genToRetire) {
+            recognizerToRelease = activeRecognizerInstance
+            boundGen = activeRecognizerBoundGeneration
+            activeRecognizerInstance = null
+            activeRecognizerBoundGeneration = 0L
+            nativeSpeechRecognizer = null
+            isNativeRecognizerListening = false
+        } else {
+            recognizerToRelease = null
+            boundGen = 0L
+        }
+        Log.d(TAG, "Retired capture generation $genToRetire ($reason)")
+        return recognizerToRelease to boundGen
+    }
+
+    private fun releaseRetiredRecognizerOnMainThreadSync(
+        recognizerToRelease: SpeechRecognizer?,
+        retiredGeneration: Long,
+        adapter: SpeechCaptureAdapter?
+    ) {
+        if (recognizerToRelease == null && (adapter == null || retiredGeneration <= 0L)) {
+            return
+        }
+        val releaseBlock = Runnable {
+            if (adapter != null && retiredGeneration > 0L) {
+                try {
+                    adapter.stopListening(retiredGeneration)
+                    adapter.cancel(retiredGeneration)
+                    adapter.destroy(retiredGeneration)
+                } catch (_: Exception) {
+                }
+            }
+            if (recognizerToRelease != null) {
+                try {
+                    recognizerToRelease.stopListening()
+                } catch (_: Exception) {
+                }
+                try {
+                    recognizerToRelease.cancel()
+                } catch (_: Exception) {
+                }
+                try {
+                    recognizerToRelease.destroy()
+                } catch (_: Exception) {
+                } finally {
+                    if (liveRecognizerInstances.remove(recognizerToRelease)) {
+                        _activeRecognizerInstanceCount.updateAndGet { (it - 1).coerceAtLeast(0) }
+                    }
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            releaseBlock.run()
+        } else {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            val posted = mainHandler.post {
+                try {
+                    releaseBlock.run()
+                } finally {
+                    latch.countDown()
+                }
+            }
+            if (posted) {
+                try {
+                    latch.await(1500L, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+        }
+    }
+
+    private fun handleRecognitionFailureOrEmptyResult(
+        captureGen: Long,
+        boundRecognizer: SpeechRecognizer?,
+        errorCode: Int
+    ) {
+        val coord = AssistantAudioStateMachine.shared
+        val errName = speechRecognizerErrorName(errorCode)
+
+        // 1. Check if this callback belongs to a generation that already produced a final result or was retired/superseded
+        val category: RecognitionFailureCategory
+        val retiredPair: Pair<SpeechRecognizer?, Long>
+        synchronized(captureHandoffLock) {
+            val alreadyAcceptedFinal = finalResultAcceptedForCaptureGen == captureGen
+            val isStaleGen = captureGen <= 0L ||
+                captureGen != activeCaptureGeneration ||
+                retiredCaptureGenerations.contains(captureGen) ||
+                (boundRecognizer != null && activeRecognizerInstance != null && boundRecognizer !== activeRecognizerInstance)
+
+            if (alreadyAcceptedFinal || isStaleGen) {
+                staleRecognitionCallbacksIgnoredCount += 1
+                lastRecognitionErrorCode = errorCode
+                lastRecognitionErrorName = errName
+                lastRecognitionDecision = if (alreadyAcceptedFinal) {
+                    "IGNORED_POST_FINAL_CANCEL_$errName"
+                } else {
+                    "IGNORED_STALE_CALLBACK_$errName"
+                }
+                refreshDiagnosticSnapshot()
+                Log.d(
+                    TAG,
+                    "Ignored trailing/stale recognition error $errName($errorCode) for gen=$captureGen (activeGen=$activeCaptureGeneration, finalAcceptedGen=$finalResultAcceptedForCaptureGen)"
+                )
+                return
+            }
+
+            category = classifyRecognitionFailure(errorCode, captureGen)
+            if (category == RecognitionFailureCategory.INTENTIONAL_CANCELLATION) {
+                staleRecognitionCallbacksIgnoredCount += 1
+                lastRecognitionErrorCode = errorCode
+                lastRecognitionErrorName = errName
+                lastRecognitionDecision = "IGNORED_INTENTIONAL_CANCEL_$errName"
+                retiredPair = retireCaptureGenerationLocked(captureGen, "INTENTIONAL_CANCEL_$errName")
+            } else {
+                retiredPair = retireCaptureGenerationLocked(captureGen, "RECOGNITION_FAILURE_$errName")
+            }
+        }
+
+        // Release the retired recognizer instance synchronously on the main thread before any state transition or retry
+        releaseRetiredRecognizerOnMainThreadSync(
+            recognizerToRelease = retiredPair.first,
+            retiredGeneration = retiredPair.second,
+            adapter = testSpeechCaptureAdapter
+        )
+
+        if (category == RecognitionFailureCategory.INTENTIONAL_CANCELLATION) {
+            if (coord.isStoppedByUserInMemory() || !_isSessionActive.value) {
+                _observedCaptureState.value = ObservedAssistantCaptureState.IDLE
+            } else if (_isMicMuted.value || coord.isDeviceMutedInMemory()) {
+                _observedCaptureState.value = ObservedAssistantCaptureState.MUTED
+            }
+            refreshDiagnosticSnapshot()
+            return
+        }
+
+        _inputAudioRms.value = 0f
+        if (pendingSpeechEndElapsedMs == 0L) {
+            pendingSpeechEndElapsedMs = SystemClock.elapsedRealtime()
+        }
+
+        when (category) {
+            RecognitionFailureCategory.NO_MATCH_OR_SILENCE,
+            RecognitionFailureCategory.TRANSIENT_RECOGNITION_ERROR -> {
+                lastRecognitionErrorCode = errorCode
+                lastRecognitionErrorName = errName
+                recordSoundDetectedNoAcceptedCommand(
+                    reason = "${errName}($errorCode)",
+                    candidateUtterance = "",
+                    suppressPostTurnHandoff = true,
+                    preserveErrorDetail = true
+                )
+                val canRetryInActiveConversation = _isSessionActive.value &&
+                    isBoundedConversationModeActive &&
+                    !coord.isStoppedByUserInMemory() &&
+                    !_isMicMuted.value &&
+                    !coord.isDeviceMutedInMemory() &&
+                    consecutiveRecognitionRetryCount < maxRecognitionRetriesPerTurn
+
+                if (canRetryInActiveConversation) {
+                    consecutiveRecognitionRetryCount += 1
+                    lastRecognitionDecision = if (category == RecognitionFailureCategory.NO_MATCH_OR_SILENCE) {
+                        "RETRYING_NO_MATCH ($consecutiveRecognitionRetryCount/$maxRecognitionRetriesPerTurn)"
+                    } else {
+                        "RETRYING_TRANSIENT_ERROR ($consecutiveRecognitionRetryCount/$maxRecognitionRetriesPerTurn)"
+                    }
+                    val retryMsg = "Recognition $errName ($errorCode) — retrying ($consecutiveRecognitionRetryCount/$maxRecognitionRetriesPerTurn). Speak now."
+                    setStickyCaptureError(retryMsg)
+                    _liveAiTranscript.value = retryMsg
+                    startActiveCommandCapture(
+                        reason = "BOUNDED_RETRY_${errName}_${consecutiveRecognitionRetryCount}",
+                        preserveErrorDetail = true
+                    )
+                } else {
+                    lastRecognitionDecision = "REJECTED_RETRY_EXHAUSTED_$errName"
+                    isBoundedConversationModeActive = false
+                    boundedConversationRemainingTurns = 0
+                    val exhaustedActionMsg = if (category == RecognitionFailureCategory.NO_MATCH_OR_SILENCE) {
+                        "No speech recognized ($errName:$errorCode) after $consecutiveRecognitionRetryCount retry attempt(s). Tap the microphone to speak again."
+                    } else {
+                        "Speech recognition failed ($errName:$errorCode) after $consecutiveRecognitionRetryCount retry attempt(s). Tap the microphone to retry."
+                    }
+                    setStickyCaptureError(exhaustedActionMsg)
+                    _liveAiTranscript.value = exhaustedActionMsg
+                    coord.returnToWakeOnlyListening("RECOGNITION_RETRY_EXHAUSTED_$errName")
+                    AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
+                    _observedCaptureState.value = if (category == RecognitionFailureCategory.TRANSIENT_RECOGNITION_ERROR) {
+                        ObservedAssistantCaptureState.ERROR
+                    } else {
+                        ObservedAssistantCaptureState.IDLE
+                    }
+                    refreshDiagnosticSnapshot()
+                }
+            }
+
+            RecognitionFailureCategory.PERMISSION_OR_SERVICE_FAILURE,
+            RecognitionFailureCategory.NONE -> {
+                lastRecognitionErrorCode = errorCode
+                lastRecognitionErrorName = errName
+                lastRecognitionDecision = "REJECTED_UNRECOVERABLE_$errName"
+                isBoundedConversationModeActive = false
+                boundedConversationRemainingTurns = 0
+                val recoveryGuidance = when (errorCode) {
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+                        "Microphone permission denied ($errName:$errorCode). Grant RECORD_AUDIO permission and tap the microphone."
+                    12, 13 ->
+                        "Speech language pack unavailable ($errName:$errorCode). Install offline voice data or switch language, then tap the microphone."
+                    else ->
+                        "Speech recognition service failure ($errName:$errorCode). Check speech services and tap the microphone to retry."
+                }
+                recordSoundDetectedNoAcceptedCommand(
+                    reason = "${errName}($errorCode)",
+                    candidateUtterance = "",
+                    suppressPostTurnHandoff = true,
+                    preserveErrorDetail = true
+                )
+                setStickyCaptureError(recoveryGuidance)
+                _liveAiTranscript.value = recoveryGuidance
+                coord.returnToWakeOnlyListening("UNRECOVERABLE_RECOGNITION_$errName")
+                AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
+                _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
+                refreshDiagnosticSnapshot()
+            }
+
+            RecognitionFailureCategory.INTENTIONAL_CANCELLATION -> {}
+        }
+    }
+
+    private fun createGenerationBoundRecognitionListener(
+        captureGen: Long,
+        boundRecognizer: SpeechRecognizer? = null
+    ): RecognitionListener {
         val coord = AssistantAudioStateMachine.shared
         return object : RecognitionListener {
             private fun isCurrentGen(): Boolean {
-                val match = captureGen > 0L && captureGen == activeCaptureGeneration
+                val match = synchronized(captureHandoffLock) {
+                    val genOk = captureGen > 0L &&
+                        captureGen == activeCaptureGeneration &&
+                        !retiredCaptureGenerations.contains(captureGen)
+                    val instanceOk = boundRecognizer == null ||
+                        activeRecognizerInstance == null ||
+                        boundRecognizer === activeRecognizerInstance
+                    genOk && instanceOk
+                }
                 if (!match) {
                     staleRecognitionCallbacksIgnoredCount += 1
                     Log.d(
@@ -3150,6 +3802,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 if (!isCurrentGen()) return
                 pendingSpeechOnsetElapsedMs = SystemClock.elapsedRealtime()
                 OmniAutonomousCoreEngine.resetInactivityTimer()
+                if (_isSessionActive.value &&
+                    isBoundedConversationModeActive &&
+                    !coord.isStoppedByUserInMemory() &&
+                    !_isMicMuted.value &&
+                    !coord.isDeviceMutedInMemory() &&
+                    !coord.isCommandWindowOpen()
+                ) {
+                    coord.openCommandWindow(reason = "BOUNDED_CONVERSATION_SPEECH_ONSET")
+                }
                 coord.extendCommandWindowOnSpeechActivity()
             }
 
@@ -3176,21 +3837,15 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 if (_observedCaptureState.value == ObservedAssistantCaptureState.LISTENING) {
                     _observedCaptureState.value = ObservedAssistantCaptureState.PROCESSING
                 }
+                refreshDiagnosticSnapshot()
             }
 
             override fun onError(error: Int) {
-                if (!isCurrentGen()) return
-                isNativeRecognizerListening = false
-                clearCaptureReadiness("RECOGNIZER_ON_ERROR_$error")
-                _inputAudioRms.value = 0f
-                if (pendingSpeechEndElapsedMs == 0L) {
-                    pendingSpeechEndElapsedMs = SystemClock.elapsedRealtime()
-                }
-                // NEVER auto-restart SpeechRecognizer in an endless wake loop!
-                val savedBounded = isBoundedConversationModeActive
-                isBoundedConversationModeActive = false
-                recordSoundDetectedNoAcceptedCommand("STT_BOUNDED_WINDOW_ERROR_$error")
-                isBoundedConversationModeActive = savedBounded
+                handleRecognitionFailureOrEmptyResult(
+                    captureGen = captureGen,
+                    boundRecognizer = boundRecognizer,
+                    errorCode = error
+                )
             }
 
             override fun onResults(results: Bundle?) {
@@ -3204,16 +3859,41 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val topText = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
                 if (topText.isNotBlank()) {
-                    pendingFinalRecognitionObserved = true
+                    val retiredPair: Pair<SpeechRecognizer?, Long>
+                    synchronized(captureHandoffLock) {
+                        finalResultAcceptedForCaptureGen = captureGen
+                        consecutiveRecognitionRetryCount = 0
+                        lastRecognitionErrorCode = 0
+                        lastRecognitionErrorName = "NONE"
+                        lastRecognitionDecision = "ACCEPTED"
+                        pendingFinalRecognitionObserved = true
+                        retiredPair = retireCaptureGenerationLocked(captureGen, "FINAL_RESULT_ACCEPTED")
+                    }
+                    releaseRetiredRecognizerOnMainThreadSync(
+                        recognizerToRelease = retiredPair.first,
+                        retiredGeneration = retiredPair.second,
+                        adapter = testSpeechCaptureAdapter
+                    )
+                    if (_isSessionActive.value &&
+                        isBoundedConversationModeActive &&
+                        !coord.isStoppedByUserInMemory() &&
+                        !_isMicMuted.value &&
+                        !coord.isDeviceMutedInMemory() &&
+                        !coord.isCommandWindowOpen()
+                    ) {
+                        coord.openCommandWindow(reason = "BOUNDED_CONVERSATION_RECOGNIZER_RESULT")
+                    }
                     _observedCaptureState.value = ObservedAssistantCaptureState.PROCESSING
+                    refreshDiagnosticSnapshot()
                     scope.launch {
                         processConsentedVoiceAudioTurn(topText)
                     }
                 } else {
-                    val savedBounded = isBoundedConversationModeActive
-                    isBoundedConversationModeActive = false
-                    recordSoundDetectedNoAcceptedCommand("STT_EMPTY_RESULT_RETURN_TO_WAKE")
-                    isBoundedConversationModeActive = savedBounded
+                    handleRecognitionFailureOrEmptyResult(
+                        captureGen = captureGen,
+                        boundRecognizer = boundRecognizer,
+                        errorCode = -1
+                    )
                 }
             }
 
@@ -3244,16 +3924,16 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
      * on [activeRecognitionListenerForTest] (or a supplied listener for stale-generation testing).
      */
     fun createRecognitionListenerForGenerationForTest(generation: Long): RecognitionListener =
-        createGenerationBoundRecognitionListener(generation)
+        createGenerationBoundRecognitionListener(generation, null)
 
     /**
      * Starts a single-turn, bounded command-window Android SpeechRecognizer session on the main thread
      * when explicitly triggered by the user, a bounded conversation follow-up, or a local wake event ("Jarvis").
      *
-     * CRITICAL ARCHITECTURE INVARIANT:
-     * A continuously restarted SpeechRecognizer session is NOT a wake detector.
-     * This method runs ONLY for an active command window, never auto-restarts on error or silence,
-     * and returns microphone ownership upon completion or timeout.
+     * CRITICAL ARCHITECTURE INVARIANTS:
+     * 1. Any previous capture generation/recognizer is retired and released on the main thread BEFORE starting its replacement.
+     * 2. Callbacks and cleanup are bound to the exact recognizer instance and capture generation.
+     * 3. Production startup NEVER synthesizes `onReadyForSpeech`; only real readiness callbacks/recorder state mark capture ready.
      */
     fun startNativeSpeechRecognizerLoop(
         ensureSessionIfNeeded: Boolean = true,
@@ -3280,48 +3960,144 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         if (!coord.isCommandWindowOpen(nowMs)) {
             coord.openCommandWindow(nowMs = nowMs, reason = "EXPLICIT_COMMAND_WINDOW_STT")
         }
-        val myGen = if (captureGeneration > 0L) captureGeneration else captureGenerationCounter.incrementAndGet().also {
-            activeCaptureGeneration = it
+
+        val prevPairToRelease: Pair<SpeechRecognizer?, Long>
+        val myGen: Long
+        synchronized(captureHandoffLock) {
+            if (captureGeneration > 0L) {
+                val older = activeRecognizerBoundGeneration
+                prevPairToRelease = if (older > 0L && older != captureGeneration) {
+                    retireCaptureGenerationLocked(older, "REPLACE_BEFORE_START_$captureGeneration")
+                } else if (activeRecognizerInstance != null) {
+                    val inst = activeRecognizerInstance
+                    val bGen = activeRecognizerBoundGeneration
+                    activeRecognizerInstance = null
+                    activeRecognizerBoundGeneration = 0L
+                    nativeSpeechRecognizer = null
+                    isNativeRecognizerListening = false
+                    inst to bGen
+                } else {
+                    null to 0L
+                }
+                myGen = captureGeneration
+                activeCaptureGeneration = myGen
+            } else {
+                val older = activeCaptureGeneration.takeIf { it > 0L } ?: activeRecognizerBoundGeneration
+                prevPairToRelease = retireCaptureGenerationLocked(older, "REPLACE_WITH_FRESH_GENERATION")
+                myGen = captureGenerationCounter.incrementAndGet()
+                activeCaptureGeneration = myGen
+            }
+            readyCaptureGeneration = 0L
+            readyCaptureOwner = MicComponentOwner.NONE
+            isNativeRecognizerListening = false
         }
+
+        // Await main-thread release of any previous recognizer before starting its replacement
+        releaseRetiredRecognizerOnMainThreadSync(
+            recognizerToRelease = prevPairToRelease.first,
+            retiredGeneration = prevPairToRelease.second,
+            adapter = testSpeechCaptureAdapter
+        )
+
         val acquired = coord.acquireMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE) {
-            stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership = false)
+            val keepActiveForBoundedTurn = synchronized(captureHandoffLock) {
+                myGen == activeCaptureGeneration &&
+                    !retiredCaptureGenerations.contains(myGen) &&
+                    finalResultAcceptedForCaptureGen != myGen &&
+                    _isSessionActive.value &&
+                    isBoundedConversationModeActive &&
+                    !_isMicMuted.value &&
+                    !coord.isStoppedByUserInMemory() &&
+                    !coord.isDeviceMutedInMemory()
+            }
+            if (!keepActiveForBoundedTurn) {
+                stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership = false, expectedGeneration = myGen)
+            }
         }
         if (!acquired) return
 
-        val listener = createGenerationBoundRecognitionListener(myGen)
-        activeRecognitionListenerForTest = listener
+        val recognizeIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ur-PK")
+            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "ur-PK", "hi-IN"))
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 750L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 550L)
+        }
+
+        val preListener = createGenerationBoundRecognitionListener(myGen, null)
+        activeRecognitionListenerForTest = preListener
+        refreshDiagnosticSnapshot()
+
+        val adapterNow = testSpeechCaptureAdapter
+        if (adapterNow != null) {
+            var shouldStartAdapter = false
+            synchronized(captureHandoffLock) {
+                if (_isSessionActive.value &&
+                    !_isMicMuted.value &&
+                    myGen == activeCaptureGeneration &&
+                    !retiredCaptureGenerations.contains(myGen) &&
+                    !coord.isStoppedByUserInMemory() &&
+                    !coord.isDeviceMutedInMemory()
+                ) {
+                    activeRecognizerBoundGeneration = myGen
+                    activeRecognitionListenerForTest = preListener
+                    shouldStartAdapter = true
+                }
+            }
+            if (shouldStartAdapter) {
+                adapterNow.startListening(recognizeIntent, preListener, myGen)
+            }
+            return
+        }
 
         val startRecognizerBlock = Runnable {
-            if (!_isSessionActive.value ||
-                _isMicMuted.value ||
-                myGen != activeCaptureGeneration ||
-                coord.isStoppedByUserInMemory() ||
-                coord.isDeviceMutedInMemory() ||
-                coord.isSelfTriggerSuppressed()
-            ) {
-                return@Runnable
+            synchronized(captureHandoffLock) {
+                if (!_isSessionActive.value ||
+                    _isMicMuted.value ||
+                    myGen != activeCaptureGeneration ||
+                    retiredCaptureGenerations.contains(myGen) ||
+                    coord.isStoppedByUserInMemory() ||
+                    coord.isDeviceMutedInMemory() ||
+                    coord.isSelfTriggerSuppressed()
+                ) {
+                    return@Runnable
+                }
             }
             try {
                 if (isNativeSpeechRecognitionAvailableSafe()) {
-                    if (nativeSpeechRecognizer == null) {
-                        nativeSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).also {
-                            _activeRecognizerInstanceCount.incrementAndGet()
+                    val createdRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+                    val instanceBoundListener = createGenerationBoundRecognitionListener(myGen, createdRecognizer)
+                    var shouldStart = false
+                    synchronized(captureHandoffLock) {
+                        if (myGen == activeCaptureGeneration &&
+                            !retiredCaptureGenerations.contains(myGen) &&
+                            _isSessionActive.value &&
+                            !_isMicMuted.value &&
+                            _connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING
+                        ) {
+                            activeRecognizerInstance = createdRecognizer
+                            activeRecognizerBoundGeneration = myGen
+                            nativeSpeechRecognizer = createdRecognizer
+                            activeRecognitionListenerForTest = instanceBoundListener
+                            if (liveRecognizerInstances.add(createdRecognizer)) {
+                                _activeRecognizerInstanceCount.incrementAndGet()
+                            }
+                            shouldStart = true
                         }
                     }
-                    nativeSpeechRecognizer?.setRecognitionListener(listener)
-                    if (!isNativeRecognizerListening && _connectionState.value != LiveConnectionState.LIVE_AI_SPEAKING) {
-                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ur-PK")
-                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "ur-PK")
-                            putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", arrayOf("en-US", "ur-PK", "hi-IN"))
-                            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 750L)
-                            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 550L)
+                    if (shouldStart) {
+                        createdRecognizer.setRecognitionListener(instanceBoundListener)
+                        createdRecognizer.startListening(recognizeIntent)
+                        // Note: isNativeRecognizerListening and markCaptureReady are set ONLY when
+                        // real onReadyForSpeech fires on instanceBoundListener!
+                    } else {
+                        try {
+                            createdRecognizer.destroy()
+                        } catch (_: Exception) {
                         }
-                        nativeSpeechRecognizer?.startListening(intent)
-                        isNativeRecognizerListening = true
                     }
                 } else {
                     val pcmAcquired = coord.acquireMicrophoneOwnership(MicComponentOwner.LIVE_SESSION_ENGINE) {
@@ -3330,10 +4106,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                     if (pcmAcquired && micStreamingJob?.isActive != true) {
                         start16kHzMicrophonePcmStream()
                     }
-                    isNativeRecognizerListening = true
-                }
-                if (autoConfirmCaptureReadyInTest) {
-                    listener.onReadyForSpeech(Bundle())
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Native SpeechRecognizer fallback to 16kHz PCM stream: ${e.message}")
@@ -3342,10 +4114,6 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
                 if (pcmAcquired && micStreamingJob?.isActive != true) {
                     start16kHzMicrophonePcmStream()
-                }
-                isNativeRecognizerListening = true
-                if (autoConfirmCaptureReadyInTest) {
-                    listener.onReadyForSpeech(Bundle())
                 }
             }
         }
@@ -3356,30 +4124,53 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         }
     }
 
-    fun stopNativeSpeechRecognizerLoop(releaseCoordinatorOwnership: Boolean = true) {
-        clearCaptureReadiness("STOP_NATIVE_RECOGNIZER")
-        val stopBlock = Runnable {
-            try {
-                isNativeRecognizerListening = false
-                nativeSpeechRecognizer?.stopListening()
-                nativeSpeechRecognizer?.cancel()
-                nativeSpeechRecognizer?.destroy()
-            } catch (_: Exception) {
-            } finally {
-                if (nativeSpeechRecognizer != null) {
-                    nativeSpeechRecognizer = null
-                    _activeRecognizerInstanceCount.updateAndGet { (it - 1).coerceAtLeast(0) }
-                }
-                if (releaseCoordinatorOwnership) {
-                    AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
-                }
+    /**
+     * Serialized recognizer shutdown:
+     * 1. Invalidates/retires the capture generation BEFORE calling `stopListening()`/`cancel()`/`destroy()`.
+     * 2. Binds cleanup to the exact retired [SpeechRecognizer] instance and generation (`expectedGeneration`).
+     * 3. Awaits main-thread release so a delayed cleanup never stops or mutates a replacement capture.
+     */
+    fun stopNativeSpeechRecognizerLoop(
+        releaseCoordinatorOwnership: Boolean = true,
+        expectedGeneration: Long? = null
+    ) {
+        val pairToRelease: Pair<SpeechRecognizer?, Long>
+        synchronized(captureHandoffLock) {
+            if (expectedGeneration != null &&
+                expectedGeneration > 0L &&
+                activeCaptureGeneration != 0L &&
+                activeCaptureGeneration != expectedGeneration &&
+                activeRecognizerBoundGeneration != expectedGeneration
+            ) {
+                staleRecognitionCallbacksIgnoredCount += 1
+                Log.d(
+                    TAG,
+                    "Ignored stale stopNativeSpeechRecognizerLoop for gen=$expectedGeneration (activeGen=$activeCaptureGeneration)"
+                )
+                return
+            }
+            val genToRetire = expectedGeneration
+                ?: activeCaptureGeneration.takeIf { it > 0L }
+                ?: activeRecognizerBoundGeneration
+            pairToRelease = retireCaptureGenerationLocked(genToRetire, "STOP_NATIVE_RECOGNIZER")
+            clearCaptureReadiness("STOP_NATIVE_RECOGNIZER")
+        }
+
+        releaseRetiredRecognizerOnMainThreadSync(
+            recognizerToRelease = pairToRelease.first,
+            retiredGeneration = pairToRelease.second,
+            adapter = testSpeechCaptureAdapter
+        )
+
+        if (releaseCoordinatorOwnership) {
+            val shouldReleaseOwner = synchronized(captureHandoffLock) {
+                activeCaptureGeneration == 0L && activeRecognizerInstance == null
+            }
+            if (shouldReleaseOwner) {
+                AssistantAudioStateMachine.shared.releaseMicrophoneOwnership(MicComponentOwner.COMMAND_WINDOW_CAPTURE)
             }
         }
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            stopBlock.run()
-        } else {
-            mainHandler.post(stopBlock)
-        }
+        refreshDiagnosticSnapshot()
     }
 
     /**
@@ -4499,13 +5290,14 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
     }
 
     fun recordPcmPlaybackFailure(commandId: String = activeCommandId, reason: String = "AUDIO_TRACK_PLAYBACK_FAILED") {
+        val coord = AssistantAudioStateMachine.shared
         val cmdId = commandId.ifBlank { activePcmPlaybackCommandId.ifBlank { activeCommandId } }
         isPcmHardwareDrainInProgress = false
         activePcmPlaybackCommandId = ""
         _outputAudioRms.value = 0f
         _observedCaptureState.value = ObservedAssistantCaptureState.ERROR
         val errMsg = "Received audio reply, but speaker playback failed ($reason)."
-        _captureErrorDetail.value = errMsg
+        setStickyCaptureError(errMsg)
         if (cmdId.isNotBlank()) {
             val updatedDiag = updateCommandDiagnostic(cmdId) { current ->
                 current.copy(
@@ -4523,7 +5315,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             }
             // Release the unplayed slot WITHOUT marking the command completed so bounded TTS recovery can acquire it!
             AudioOutputManager.releaseUnplayedTurnSlot(cmdId)
-            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
+            coord.notifyAssistantSpeechEnded(
                 source = "PCM_PLAYBACK_FAILED",
                 ownerToken = cmdId,
                 immediateCooldownClear = true
@@ -4534,9 +5326,34 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             )
             if (!recovered) {
                 _liveAiTranscript.value = errMsg
+                AudioOutputManager.completeTurnOutput(cmdId)
+                if (_isSessionActive.value &&
+                    !coord.isStoppedByUserInMemory() &&
+                    !_isMicMuted.value &&
+                    !coord.isDeviceMutedInMemory()
+                ) {
+                    handoffToPostTurnCapture(
+                        reason = "PCM_PLAYBACK_FAILED_RESTORE_CAPTURE_$reason",
+                        preserveErrorDetail = true
+                    )
+                } else {
+                    refreshDiagnosticSnapshot()
+                }
             }
         } else {
             _liveAiTranscript.value = errMsg
+            if (_isSessionActive.value &&
+                !coord.isStoppedByUserInMemory() &&
+                !_isMicMuted.value &&
+                !coord.isDeviceMutedInMemory()
+            ) {
+                handoffToPostTurnCapture(
+                    reason = "PCM_PLAYBACK_FAILED_RESTORE_CAPTURE_$reason",
+                    preserveErrorDetail = true
+                )
+            } else {
+                refreshDiagnosticSnapshot()
+            }
         }
     }
 
@@ -6290,6 +7107,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
             expectedWakeInTestAudio = expectedWakeInTestAudio,
             expectedCommandExecutionInTestAudio = expectedCommandExecutionInTestAudio
         )
+        lastRecognitionDecision = "${eval.decision.name}(${eval.reason})"
+        refreshDiagnosticSnapshot()
         when (eval.decision) {
             WakeSpeechCandidateDecision.STOP_AND_DISARM_PINNED -> {
                 clearPlaybackQueueAndStopImmediately()
@@ -6297,6 +7116,8 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 com.example.service.WakeWordForegroundService.stop(context, pinUserStop = true)
             }
             WakeSpeechCandidateDecision.CANCEL_OR_STOP_COMMAND_WINDOW -> {
+                isBoundedConversationModeActive = false
+                boundedConversationRemainingTurns = 0
                 clearPlaybackQueueAndStopImmediately()
                 activeCommandId = ""
                 awaitingVerifiedToolOutcome = false
@@ -6318,7 +7139,7 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
                 }
             }
             else -> {
-                // Suppressed during TTS/notification, or ignored background conversation / TV audio / stopped
+                refreshDiagnosticSnapshot()
             }
         }
         return eval
@@ -6906,6 +7727,9 @@ ${com.omnivoice.agentfix.ToolDispatcher.AGENT_RULES_PROMPT}
         commandIdOverride: String? = null,
         nowMs: Long = System.currentTimeMillis()
     ) {
+        if (AssistantAudioStateMachine.shared.lifecycleState.value != WakeSpeechLifecycleState.SPEAKING_SUPPRESSED) {
+            AssistantAudioStateMachine.shared.clearTailCooldownAfterDrain()
+        }
         processFallbackLiveTurn(
             textInput = textInput,
             wavBytes = null,

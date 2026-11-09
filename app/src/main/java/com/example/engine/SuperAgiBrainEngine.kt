@@ -1245,10 +1245,10 @@ object SuperAgiBrainEngine {
                 val value = evaluateSimpleExpression(candidate)
                 if (value != null && !value.isNaN() && !value.isInfinite()) {
                     val formatted = formatNumber(value)
-                    return if (isEng) {
-                        "The result of $candidate is $formatted."
-                    } else {
-                        "Hisaab ke mutabiq $candidate ka jawab $formatted hai."
+                    return when {
+                        isEng -> "The result of $candidate is $formatted."
+                        LanguageProcessor.isRtlScript(rawText) -> "حساب کے مطابق $candidate کا جواب $formatted ہے۔"
+                        else -> "Hisaab ke mutabiq $candidate ka jawab $formatted hai."
                     }
                 }
             }

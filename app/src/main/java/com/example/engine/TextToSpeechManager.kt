@@ -463,6 +463,241 @@ class TextToSpeechManager(
     @Volatile
     var speakEngineInterceptorForTest: ((text: String, queueMode: Int, utteranceId: String) -> Int)? = null
 
+    /**
+     * Real time deadlines for TTS initialization, utterance start, and completion.
+     * Ensures missing platform callbacks never leave speaking suppression or command state hung.
+     */
+    @Volatile
+    var initTimeoutMs: Long = 2500L
+
+    @Volatile
+    var startTimeoutMs: Long = 2000L
+
+    @Volatile
+    var completionTimeoutMs: Long = 12000L
+
+    private val deadlineHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val pendingInitTimeoutRunnables = ConcurrentHashMap<String, Runnable>()
+    private val activeStartTimeoutRunnables = ConcurrentHashMap<String, Runnable>()
+    private val activeCompletionTimeoutRunnables = ConcurrentHashMap<String, Runnable>()
+
+    private fun cancelTurnDeadlines(turnId: String) {
+        val cleanId = turnId.trim()
+        if (cleanId.isEmpty()) return
+        pendingInitTimeoutRunnables.remove(cleanId)?.let { deadlineHandler.removeCallbacks(it) }
+        activeStartTimeoutRunnables.remove(cleanId)?.let { deadlineHandler.removeCallbacks(it) }
+        activeCompletionTimeoutRunnables.remove(cleanId)?.let { deadlineHandler.removeCallbacks(it) }
+    }
+
+    private fun cancelAllDeadlines() {
+        for ((_, r) in pendingInitTimeoutRunnables) {
+            deadlineHandler.removeCallbacks(r)
+        }
+        pendingInitTimeoutRunnables.clear()
+        for ((_, r) in activeStartTimeoutRunnables) {
+            deadlineHandler.removeCallbacks(r)
+        }
+        activeStartTimeoutRunnables.clear()
+        for ((_, r) in activeCompletionTimeoutRunnables) {
+            deadlineHandler.removeCallbacks(r)
+        }
+        activeCompletionTimeoutRunnables.clear()
+    }
+
+    private fun schedulePendingInitDeadline(req: PendingInitTtsRequest) {
+        cancelTurnDeadlines(req.turnId)
+        val timeoutMs = initTimeoutMs.coerceAtLeast(20L)
+        val scheduledAtWallMs = System.currentTimeMillis()
+        val runnable = object : Runnable {
+            override fun run() {
+                val wallElapsedMs = System.currentTimeMillis() - scheduledAtWallMs
+                if (wallElapsedMs + 15L < timeoutMs) {
+                    val remainingMs = (timeoutMs - wallElapsedMs).coerceAtLeast(15L)
+                    deadlineHandler.postDelayed(this, remainingMs)
+                    return
+                }
+                pendingInitTimeoutRunnables.remove(req.turnId)
+                var timedOutReq: PendingInitTtsRequest? = null
+                synchronized(lock) {
+                    if (!isInitialized) {
+                        val iter = pendingInitQueue.iterator()
+                        while (iter.hasNext()) {
+                            val candidate = iter.next()
+                            if (candidate.turnId == req.turnId) {
+                                timedOutReq = candidate
+                                iter.remove()
+                                break
+                            }
+                        }
+                    }
+                }
+                val target = timedOutReq ?: return
+                Log.e(TAG, "TTS initialization timed out after ${timeoutMs}ms for turnId=${target.turnId}")
+                errorCountAtomic.incrementAndGet()
+                lastErrorReason = "TTS_INIT_TIMEOUT"
+                AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
+                    immediateCooldownClear = true,
+                    ownerToken = target.turnId,
+                    forceRelease = true
+                )
+                AudioOutputManager.completeTurnOutput(target.turnId)
+                emitLifecycle(
+                    target.onCommandStateChanged,
+                    TtsLifecycleEvent(
+                        commandId = target.commandId,
+                        turnId = target.turnId,
+                        utteranceId = target.turnId,
+                        state = TtsOutputLifecycleState.FAILED,
+                        reason = "TTS_INIT_TIMEOUT",
+                        configSnapshot = target.requestedSnapshot
+                    )
+                )
+                onSpeechError?.invoke("TTS_INIT_TIMEOUT")
+            }
+        }
+        pendingInitTimeoutRunnables[req.turnId] = runnable
+        deadlineHandler.postDelayed(runnable, timeoutMs)
+    }
+
+    private fun scheduleActiveTurnDeadlines(record: ActiveTtsTurnRecord) {
+        cancelTurnDeadlines(record.turnId)
+        val startMs = startTimeoutMs.coerceAtLeast(20L)
+        val totalCompletionMs = (startMs + completionTimeoutMs.coerceAtLeast(30L))
+        val scheduledAtWallMs = System.currentTimeMillis()
+
+        val startRunnable = object : Runnable {
+            override fun run() {
+                val wallElapsedMs = System.currentTimeMillis() - scheduledAtWallMs
+                if (wallElapsedMs + 15L < startMs) {
+                    val stillWaitingStart = synchronized(lock) {
+                        val cur = activeTurnRecord
+                        cur != null && cur.generation == record.generation && cur.startedSegments.isEmpty()
+                    }
+                    if (stillWaitingStart) {
+                        deadlineHandler.postDelayed(this, (startMs - wallElapsedMs).coerceAtLeast(15L))
+                    } else {
+                        activeStartTimeoutRunnables.remove(record.turnId)
+                    }
+                    return
+                }
+                activeStartTimeoutRunnables.remove(record.turnId)
+                val shouldFail = synchronized(lock) {
+                    val cur = activeTurnRecord
+                    cur != null && cur.generation == record.generation && cur.startedSegments.isEmpty()
+                }
+                if (shouldFail) {
+                    failActiveTurnByTimeout(record.turnId, record.generation, "TTS_START_TIMEOUT")
+                }
+            }
+        }
+        activeStartTimeoutRunnables[record.turnId] = startRunnable
+        deadlineHandler.postDelayed(startRunnable, startMs)
+
+        val completionRunnable = object : Runnable {
+            override fun run() {
+                val wallElapsedMs = System.currentTimeMillis() - scheduledAtWallMs
+                if (wallElapsedMs + 15L < totalCompletionMs) {
+                    val stillActive = synchronized(lock) {
+                        val cur = activeTurnRecord
+                        cur != null && cur.generation == record.generation
+                    }
+                    if (stillActive) {
+                        deadlineHandler.postDelayed(this, (totalCompletionMs - wallElapsedMs).coerceAtLeast(15L))
+                    } else {
+                        activeCompletionTimeoutRunnables.remove(record.turnId)
+                    }
+                    return
+                }
+                activeCompletionTimeoutRunnables.remove(record.turnId)
+                val shouldFail = synchronized(lock) {
+                    val cur = activeTurnRecord
+                    cur != null && cur.generation == record.generation
+                }
+                if (shouldFail) {
+                    failActiveTurnByTimeout(record.turnId, record.generation, "TTS_COMPLETION_TIMEOUT")
+                }
+            }
+        }
+        activeCompletionTimeoutRunnables[record.turnId] = completionRunnable
+        deadlineHandler.postDelayed(completionRunnable, totalCompletionMs)
+    }
+
+    private fun refreshCompletionDeadlineOnSegmentStart(record: ActiveTtsTurnRecord) {
+        activeStartTimeoutRunnables.remove(record.turnId)?.let { deadlineHandler.removeCallbacks(it) }
+        activeCompletionTimeoutRunnables.remove(record.turnId)?.let { deadlineHandler.removeCallbacks(it) }
+        val compMs = completionTimeoutMs.coerceAtLeast(30L)
+        val scheduledAtWallMs = System.currentTimeMillis()
+        val completionRunnable = object : Runnable {
+            override fun run() {
+                val wallElapsedMs = System.currentTimeMillis() - scheduledAtWallMs
+                if (wallElapsedMs + 15L < compMs) {
+                    val stillActive = synchronized(lock) {
+                        val cur = activeTurnRecord
+                        cur != null && cur.generation == record.generation
+                    }
+                    if (stillActive) {
+                        deadlineHandler.postDelayed(this, (compMs - wallElapsedMs).coerceAtLeast(15L))
+                    } else {
+                        activeCompletionTimeoutRunnables.remove(record.turnId)
+                    }
+                    return
+                }
+                activeCompletionTimeoutRunnables.remove(record.turnId)
+                val shouldFail = synchronized(lock) {
+                    val cur = activeTurnRecord
+                    cur != null && cur.generation == record.generation
+                }
+                if (shouldFail) {
+                    failActiveTurnByTimeout(record.turnId, record.generation, "TTS_COMPLETION_TIMEOUT")
+                }
+            }
+        }
+        activeCompletionTimeoutRunnables[record.turnId] = completionRunnable
+        deadlineHandler.postDelayed(completionRunnable, compMs)
+    }
+
+    private fun failActiveTurnByTimeout(turnId: String, generation: Long, timeoutReason: String) {
+        val timedOutRecord: ActiveTtsTurnRecord
+        synchronized(lock) {
+            val current = activeTurnRecord
+            if (current == null || current.turnId != turnId || current.generation != generation) {
+                return
+            }
+            timedOutRecord = current
+            activeTurnRecord = null
+            for (segId in timedOutRecord.segmentUtteranceIds) {
+                utteranceToTurnMap.remove(segId)
+            }
+        }
+        cancelTurnDeadlines(turnId)
+        Log.e(TAG, "TTS active turn timed out ($timeoutReason) for turnId=$turnId, commandId=${timedOutRecord.commandId}")
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
+        errorCountAtomic.incrementAndGet()
+        lastErrorReason = timeoutReason
+        AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
+            immediateCooldownClear = true,
+            ownerToken = timedOutRecord.turnId,
+            forceRelease = true
+        )
+        AudioOutputManager.completeTurnOutput(timedOutRecord.turnId)
+        emitLifecycle(
+            timedOutRecord.onCommandStateChanged,
+            TtsLifecycleEvent(
+                commandId = timedOutRecord.commandId,
+                turnId = timedOutRecord.turnId,
+                utteranceId = timedOutRecord.finalUtteranceId,
+                state = TtsOutputLifecycleState.FAILED,
+                totalSegments = timedOutRecord.segmentUtteranceIds.size,
+                reason = timeoutReason,
+                configSnapshot = timedOutRecord.configSnapshot
+            )
+        )
+        onSpeechError?.invoke(timeoutReason)
+    }
+
     private val _voicePackStatus = MutableStateFlow(TtsVoicePackStatus())
     val voicePackStatus: StateFlow<TtsVoicePackStatus> = _voicePackStatus.asStateFlow()
 
@@ -490,6 +725,12 @@ class TextToSpeechManager(
         synchronized(lock) {
             isInitialized = initialized
             isInitializationFailed = initFailed
+            if (!initialized && !initFailed) {
+                while (pendingInitQueue.isNotEmpty()) {
+                    val removed = pendingInitQueue.removeFirst()
+                    cancelTurnDeadlines(removed.turnId)
+                }
+            }
             _voicePackStatus.value = _voicePackStatus.value.copy(
                 isInitialized = initialized,
                 isUrduPkInstalled = urduPkInstalled,
@@ -578,6 +819,7 @@ class TextToSpeechManager(
         if (status == TextToSpeech.SUCCESS) {
             probeAvailableVoicePacks()
             for (req in requestsToDispatch) {
+                cancelTurnDeadlines(req.turnId)
                 dispatchInitializedNormalizedRequest(req)
             }
         } else {
@@ -586,8 +828,10 @@ class TextToSpeechManager(
                 forceRelease = true
             )
             for (req in requestsToFail) {
+                cancelTurnDeadlines(req.turnId)
                 errorCountAtomic.incrementAndGet()
                 lastErrorReason = "TTS_INIT_FAILED_$status"
+                AudioOutputManager.completeTurnOutput(req.turnId)
                 emitLifecycle(
                     req.onCommandStateChanged,
                     TtsLifecycleEvent(
@@ -685,6 +929,8 @@ class TextToSpeechManager(
             segIndex = record.segmentUtteranceIds.indexOf(uttId).coerceAtLeast(0)
         }
 
+        refreshCompletionDeadlineOnSegmentStart(record)
+
         if (isFirstSegment) {
             startedCountAtomic.incrementAndGet()
             AssistantAudioStateMachine.shared.notifyAssistantSpeechStarted(
@@ -754,6 +1000,7 @@ class TextToSpeechManager(
             return
         }
 
+        cancelTurnDeadlines(record.turnId)
         completedCountAtomic.incrementAndGet()
         AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(ownerToken = record.turnId)
         AudioOutputManager.completeTurnOutput(record.turnId)
@@ -803,6 +1050,7 @@ class TextToSpeechManager(
             }
         }
 
+        cancelTurnDeadlines(record.turnId)
         errorCountAtomic.incrementAndGet()
         lastErrorReason = "TTS_UTTERANCE_ERROR_$errorCode"
         AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
@@ -853,6 +1101,7 @@ class TextToSpeechManager(
             }
         }
 
+        cancelTurnDeadlines(record.turnId)
         interruptedCountAtomic.incrementAndGet()
         AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
             immediateCooldownClear = true,
@@ -1054,7 +1303,14 @@ class TextToSpeechManager(
         }
 
         droppedOldest?.let { dropped ->
+            cancelTurnDeadlines(dropped.turnId)
             interruptedCountAtomic.incrementAndGet()
+            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
+                immediateCooldownClear = true,
+                ownerToken = dropped.turnId,
+                forceRelease = true
+            )
+            AudioOutputManager.completeTurnOutput(dropped.turnId)
             emitLifecycle(
                 dropped.onCommandStateChanged,
                 TtsLifecycleEvent(
@@ -1073,8 +1329,10 @@ class TextToSpeechManager(
             lastErrorReason = "TTS_NOT_INITIALIZED_FAILED"
             AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
                 immediateCooldownClear = true,
-                ownerToken = effectiveTurnId
+                ownerToken = effectiveTurnId,
+                forceRelease = true
             )
+            AudioOutputManager.completeTurnOutput(effectiveTurnId)
             emitLifecycle(
                 onCommandStateChanged,
                 TtsLifecycleEvent(
@@ -1091,6 +1349,8 @@ class TextToSpeechManager(
         }
 
         if (queuedDuringInit) {
+            // Enforce a real initialization deadline while awaiting TextToSpeech.OnInitListener!
+            schedulePendingInitDeadline(req)
             // Do NOT invoke onSpeechCompleted for unplayed text while awaiting initialization!
             emitLifecycle(
                 onCommandStateChanged,
@@ -1265,6 +1525,7 @@ class TextToSpeechManager(
         }
 
         if (previousActive != null && previousActive.turnId != req.turnId) {
+            cancelTurnDeadlines(previousActive.turnId)
             interruptedCountAtomic.incrementAndGet()
             AudioOutputManager.completeTurnOutput(previousActive.turnId)
             emitLifecycle(
@@ -1300,6 +1561,10 @@ class TextToSpeechManager(
             )
         )
 
+        // Schedule real utterance start and completion deadlines BEFORE invoking speak() so synchronous
+        // or immediate test callbacks can cancel them cleanly, and missing callbacks never hang the turn!
+        scheduleActiveTurnDeadlines(newRecord)
+
         for ((index, run) in runs.withIndex()) {
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             val uttId = segmentIds[index]
@@ -1327,6 +1592,7 @@ class TextToSpeechManager(
                         utteranceToTurnMap.remove(segId)
                     }
                 }
+                cancelTurnDeadlines(req.turnId)
                 errorCountAtomic.incrementAndGet()
                 lastErrorReason = "TTS_SPEAK_RETURNED_$speakResult"
                 AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
@@ -1538,6 +1804,8 @@ class TextToSpeechManager(
             }
         }
 
+        cancelAllDeadlines()
+
         if (activeToCancel != null) {
             interruptedCountAtomic.incrementAndGet()
             AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
@@ -1564,6 +1832,12 @@ class TextToSpeechManager(
 
         for (queued in cancelledInitRequests) {
             interruptedCountAtomic.incrementAndGet()
+            AssistantAudioStateMachine.shared.notifyAssistantSpeechEnded(
+                immediateCooldownClear = true,
+                ownerToken = queued.turnId,
+                forceRelease = true
+            )
+            AudioOutputManager.completeTurnOutput(queued.turnId)
             emitLifecycle(
                 queued.onCommandStateChanged,
                 TtsLifecycleEvent(

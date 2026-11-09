@@ -109,6 +109,7 @@ class VoiceAssistantViewModel(application: Application) : AndroidViewModel(appli
     val liveConnectionState: StateFlow<LiveConnectionState> = omniLiveEngine.connectionState
     val observedCaptureState: StateFlow<com.example.engine.ObservedAssistantCaptureState> = omniLiveEngine.observedCaptureState
     val captureErrorDetail: StateFlow<String> = omniLiveEngine.captureErrorDetail
+    val liveDiagnosticSnapshot: StateFlow<com.example.engine.LiveSessionDiagnosticSnapshot> = omniLiveEngine.diagnosticSnapshot
     val isLiveSessionActive: StateFlow<Boolean> = omniLiveEngine.isSessionActive
     val isLiveMicMuted: StateFlow<Boolean> = omniLiveEngine.isMicMuted
     val selectedLiveVoice: StateFlow<GeminiLiveVoice> = omniLiveEngine.selectedVoice

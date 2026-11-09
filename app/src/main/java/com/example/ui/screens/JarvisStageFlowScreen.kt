@@ -201,6 +201,8 @@ fun JarvisStageFlowScreen(
     val liveState by viewModel.liveConnectionState.collectAsState()
     val observedCaptureState by viewModel.observedCaptureState.collectAsState()
     val captureErrorDetail by viewModel.captureErrorDetail.collectAsState()
+    val diagnosticSnapshot by viewModel.liveDiagnosticSnapshot.collectAsState()
+    var diagnosticCopiedToast by remember { mutableStateOf(false) }
     val selectedVoice by viewModel.selectedLiveVoice.collectAsState()
     val inputRms by viewModel.liveInputRms.collectAsState()
     val outputRms by viewModel.liveOutputRms.collectAsState()
@@ -336,122 +338,180 @@ fun JarvisStageFlowScreen(
                     .padding(horizontal = 12.dp, vertical = 4.dp)
                     .testTag("wake_speech_status_banner")
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        val effectiveStatusLabel = when (observedCaptureState) {
-                            com.example.engine.ObservedAssistantCaptureState.STARTING -> "Starting"
-                            com.example.engine.ObservedAssistantCaptureState.LISTENING -> "Listening"
-                            com.example.engine.ObservedAssistantCaptureState.PROCESSING -> "Processing"
-                            com.example.engine.ObservedAssistantCaptureState.SPEAKING -> "Speaking"
-                            com.example.engine.ObservedAssistantCaptureState.MUTED -> "Muted"
-                            com.example.engine.ObservedAssistantCaptureState.ERROR -> "Error"
-                            com.example.engine.ObservedAssistantCaptureState.IDLE -> wakeLifecycleState.badgeLabel
-                        }
-                        Text(
-                            text = "STATE: $effectiveStatusLabel (${wakeLifecycleState.badgeLabel}) • INPUT: ${activeInputRoute.label.uppercase()}",
-                            fontSize = 9.sp,
-                            fontFamily = JetBrainsMonoFontFamily,
-                            fontWeight = FontWeight.Bold,
-                            color = if (observedCaptureState == com.example.engine.ObservedAssistantCaptureState.ERROR) {
-                                QuantumCrimson
-                            } else if (isUserArmed) {
-                                QuantumMint
-                            } else {
-                                QuantumAmber
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = if (captureErrorDetail.isNotBlank() && observedCaptureState == com.example.engine.ObservedAssistantCaptureState.ERROR) {
-                                "MIC OWNER: ${activeMicOwner.displayLabel} • $captureErrorDetail"
-                            } else {
-                                "MIC OWNER: ${activeMicOwner.displayLabel}"
-                            },
-                            fontSize = 9.sp,
-                            fontFamily = JetBrainsMonoFontFamily,
-                            color = TextSecondary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Surface(
-                            color = QuantumMint.copy(alpha = 0.16f),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, QuantumMint.copy(alpha = 0.6f)),
-                            modifier = Modifier
-                                .clickable {
-                                    requestMicInContextOrRun("ARM_WAKE_ONLY") {
-                                        viewModel.armJarvisWakeAndSpeechSession()
-                                    }
-                                }
-                                .testTag("btn_arm_or_rearm_jarvis")
-                        ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            val effectiveStatusLabel = when (observedCaptureState) {
+                                com.example.engine.ObservedAssistantCaptureState.STARTING -> "Starting"
+                                com.example.engine.ObservedAssistantCaptureState.LISTENING -> "Listening"
+                                com.example.engine.ObservedAssistantCaptureState.PROCESSING -> "Processing"
+                                com.example.engine.ObservedAssistantCaptureState.SPEAKING -> "Speaking"
+                                com.example.engine.ObservedAssistantCaptureState.MUTED -> "Muted"
+                                com.example.engine.ObservedAssistantCaptureState.ERROR -> "Error"
+                                com.example.engine.ObservedAssistantCaptureState.IDLE -> wakeLifecycleState.badgeLabel
+                            }
                             Text(
-                                text = if (wakeLifecycleState.requiresUserActionToArm) "TAP TO RE-ARM" else "ARM JARVIS",
+                                text = "STATE: $effectiveStatusLabel (${wakeLifecycleState.badgeLabel}) • INPUT: ${activeInputRoute.label.uppercase()}",
                                 fontSize = 9.sp,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 fontWeight = FontWeight.Bold,
-                                color = QuantumMint,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                color = if (observedCaptureState == com.example.engine.ObservedAssistantCaptureState.ERROR) {
+                                    QuantumCrimson
+                                } else if (isUserArmed) {
+                                    QuantumMint
+                                } else {
+                                    QuantumAmber
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            val visibleError = captureErrorDetail.ifBlank {
+                                diagnosticSnapshot.stickyErrorSummary.takeIf { it != "NONE" }.orEmpty()
+                            }
+                            Text(
+                                text = if (visibleError.isNotBlank()) {
+                                    "MIC OWNER: ${activeMicOwner.displayLabel} • $visibleError"
+                                } else {
+                                    "MIC OWNER: ${activeMicOwner.displayLabel}"
+                                },
+                                fontSize = 9.sp,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = if (visibleError.isNotBlank()) QuantumCrimson else TextSecondary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                color = QuantumMint.copy(alpha = 0.16f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, QuantumMint.copy(alpha = 0.6f)),
+                                modifier = Modifier
+                                    .clickable {
+                                        requestMicInContextOrRun("ARM_WAKE_ONLY") {
+                                            viewModel.armJarvisWakeAndSpeechSession()
+                                        }
+                                    }
+                                    .testTag("btn_arm_or_rearm_jarvis")
+                            ) {
+                                Text(
+                                    text = if (wakeLifecycleState.requiresUserActionToArm) "TAP TO RE-ARM" else "ARM JARVIS",
+                                    fontSize = 9.sp,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = QuantumMint,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                )
+                            }
 
+                            Surface(
+                                color = QuantumCyan.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.5f)),
+                                modifier = Modifier
+                                    .clickable {
+                                        try {
+                                            val roleIntent = com.example.service.OmniVoiceInteractionService
+                                                .buildRequestAssistantRoleIntent(context)
+                                            context.startActivity(roleIntent)
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+                                    .testTag("btn_request_assistant_role")
+                            ) {
+                                Text(
+                                    text = "ROLE",
+                                    fontSize = 9.sp,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = QuantumCyan,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp)
+                                )
+                            }
+
+                            Surface(
+                                color = QuantumCrimson.copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(8.dp),
+                                border = BorderStroke(1.dp, QuantumCrimson.copy(alpha = 0.65f)),
+                                modifier = Modifier
+                                    .clickable {
+                                        viewModel.stopAllWakeAndSpeechAndPinToDevice()
+                                        if (currentStage == JarvisStage.STAGE_C_CORNER_ORB) {
+                                            currentStage = JarvisStage.STAGE_B_MINIMAL_START
+                                        }
+                                    }
+                                    .testTag("btn_stop_wake_and_speech")
+                            ) {
+                                Text(
+                                    text = "STOP",
+                                    fontSize = 9.sp,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    color = QuantumCrimson,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Compact Redacted Diagnostic View + Copy Action (keeps errors visible even when Idle)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("jarvis_diagnostic_panel"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = diagnosticSnapshot.toCompactHudLine(),
+                            fontSize = 8.sp,
+                            fontFamily = JetBrainsMonoFontFamily,
+                            color = TextSecondary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 6.dp)
+                                .testTag("txt_diagnostic_summary")
+                        )
                         Surface(
-                            color = QuantumCyan.copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.5f)),
+                            color = QuantumElevatedCard,
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(1.dp, QuantumCyan.copy(alpha = 0.45f)),
                             modifier = Modifier
                                 .clickable {
                                     try {
-                                        val roleIntent = com.example.service.OmniVoiceInteractionService
-                                            .buildRequestAssistantRoleIntent(context)
-                                        context.startActivity(roleIntent)
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                        val clip = android.content.ClipData.newPlainText(
+                                            "JarvisDiagnostics",
+                                            diagnosticSnapshot.toRedactedCopyText()
+                                        )
+                                        clipboard?.setPrimaryClip(clip)
+                                        diagnosticCopiedToast = true
                                     } catch (_: Exception) {
                                     }
                                 }
-                                .testTag("btn_request_assistant_role")
+                                .testTag("btn_copy_diagnostics")
                         ) {
                             Text(
-                                text = "ROLE",
-                                fontSize = 9.sp,
+                                text = if (diagnosticCopiedToast) "COPIED" else "COPY DIAG",
+                                fontSize = 8.sp,
                                 fontFamily = JetBrainsMonoFontFamily,
                                 fontWeight = FontWeight.Bold,
                                 color = QuantumCyan,
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp)
-                            )
-                        }
-
-                        Surface(
-                            color = QuantumCrimson.copy(alpha = 0.18f),
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, QuantumCrimson.copy(alpha = 0.65f)),
-                            modifier = Modifier
-                                .clickable {
-                                    viewModel.stopAllWakeAndSpeechAndPinToDevice()
-                                    if (currentStage == JarvisStage.STAGE_C_CORNER_ORB) {
-                                        currentStage = JarvisStage.STAGE_B_MINIMAL_START
-                                    }
-                                }
-                                .testTag("btn_stop_wake_and_speech")
-                        ) {
-                            Text(
-                                text = "STOP",
-                                fontSize = 9.sp,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                color = QuantumCrimson,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
                             )
                         }
                     }

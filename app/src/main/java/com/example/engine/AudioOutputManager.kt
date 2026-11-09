@@ -519,6 +519,8 @@ object SpeechNormaliser {
         )
     }
 
+    private val LATIN_ALPHA_REGEX = Regex("[A-Za-z]")
+
     fun splitIntoLanguageRuns(
         speechText: String,
         fallbackLanguage: DetectedLanguage = DetectedLanguage.ENGLISH
@@ -527,11 +529,25 @@ object SpeechNormaliser {
         val tokens = speechText.split(" ")
         val runs = mutableListOf<LanguageRun>()
 
+        val hasAnyUrduInText = URDU_CHAR_REGEX.containsMatchIn(speechText)
+        val hasAnyLatinInText = LATIN_ALPHA_REGEX.containsMatchIn(speechText)
+        val defaultScriptIsUrdu = when {
+            hasAnyUrduInText && !hasAnyLatinInText -> true
+            !hasAnyUrduInText && hasAnyLatinInText -> false
+            else -> fallbackLanguage == DetectedLanguage.URDU_NASTALIQ
+        }
+
         var currentTokens = mutableListOf<String>()
         var currentIsUrdu: Boolean? = null
 
         for (token in tokens) {
-            val isTokenUrdu = URDU_CHAR_REGEX.containsMatchIn(token)
+            val hasUrdu = URDU_CHAR_REGEX.containsMatchIn(token)
+            val hasLatin = LATIN_ALPHA_REGEX.containsMatchIn(token)
+            val isTokenUrdu = when {
+                hasUrdu -> true
+                hasLatin -> false
+                else -> currentIsUrdu ?: defaultScriptIsUrdu
+            }
             if (currentIsUrdu == null || currentIsUrdu == isTokenUrdu) {
                 currentTokens.add(token)
                 currentIsUrdu = isTokenUrdu

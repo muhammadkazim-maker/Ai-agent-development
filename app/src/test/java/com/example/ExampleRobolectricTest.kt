@@ -6682,7 +6682,6 @@ class ExampleRobolectricTest {
 
             // Grant permission and test STARTING state before capture hardware confirms ready
             shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
-            liveEngine.autoConfirmCaptureReadyInTest = false
             val startedAfterGrant = vm.launchJarvisAndStartListening(
                 reason = "PERMISSION_GRANTED_LAUNCH_JARVIS",
                 voice = com.example.engine.GeminiLiveVoice.PUCK
@@ -6703,8 +6702,9 @@ class ExampleRobolectricTest {
                 coord.activeMicOwner.value
             )
 
-            // Confirm capture ready -> transitions to LISTENING with monotonic timestamp
-            liveEngine.markCaptureReady("TEST_SPEECH_RECOGNIZER_READY")
+            // Confirm capture ready via real RecognitionListener.onReadyForSpeech -> transitions to LISTENING with monotonic timestamp
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            liveEngine.activeRecognitionListenerForTest!!.onReadyForSpeech(android.os.Bundle())
             assertEquals(
                 com.example.engine.ObservedAssistantCaptureState.LISTENING,
                 vm.observedCaptureState.value
@@ -6718,7 +6718,6 @@ class ExampleRobolectricTest {
             // 2. IDEMPOTENT REPEATED LAUNCH TAPS & OPTIONAL BOTTOM MIC TAPS
             //    - Must not create duplicate sessions, duplicate recognizers, or >1 mic owner.
             // =========================================================================
-            liveEngine.autoConfirmCaptureReadyInTest = true
             val sessionStartsBeforeRepeat = liveEngine.liveSessionStartCount
             vm.launchJarvisAndStartListening(reason = "REPEAT_LAUNCH_TAP_1")
             vm.startGeminiLiveSession(com.example.engine.GeminiLiveVoice.PUCK)
@@ -7003,7 +7002,6 @@ class ExampleRobolectricTest {
         val ttsManager = vm.ttsManager
         liveEngine.endLiveSession()
         liveEngine.clearTurnReportsForTest()
-        liveEngine.autoConfirmCaptureReadyInTest = false
         liveEngine.liveAudioDeliveryTimeoutMs = 90L
         liveEngine.pcmPlaybackStallTimeoutMs = 120L
         liveEngine.audioTrackWriteInterceptorForTest = null
@@ -7618,6 +7616,638 @@ class ExampleRobolectricTest {
                 vm.isLiveSessionActive.value
             )
         } finally {
+            liveEngine.audioTrackWriteInterceptorForTest = null
+            com.omnivoice.agentfix.UiTools.resetTestHooks()
+            com.example.engine.AudioOutputManager.resetAll()
+            ttsManager.shutdown()
+        }
+    }
+
+    @Test
+    fun repairB_callbackDrivenCaptureSpeechRecoveryAndDiagnostics() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val shadowApp = org.robolectric.Shadows.shadowOf(context as android.app.Application)
+        shadowApp.grantPermissions(android.Manifest.permission.RECORD_AUDIO)
+
+        val coord = com.example.engine.AssistantAudioStateMachine.shared
+        coord.resetTelemetryCounters()
+        coord.notifyAssistantSpeechEnded(immediateCooldownClear = true, forceRelease = true)
+        com.example.engine.AssistantAudioStateMachine.isLocalAcousticWakeDetectorAvailable = false
+        com.example.engine.SpeechPreferenceStore.resetForTest(context)
+        com.example.engine.AudioOutputManager.resetAll()
+        com.omnivoice.agentfix.UiTools.resetTestHooks()
+
+        val vm = com.example.ui.viewmodel.VoiceAssistantViewModel(context as android.app.Application)
+        val liveEngine = vm.omniLiveEngine
+        val ttsManager = vm.ttsManager
+        liveEngine.endLiveSession()
+        liveEngine.clearTurnReportsForTest()
+        liveEngine.attachLiveWebSocketForTest(null, ready = false)
+
+        val adapterStartedGens = java.util.concurrent.CopyOnWriteArrayList<Long>()
+        val adapterStoppedGens = java.util.concurrent.CopyOnWriteArrayList<Long>()
+        val adapterListenersByGen = java.util.concurrent.ConcurrentHashMap<Long, android.speech.RecognitionListener>()
+        liveEngine.testSpeechCaptureAdapter = object : com.example.engine.SpeechCaptureAdapter {
+            override fun startListening(
+                intent: android.content.Intent,
+                listener: android.speech.RecognitionListener,
+                generation: Long
+            ) {
+                adapterStartedGens.add(generation)
+                adapterListenersByGen[generation] = listener
+            }
+
+            override fun stopListening(generation: Long) {
+                adapterStoppedGens.add(generation)
+            }
+
+            override fun cancel(generation: Long) {
+                adapterStoppedGens.add(generation)
+            }
+
+            override fun destroy(generation: Long) {
+                adapterStoppedGens.add(generation)
+            }
+        }
+
+        val spokenEngineCalls = java.util.concurrent.CopyOnWriteArrayList<Triple<String, String, Int>>()
+        ttsManager.setInitializedStateForTest(
+            initialized = true,
+            urduPkInstalled = true,
+            englishPkInstalled = true
+        )
+        ttsManager.initTimeoutMs = 2500L
+        ttsManager.startTimeoutMs = 2000L
+        ttsManager.completionTimeoutMs = 12000L
+        ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+            spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+            android.speech.tts.TextToSpeech.SUCCESS
+        }
+
+        fun buildSnapshot(
+            pkg: String,
+            label: String,
+            windowId: Int,
+            titleGuess: String,
+            drafts: Map<String, String> = emptyMap(),
+            nodes: List<com.omnivoice.agentfix.UiNodeSummary> = emptyList()
+        ): com.omnivoice.agentfix.ScreenSnapshot {
+            return com.omnivoice.agentfix.ScreenSnapshot(
+                timestampMs = System.currentTimeMillis(),
+                elapsedRealtimeMs = android.os.SystemClock.elapsedRealtime() + 10L,
+                packageName = pkg,
+                appLabel = label,
+                titleGuess = titleGuess,
+                nodes = nodes,
+                editableFields = emptyList(),
+                clickableLabels = nodes.filter { it.isClickable }.map { it.displayLabel() },
+                visibleTexts = nodes.map { it.text }.filter { it.isNotBlank() } + drafts.values,
+                visibleIcons = emptyList(),
+                windowId = windowId,
+                taskId = -1,
+                activityComponent = "$pkg.MainActivity",
+                visibleApplicationPackages = setOf(pkg),
+                editableFieldDrafts = drafts
+            )
+        }
+
+        var openAppCount = 0
+        var returnToOriginCount = 0
+        var screenPhase = "NOTEPAD_DRAFT_42"
+
+        com.omnivoice.agentfix.UiTools.testInstalledVariantsOverride = listOf(
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.whatsapp",
+                label = "WhatsApp",
+                profileType = "personal",
+                isBusinessVariant = false
+            ),
+            com.omnivoice.agentfix.InstalledAppVariant(
+                packageName = "com.example.notepad",
+                label = "Notepad",
+                profileType = "personal",
+                isBusinessVariant = false
+            )
+        )
+        com.omnivoice.agentfix.UiTools.testHomeActionHandler = {
+            screenPhase = "HOME_SCREEN"
+            true
+        }
+        com.omnivoice.agentfix.UiTools.testIconTapHandler = { node ->
+            if (node.text.equals("WhatsApp", ignoreCase = true)) {
+                openAppCount += 1
+                screenPhase = "WHATSAPP_FOREGROUND"
+                true
+            } else {
+                false
+            }
+        }
+        com.omnivoice.agentfix.UiTools.testBackActionHandler = {
+            returnToOriginCount += 1
+            screenPhase = "NOTEPAD_DRAFT_42"
+            true
+        }
+        com.omnivoice.agentfix.ScreenObserver.testSnapshotSupplier = { _ ->
+            when (screenPhase) {
+                "NOTEPAD_DRAFT_42" -> buildSnapshot(
+                    pkg = "com.example.notepad",
+                    label = "Notepad",
+                    windowId = 101,
+                    titleGuess = "Notepad - Draft 42",
+                    drafts = mapOf("editor_body" to "draft 42")
+                )
+                "HOME_SCREEN" -> buildSnapshot(
+                    pkg = "com.google.android.apps.nexuslauncher",
+                    label = "Pixel Launcher",
+                    windowId = 202,
+                    titleGuess = "Home",
+                    nodes = listOf(
+                        com.omnivoice.agentfix.UiNodeSummary(
+                            index = 1,
+                            viewId = "com.google.android.apps.nexuslauncher:id/icon",
+                            className = "android.widget.TextView",
+                            packageName = "com.google.android.apps.nexuslauncher",
+                            text = "WhatsApp",
+                            contentDescription = "WhatsApp",
+                            hintText = "",
+                            isClickable = true,
+                            isLongClickable = false,
+                            isEditable = false,
+                            isScrollable = false,
+                            isFocused = false,
+                            isEnabled = true,
+                            bounds = android.graphics.Rect(100, 400, 260, 580)
+                        )
+                    )
+                )
+                "WHATSAPP_FOREGROUND" -> buildSnapshot(
+                    pkg = "com.whatsapp",
+                    label = "WhatsApp",
+                    windowId = 303,
+                    titleGuess = "WhatsApp Chats"
+                )
+                else -> null
+            }
+        }
+
+        try {
+            // =========================================================================
+            // 1. NO SYNTHETIC READINESS + FINAL RESULT FOLLOWED BY DELAYED CANCEL ERROR
+            //    - Production startup must stay STARTING until onReadyForSpeech fires.
+            //    - Calling markCaptureReady() before onReadyForSpeech must NOT invent
+            //      isNativeRecognizerListening = true or mark capture ready.
+            //    - After onResults("WhatsApp kholo"), a delayed onError(ERROR_CLIENT)
+            //      from the retired recognizer must be ignored without breaking the turn.
+            // =========================================================================
+            vm.launchJarvisAndStartListening(reason = "REPAIR_B_LAUNCH")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+
+            val gen1 = liveEngine.activeCaptureGeneration
+            assertTrue("Capture generation must be positive", gen1 > 0L)
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.STARTING,
+                liveEngine.observedCaptureState.value
+            )
+            assertFalse(liveEngine.isCaptureCurrentlyReady())
+
+            // Direct markCaptureReady() without real onReadyForSpeech must be rejected
+            liveEngine.markCaptureReady("SYNTHETIC_CALL_WITHOUT_CALLBACK", generation = gen1)
+            assertFalse(
+                "markCaptureReady() must not invent isNativeRecognizerListening=true before onReadyForSpeech",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.STARTING,
+                liveEngine.observedCaptureState.value
+            )
+
+            // Fire real onReadyForSpeech via testSpeechCaptureAdapter listener
+            val listener1 = adapterListenersByGen[gen1]
+            assertNotNull("Test SpeechCaptureAdapter must receive listener for gen1", listener1)
+            listener1!!.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.LISTENING,
+                liveEngine.observedCaptureState.value
+            )
+
+            spokenEngineCalls.clear()
+            listener1.onBeginningOfSpeech()
+            listener1.onEndOfSpeech()
+            val results1 = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("WhatsApp kholo")
+                )
+            }
+            listener1.onResults(results1)
+
+            // Immediately fire delayed cancellation error onError(ERROR_CLIENT) on the same listener
+            val staleBeforeCancel = liveEngine.staleRecognitionCallbacksIgnoredCount
+            listener1.onError(android.speech.SpeechRecognizer.ERROR_CLIENT)
+            assertTrue(
+                "Delayed onError(ERROR_CLIENT) after onResults must be ignored as retired/stale",
+                liveEngine.staleRecognitionCallbacksIgnoredCount > staleBeforeCancel
+            )
+            assertEquals(
+                "Delayed ERROR_CLIENT after final result must not increment retry count",
+                0,
+                liveEngine.consecutiveRecognitionRetryCount
+            )
+
+            val turn1Deadline = System.currentTimeMillis() + 3_000L
+            while ((openAppCount == 0 || spokenEngineCalls.isEmpty()) &&
+                System.currentTimeMillis() < turn1Deadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertEquals("WhatsApp must open once on Turn 1", 1, openAppCount)
+            assertEquals("WHATSAPP_FOREGROUND", screenPhase)
+            assertEquals(
+                "Notes draft 42 must be snapshotted before opening WhatsApp",
+                "draft 42",
+                com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body")
+            )
+            assertTrue("Turn 1 must queue local TTS speech", spokenEngineCalls.isNotEmpty())
+            val utt1 = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(utt1)
+            ttsManager.handleUtteranceDone(utt1)
+
+            // Wait for automatic Turn 2 capture handoff (without touching mic)
+            val handoffToTurn2Deadline = System.currentTimeMillis() + 3_000L
+            while (liveEngine.activeCaptureGeneration <= gen1 &&
+                System.currentTimeMillis() < handoffToTurn2Deadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            val gen2 = liveEngine.activeCaptureGeneration
+            assertTrue(
+                "After Turn 1 TTS completes, Turn 2 capture must automatically start (gen2=$gen2 > gen1=$gen1)",
+                gen2 > gen1
+            )
+            assertTrue(
+                "Old gen1 recognizer must have been stopped and released before gen2 started",
+                adapterStoppedGens.contains(gen1)
+            )
+
+            // =========================================================================
+            // 2. NO-MATCH FOLLOWED BY A SUCCESSFUL RETRY & SECOND SPOKEN TURN WITHOUT
+            //    TOUCHING MIC
+            // =========================================================================
+            val listener2 = adapterListenersByGen[gen2]
+            assertNotNull("Turn 2 listener must be registered", listener2)
+            listener2!!.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+
+            // Deliver ERROR_NO_MATCH on Turn 2
+            listener2.onError(android.speech.SpeechRecognizer.ERROR_NO_MATCH)
+            assertEquals(1, liveEngine.consecutiveRecognitionRetryCount)
+            assertEquals(
+                android.speech.SpeechRecognizer.ERROR_NO_MATCH,
+                liveEngine.diagnosticSnapshot.value.recognitionErrorCode
+            )
+            assertEquals(
+                "ERROR_NO_MATCH",
+                liveEngine.diagnosticSnapshot.value.recognitionErrorName
+            )
+
+            // Wait for bounded retry capture generation (gen2Retry > gen2) to start automatically
+            val retryDeadline = System.currentTimeMillis() + 3_000L
+            while (liveEngine.activeCaptureGeneration <= gen2 &&
+                System.currentTimeMillis() < retryDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            val gen2Retry = liveEngine.activeCaptureGeneration
+            assertTrue(
+                "NO_MATCH in active conversation must perform a bounded automatic retry (gen2Retry=$gen2Retry > gen2=$gen2)",
+                gen2Retry > gen2
+            )
+
+            val listener2Retry = adapterListenersByGen[gen2Retry]
+            assertNotNull("Retry capture listener must be registered", listener2Retry)
+            listener2Retry!!.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+
+            spokenEngineCalls.clear()
+            listener2Retry.onBeginningOfSpeech()
+            listener2Retry.onEndOfSpeech()
+            val results2 = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("Uss previous screen par le kar jao jahan main pehle work kar raha tha")
+                )
+            }
+            listener2Retry.onResults(results2)
+
+            val turn2Deadline = System.currentTimeMillis() + 3_000L
+            while ((returnToOriginCount == 0 || spokenEngineCalls.isEmpty()) &&
+                System.currentTimeMillis() < turn2Deadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertEquals(
+                "Successful retry must reset consecutiveRecognitionRetryCount to 0",
+                0,
+                liveEngine.consecutiveRecognitionRetryCount
+            )
+            assertEquals("NOTEPAD_DRAFT_42", screenPhase)
+            assertEquals(1, returnToOriginCount)
+            assertEquals(
+                "Notes draft 42 must be preserved after return_to_origin on Turn 2",
+                "draft 42",
+                com.omnivoice.agentfix.UiTools.lastOriginTaskSnapshot?.draftTexts?.get("editor_body")
+            )
+            val utt2 = spokenEngineCalls.last().second
+            ttsManager.handleUtteranceStart(utt2)
+            ttsManager.handleUtteranceDone(utt2)
+
+            // Wait for Turn 3 capture to start after Turn 2 TTS finishes
+            val handoffToTurn3Deadline = System.currentTimeMillis() + 3_000L
+            while (liveEngine.activeCaptureGeneration <= gen2Retry &&
+                System.currentTimeMillis() < handoffToTurn3Deadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            val gen3 = liveEngine.activeCaptureGeneration
+            assertTrue("Turn 3 capture must start automatically", gen3 > gen2Retry)
+
+            // =========================================================================
+            // 3. STALE CLEANUP & STALE CALLBACK AFTER A NEW CAPTURE STARTS
+            //    - Old cleanup/callbacks from gen2Retry must NOT stop or mutate gen3.
+            // =========================================================================
+            val listener3 = adapterListenersByGen[gen3]!!
+            listener3.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.LISTENING,
+                liveEngine.observedCaptureState.value
+            )
+
+            // Attempt stale stop for old generation gen2Retry and stale callbacks on listener2Retry
+            liveEngine.stopNativeSpeechRecognizerLoop(expectedGeneration = gen2Retry)
+            listener2Retry.onError(android.speech.SpeechRecognizer.ERROR_CLIENT)
+            listener2Retry.onResults(results1)
+
+            assertEquals(
+                "Stale cleanup/callbacks must not change activeCaptureGeneration",
+                gen3,
+                liveEngine.activeCaptureGeneration
+            )
+            assertTrue(
+                "Stale cleanup/callbacks must not clear current capture readiness",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.LISTENING,
+                liveEngine.observedCaptureState.value
+            )
+
+            // =========================================================================
+            // 4. TTS INITIALIZATION TIMEOUT AND speak() FAILURE
+            //    - Must fail cleanly with real deadline, preserve error, restore capture
+            //      while session remains active, and NEVER rerun a completed device action.
+            // =========================================================================
+            // (a) TTS initialization timeout
+            ttsManager.setInitializedStateForTest(initialized = false, initFailed = false)
+            ttsManager.initTimeoutMs = 60L
+            spokenEngineCalls.clear()
+
+            listener3.onBeginningOfSpeech()
+            listener3.onEndOfSpeech()
+            val mathResults = android.os.Bundle().apply {
+                putStringArrayList(
+                    android.speech.SpeechRecognizer.RESULTS_RECOGNITION,
+                    arrayListOf("2 + 2 kya hota hai?")
+                )
+            }
+            listener3.onResults(mathResults)
+
+            val initTimeoutDeadline = System.currentTimeMillis() + 3_000L
+            while (
+                (!liveEngine.diagnosticSnapshot.value.ttsError.contains("TTS_INIT_TIMEOUT") ||
+                    liveEngine.activeCaptureGeneration <= gen3) &&
+                System.currentTimeMillis() < initTimeoutDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper(30, java.util.concurrent.TimeUnit.MILLISECONDS)
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertTrue(
+                "TTS initialization timeout must record TTS_INIT_TIMEOUT (actual=${liveEngine.diagnosticSnapshot.value.ttsError})",
+                liveEngine.diagnosticSnapshot.value.ttsError.contains("TTS_INIT_TIMEOUT")
+            )
+            assertFalse(
+                "Assistant speaking suppression must be released on TTS_INIT_TIMEOUT",
+                coord.isSelfTriggerSuppressed()
+            )
+            val genAfterInitTimeout = liveEngine.activeCaptureGeneration
+            assertTrue(
+                "Active session must restore capture after TTS_INIT_TIMEOUT (genAfter=$genAfterInitTimeout > gen3=$gen3)",
+                genAfterInitTimeout > gen3
+            )
+            assertTrue(
+                "Sticky error detail must remain visible after capture is restored",
+                liveEngine.captureErrorDetail.value.contains("TTS_INIT_TIMEOUT") ||
+                    liveEngine.diagnosticSnapshot.value.stickyErrorSummary.contains("TTS_INIT_TIMEOUT")
+            )
+
+            // Restore TTS initialization, test speak() failure on an action command ("WhatsApp kholo")
+            ttsManager.initTimeoutMs = 2500L
+            ttsManager.setInitializedStateForTest(
+                initialized = true,
+                urduPkInstalled = true,
+                englishPkInstalled = true
+            )
+            ttsManager.speakEngineInterceptorForTest = { _, _, _ ->
+                android.speech.tts.TextToSpeech.ERROR
+            }
+            screenPhase = "NOTEPAD_DRAFT_42"
+            val openAppBeforeSpeakFail = openAppCount
+
+            val listenerAfterInitTimeout = adapterListenersByGen[genAfterInitTimeout]!!
+            listenerAfterInitTimeout.onReadyForSpeech(android.os.Bundle())
+            listenerAfterInitTimeout.onBeginningOfSpeech()
+            listenerAfterInitTimeout.onEndOfSpeech()
+            listenerAfterInitTimeout.onResults(results1) // "WhatsApp kholo"
+
+            val speakFailDeadline = System.currentTimeMillis() + 3_000L
+            while (
+                (!liveEngine.diagnosticSnapshot.value.ttsError.contains("TTS_SPEAK_RETURNED_-1") ||
+                    liveEngine.activeCaptureGeneration <= genAfterInitTimeout) &&
+                System.currentTimeMillis() < speakFailDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            assertEquals(
+                "Completed device action must NEVER be rerun when TTS speak() fails",
+                openAppBeforeSpeakFail + 1,
+                openAppCount
+            )
+            assertTrue(
+                "speak() failure must record TTS_SPEAK_RETURNED_-1",
+                liveEngine.diagnosticSnapshot.value.ttsError.contains("TTS_SPEAK_RETURNED_-1")
+            )
+            val genAfterSpeakFail = liveEngine.activeCaptureGeneration
+            assertTrue(
+                "Active session must restore capture after speak() failure (gen=$genAfterSpeakFail > $genAfterInitTimeout)",
+                genAfterSpeakFail > genAfterInitTimeout
+            )
+            assertTrue(
+                "Sticky error must remain populated after capture restoration",
+                liveEngine.diagnosticSnapshot.value.stickyErrorSummary.contains("TTS_SPEAK_RETURNED_-1")
+            )
+
+            // Restore working TTS interceptor
+            ttsManager.speakEngineInterceptorForTest = { text, queueMode, utteranceId ->
+                spokenEngineCalls.add(Triple(text, utteranceId, queueMode))
+                android.speech.tts.TextToSpeech.SUCCESS
+            }
+
+            // =========================================================================
+            // 5. BOUNDED RECOGNITION RETRY EXHAUSTION (NO ENDLESS RESTART LOOP)
+            // =========================================================================
+            val listenerRetry1 = adapterListenersByGen[genAfterSpeakFail]!!
+            listenerRetry1.onReadyForSpeech(android.os.Bundle())
+            listenerRetry1.onError(android.speech.SpeechRecognizer.ERROR_NO_MATCH) // retry 1
+
+            val r1Deadline = System.currentTimeMillis() + 2_000L
+            while (liveEngine.activeCaptureGeneration <= genAfterSpeakFail && System.currentTimeMillis() < r1Deadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            val genRetry1 = liveEngine.activeCaptureGeneration
+            assertTrue(genRetry1 > genAfterSpeakFail)
+
+            val listenerRetry2 = adapterListenersByGen[genRetry1]!!
+            listenerRetry2.onReadyForSpeech(android.os.Bundle())
+            listenerRetry2.onError(android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT) // retry 2
+
+            val r2Deadline = System.currentTimeMillis() + 2_000L
+            while (liveEngine.activeCaptureGeneration <= genRetry1 && System.currentTimeMillis() < r2Deadline) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                Thread.sleep(20)
+            }
+            val genRetry2 = liveEngine.activeCaptureGeneration
+            assertTrue(genRetry2 > genRetry1)
+
+            // Third consecutive failure exceeds maxRecognitionRetriesPerTurn (2) -> must NOT restart
+            val listenerExhausted = adapterListenersByGen[genRetry2]!!
+            listenerExhausted.onReadyForSpeech(android.os.Bundle())
+            listenerExhausted.onError(android.speech.SpeechRecognizer.ERROR_NETWORK)
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            Thread.sleep(250)
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+
+            assertEquals(
+                "After bounded retries are exhausted, no new capture generation may start",
+                genRetry2,
+                adapterStartedGens.last()
+            )
+            assertEquals(
+                "Exhausted recognizer generation must be retired (activeCaptureGeneration == 0L)",
+                0L,
+                liveEngine.activeCaptureGeneration
+            )
+            assertFalse(
+                "Capture must not claim ready after retry exhaustion",
+                liveEngine.isCaptureCurrentlyReady()
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.ERROR,
+                liveEngine.observedCaptureState.value
+            )
+
+            // =========================================================================
+            // 6. STOP/MUTE PREVENTING AUTOMATIC RESTART & REDACTED DIAGNOSTIC SNAPSHOT
+            // =========================================================================
+            vm.launchJarvisAndStartListening(reason = "RELAUNCH_FOR_MUTE_AND_STOP")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            val genBeforeMute = liveEngine.activeCaptureGeneration
+            adapterListenersByGen[genBeforeMute]?.onReadyForSpeech(android.os.Bundle())
+            assertTrue(liveEngine.isCaptureCurrentlyReady())
+
+            // Mute -> must stop capture and prevent automatic restart
+            vm.toggleLiveMicMute()
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.MUTED,
+                liveEngine.observedCaptureState.value
+            )
+            assertFalse(liveEngine.isCaptureCurrentlyReady())
+            val genWhileMuted = liveEngine.activeCaptureGeneration
+            liveEngine.handoffToPostTurnCapture("TEST_HANDOFF_WHILE_MUTED")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            assertEquals(
+                "Post-turn handoff must NOT restart capture while muted",
+                genWhileMuted,
+                liveEngine.activeCaptureGeneration
+            )
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.MUTED,
+                liveEngine.observedCaptureState.value
+            )
+
+            // Unmute, trigger an error with a fake secret in detail, then Stop
+            vm.toggleLiveMicMute()
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            val genAfterUnmute = liveEngine.activeCaptureGeneration
+            adapterListenersByGen[genAfterUnmute]?.onReadyForSpeech(android.os.Bundle())
+            adapterListenersByGen[genAfterUnmute]?.onError(android.speech.SpeechRecognizer.ERROR_AUDIO)
+            liveEngine.setStickyCaptureError("ERROR_AUDIO with token AIzaSySecretKey1234567890")
+
+            // Explicit Stop -> transitions to IDLE and prevents automatic restart, while keeping sticky error visible
+            vm.stopAllWakeAndSpeechAndPinToDevice()
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            assertEquals(
+                com.example.engine.ObservedAssistantCaptureState.IDLE,
+                liveEngine.observedCaptureState.value
+            )
+            val genAfterStop = liveEngine.activeCaptureGeneration
+            liveEngine.handoffToPostTurnCapture("TEST_HANDOFF_AFTER_STOP")
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            assertEquals(
+                "Post-turn handoff must NOT restart capture after explicit Stop",
+                genAfterStop,
+                liveEngine.activeCaptureGeneration
+            )
+
+            val snap = vm.liveDiagnosticSnapshot.value
+            val copyText = snap.toRedactedCopyText()
+            assertEquals(
+                com.example.engine.OmniLiveSessionEngine.BUILD_COMMIT_ID,
+                snap.buildCommitId
+            )
+            assertTrue(copyText.contains("commit=1599cab37fbb53d25e5f1767f502bf145192e5af"))
+            assertTrue(copyText.contains("recognitionError=ERROR_AUDIO(3)"))
+            assertTrue(copyText.contains("captureGeneration="))
+            assertTrue(copyText.contains("decision="))
+            assertTrue(copyText.contains("commandId="))
+            assertTrue(copyText.contains("outputProvider="))
+            assertTrue(copyText.contains("ttsState="))
+            assertTrue(copyText.contains("ttsError="))
+            assertTrue(copyText.contains("pcmProgress="))
+            assertTrue(copyText.contains("lastError="))
+            assertTrue(
+                "Sticky error must remain visible even after session changes to IDLE",
+                snap.stickyErrorSummary.isNotBlank() && liveEngine.captureErrorDetail.value.isNotBlank()
+            )
+            assertFalse(
+                "Diagnostic copy text must redact API keys/secrets",
+                copyText.contains("AIzaSySecretKey1234567890")
+            )
+            assertTrue(
+                "Diagnostic copy text must replace secret with [REDACTED_KEY]",
+                copyText.contains("[REDACTED_KEY]")
+            )
+        } finally {
+            liveEngine.testSpeechCaptureAdapter = null
             liveEngine.audioTrackWriteInterceptorForTest = null
             com.omnivoice.agentfix.UiTools.resetTestHooks()
             com.example.engine.AudioOutputManager.resetAll()
